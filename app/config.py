@@ -44,6 +44,8 @@ DEFAULTS: dict[str, Any] = {
     "capture_path": "",                # 截图/GIF 保存目录（空=自动：视频所在文件夹，不行则 exe 旁）
     "remember_scroll": True,           # 切换回之前访问过的文件夹时恢复滚动位置
     "language": "",                    # ""=未选择(首启弹窗) | zh | en
+    "tree_sort_key": "name",           # 左侧目录树排序: name | mtime | size
+    "tree_sort_desc": False,
 }
 
 # Videos shorter than this are never resumed; nor are ones watched to the end.

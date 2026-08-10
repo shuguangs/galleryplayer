@@ -393,9 +393,43 @@ class MainWindow(QMainWindow):
         self._tree_layout = QVBoxLayout(wrap)
         self._tree_layout.setContentsMargins(0, 0, 0, 0)
         self._tree_layout.setSpacing(0)
+
+        # ---- sort bar for the folder tree itself (independent of the media sort)
+        bar = QWidget()
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(6, 4, 6, 2)
+        bl.setSpacing(4)
+        self.tree_sort_combo = icons.ArrowComboBox()
+        for key in ("name", "mtime", "size"):
+            self.tree_sort_combo.addItem(t(media.SORT_LABELS[key]), key)
+        idx = self.tree_sort_combo.findData(str(settings["tree_sort_key"]))
+        self.tree_sort_combo.setCurrentIndex(max(0, idx))
+        self.tree_sort_combo.currentIndexChanged.connect(self._apply_tree_sort)
+        bl.addWidget(self.tree_sort_combo)
+        self.tree_sort_desc = _icon_button(
+            icons.SORT_ASC, t("main_window.sort_toggle_tip"), 24, checkable=True
+        )
+        self.tree_sort_desc.setChecked(bool(settings["tree_sort_desc"]))
+        self.tree_sort_desc.clicked.connect(self._apply_tree_sort)
+        bl.addWidget(self.tree_sort_desc)
+        bl.addStretch(1)
+        self._tree_layout.addWidget(bar)
+
         self.fs_model: QFileSystemModel | None = None
         self.tree: QTreeView | None = None
         return wrap
+
+    def _apply_tree_sort(self) -> None:
+        """Sort the folder tree by the selected column (hidden columns are fine)."""
+        key = self.tree_sort_combo.currentData() or "name"
+        desc = self.tree_sort_desc.isChecked()
+        col = {"name": 0, "size": 1, "mtime": 3}.get(key, 0)
+        if self.fs_model is not None:
+            self.fs_model.sort(
+                col, Qt.DescendingOrder if desc else Qt.AscendingOrder
+            )
+        settings["tree_sort_key"] = key
+        settings["tree_sort_desc"] = desc
 
     def _materialize_tree(self) -> None:
         if self.tree is not None:
@@ -418,6 +452,7 @@ class MainWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self._tree_menu)
         self._tree_layout.addWidget(self.tree)
+        self._apply_tree_sort()
         if self.folder:
             self._sync_tree(self.folder)
 
