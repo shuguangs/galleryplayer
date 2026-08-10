@@ -25,13 +25,16 @@ USERDATA_DIR = APP_DIR / "userdata"
 
 def init_libmpv() -> None:
     """Make the bundled libmpv discoverable. Raises with a clear message if absent."""
+    from .i18n import t  # deferred: i18n -> config -> runtime would be circular
+
     dll = VENDOR_DIR / "libmpv-2.dll"
     if not dll.exists():
         raise RuntimeError(
-            f"找不到 {dll}\n"
-            "请把 libmpv-2.dll 放到 vendor 目录下。\n"
-            "下载地址：https://github.com/shinchiro/mpv-winbuild-cmake/releases "
-            "（选 mpv-dev-x86_64-*.7z，解压后取 libmpv-2.dll）"
+            t("runtime.libmpv_missing").format(dll=dll)
+            + "\n"
+            + t("runtime.libmpv_vendor")
+            + "\n"
+            + t("runtime.libmpv_download")
         )
     os.environ["PATH"] = str(VENDOR_DIR) + os.pathsep + os.environ.get("PATH", "")
     if hasattr(os, "add_dll_directory"):

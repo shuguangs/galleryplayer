@@ -30,15 +30,20 @@ IMAGE_EXTS = {
 ANIMATED_EXTS = {".gif", ".webp", ".apng", ".png"}
 MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
 
+# Values are i18n keys; consumers must render them via t() (see main_window.py).
 SORT_LABELS = {
-    "name": "名称",
-    "mtime": "修改时间",
-    "size": "文件大小",
-    "duration": "时长",
-    "random": "随机",
-    "custom": "自定义",
+    "name": "media.sort_name",
+    "mtime": "media.sort_mtime",
+    "size": "media.sort_size",
+    "duration": "media.sort_duration",
+    "random": "media.sort_random",
+    "custom": "media.sort_custom",
 }
-FILTER_LABELS = {"all": "全部", "image": "仅图片", "video": "仅视频"}
+FILTER_LABELS = {
+    "all": "media.filter_all",
+    "image": "media.filter_image",
+    "video": "media.filter_video",
+}
 
 _natkey = natsort_keygen(alg=ns.IGNORECASE | ns.PATH)
 

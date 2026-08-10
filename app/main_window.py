@@ -41,6 +41,7 @@ from . import dircache, fileops, icons, media, theme
 from .albums import albums, orders
 from .browser import DetailsView, MediaModel, TileView
 from .config import flush, settings
+from .i18n import t
 from .thumbs import ThumbnailCache
 from .welcome import WelcomePage, remember_recent
 
@@ -181,7 +182,7 @@ class _ScanTask(QRunnable):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("媒体播放器")
+        self.setWindowTitle(t("main_window.title"))
         self.resize(1360, 850)
         self.setAcceptDrops(True)
 
@@ -281,25 +282,25 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(9, 6, 9, 6)
         lay.setSpacing(7)
 
-        btn_open = _icon_button(icons.FOLDER_OPEN + "  打开文件夹", "选择文件夹  (Ctrl+O)", 118)
+        btn_open = _icon_button(icons.FOLDER_OPEN + "  " + t("main_window.open_folder"), t("main_window.choose_folder_tip"), 118)
         btn_open.clicked.connect(self._choose_folder)
         lay.addWidget(btn_open)
 
-        btn_up = _icon_button(icons.LEVEL_UP, "上一级目录  (Backspace)")
+        btn_up = _icon_button(icons.LEVEL_UP, t("main_window.go_up_tip"))
         btn_up.clicked.connect(self._go_up)
         lay.addWidget(btn_up)
 
-        self.btn_back = _icon_button(icons.CHEVRON_LEFT, "返回上一个文件夹  (Alt+←)")
+        self.btn_back = _icon_button(icons.CHEVRON_LEFT, t("main_window.back_tip"))
         self.btn_back.clicked.connect(self._nav_back)
         self.btn_back.setEnabled(False)
         lay.addWidget(self.btn_back)
 
-        self.btn_forward = _icon_button(icons.CHEVRON_RIGHT, "前进到下一个文件夹  (Alt+→)")
+        self.btn_forward = _icon_button(icons.CHEVRON_RIGHT, t("main_window.forward_tip"))
         self.btn_forward.clicked.connect(self._nav_forward)
         self.btn_forward.setEnabled(False)
         lay.addWidget(self.btn_forward)
 
-        btn_refresh = _icon_button(icons.REFRESH, "重新扫描  (F5)")
+        btn_refresh = _icon_button(icons.REFRESH, t("main_window.rescan_tip"))
         btn_refresh.clicked.connect(lambda: self.set_folder(self.folder, force=True))
         lay.addWidget(btn_refresh)
 
@@ -307,66 +308,66 @@ class MainWindow(QMainWindow):
 
         self.view_buttons: dict[str, QToolButton] = {}
         for mode, glyph, tip in (
-            ("grid", icons.VIEW_GRID, "网格视图  (Ctrl+1)"),
-            ("waterfall", icons.VIEW_TILES, "瀑布流，保持原始比例  (Ctrl+2)"),
-            ("list", icons.VIEW_LIST, "详情列表  (Ctrl+3)"),
+            ("grid", icons.VIEW_GRID, t("main_window.view_grid_tip")),
+            ("waterfall", icons.VIEW_TILES, t("main_window.view_waterfall_tip")),
+            ("list", icons.VIEW_LIST, t("main_window.view_list_tip")),
         ):
             b = _icon_button(glyph, tip, 34, checkable=True)
             b.clicked.connect(lambda _=False, m=mode: self.set_view_mode(m))
             lay.addWidget(b)
             self.view_buttons[mode] = b
 
-        self.col_label = QLabel("列数")
+        self.col_label = QLabel(t("main_window.columns"))
         self.col_label.setObjectName("Hint")
         lay.addWidget(self.col_label)
         self.col_slider = QSlider(Qt.Horizontal)
         self.col_slider.setRange(1, 12)
         self.col_slider.setFixedWidth(96)
-        self.col_slider.setToolTip("每行数量（Ctrl+滚轮也可调）")
+        self.col_slider.setToolTip(t("main_window.columns_tip"))
         self.col_slider.valueChanged.connect(self._on_columns_changed)
         lay.addWidget(self.col_slider)
 
         lay.addWidget(_sep())
 
-        lay.addWidget(QLabel("排序"))
+        lay.addWidget(QLabel(t("main_window.sort")))
         self.sort_combo = icons.ArrowComboBox()
         for key, label in media.SORT_LABELS.items():
-            self.sort_combo.addItem(label, key)
+            self.sort_combo.addItem(t(label), key)
         self.sort_combo.currentIndexChanged.connect(self._on_sort_changed)
         lay.addWidget(self.sort_combo)
 
-        self.btn_desc = _icon_button(icons.SORT_ASC, "升序 / 降序", 30, checkable=True)
+        self.btn_desc = _icon_button(icons.SORT_ASC, t("main_window.sort_toggle_tip"), 30, checkable=True)
         self.btn_desc.clicked.connect(self._on_sort_changed)
         lay.addWidget(self.btn_desc)
 
         self.filter_combo = icons.ArrowComboBox()
         for key, label in media.FILTER_LABELS.items():
-            self.filter_combo.addItem(label, key)
+            self.filter_combo.addItem(t(label), key)
         # wrapped: the signal's own argument must not land in _apply_view(count_suffix)
         self.filter_combo.currentIndexChanged.connect(lambda _=0: self._apply_view())
         lay.addWidget(self.filter_combo)
 
         self.btn_recursive = QToolButton()
-        self.btn_recursive.setText("含子文件夹")
+        self.btn_recursive.setText(t("main_window.recursive"))
         self.btn_recursive.setCheckable(True)
-        self.btn_recursive.setToolTip("把所有子文件夹里的媒体一并平铺进来")
+        self.btn_recursive.setToolTip(t("main_window.recursive_tip"))
         self.btn_recursive.clicked.connect(self._on_recursive_toggled)
         lay.addWidget(self.btn_recursive)
 
         lay.addStretch(1)
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("搜索文件名…  (Ctrl+F)")
+        self.search.setPlaceholderText(t("main_window.search_placeholder"))
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(190)
         self.search.textChanged.connect(lambda _="": self._apply_view())
         lay.addWidget(self.search)
 
-        self.btn_tree = _icon_button(icons.SIDEBAR, "显示 / 隐藏目录树  (Ctrl+B)", 32, checkable=True)
+        self.btn_tree = _icon_button(icons.SIDEBAR, t("main_window.tree_toggle_tip"), 32, checkable=True)
         self.btn_tree.clicked.connect(self._toggle_tree)
         lay.addWidget(self.btn_tree)
 
-        btn_settings = _icon_button(icons.SETTINGS, "设置  (Ctrl+,)", 32)
+        btn_settings = _icon_button(icons.SETTINGS, t("main_window.settings_tip"), 32)
         # The Fluent/MDL2 gear glyph (E713) is taller than the em box, so at the
         # toolbar's 14px icon size Qt clips its top and bottom to the text line box.
         # A slightly smaller size keeps the whole gear inside the line box.
@@ -376,7 +377,7 @@ class MainWindow(QMainWindow):
         btn_settings.clicked.connect(self._show_settings)
         lay.addWidget(btn_settings)
 
-        btn_help = _icon_button(icons.HELP, "使用说明 / 快捷键  (F1)", 32)
+        btn_help = _icon_button(icons.HELP, t("main_window.help_tip"), 32)
         btn_help.clicked.connect(self._show_help)
         lay.addWidget(btn_help)
         return bar
@@ -509,7 +510,7 @@ class MainWindow(QMainWindow):
 
     def _choose_folder(self) -> None:
         start = str(self.folder) if self.folder else ""
-        d = QFileDialog.getExistingDirectory(self, "选择文件夹", start)
+        d = QFileDialog.getExistingDirectory(self, t("main_window.choose_folder_dialog"), start)
         if d:
             self.set_folder(Path(d))
 
@@ -530,9 +531,9 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.welcome)
         self.col_slider.setVisible(False)
         self.col_label.setVisible(False)
-        self.status_path.setText("未打开文件夹")
+        self.status_path.setText(t("main_window.no_folder"))
         self.status_count.setText("")
-        self.setWindowTitle("媒体播放器")
+        self.setWindowTitle(t("main_window.title"))
 
     def _show_browser(self) -> None:
         """Leave the welcome page for whichever view mode is selected."""
@@ -641,43 +642,43 @@ class MainWindow(QMainWindow):
         item = self.model.item(row)
 
         if item is not None:
-            act = menu.addAction("打开")
+            act = menu.addAction(t("main_window.open"))
             act.triggered.connect(lambda _=False, r=row: self._open_viewer(r))
-            menu.addAction("用默认程序打开").triggered.connect(
+            menu.addAction(t("main_window.open_default")).triggered.connect(
                 lambda _=False, p=item.path: fileops.open_default(p)
             )
             menu.addSeparator()
-            native = menu.addAction("按原尺寸打开")
+            native = menu.addAction(t("main_window.open_native"))
             native.setCheckable(True)
             native.setChecked(bool(settings["open_native_size"]))
-            native.setToolTip("勾选后，打开视频时窗口自动匹配视频原始分辨率，而不是最大化")
+            native.setToolTip(t("main_window.open_native_tip"))
             native.triggered.connect(
                 lambda checked: settings.__setitem__("open_native_size", checked)
             )
             menu.addSeparator()
-            menu.addAction("在资源管理器中显示").triggered.connect(
+            menu.addAction(t("main_window.reveal_in_explorer")).triggered.connect(
                 lambda _=False, p=item.path: fileops.reveal(p)
             )
-            menu.addAction("复制完整路径").triggered.connect(
+            menu.addAction(t("main_window.copy_path")).triggered.connect(
                 lambda _=False, p=item.path: fileops.copy_to_clipboard(str(p))
             )
-            menu.addAction("复制文件名").triggered.connect(
+            menu.addAction(t("main_window.copy_name")).triggered.connect(
                 lambda _=False, p=item.path: fileops.copy_to_clipboard(p.name)
             )
             menu.addSeparator()
-            menu.addAction("重命名…").triggered.connect(
+            menu.addAction(t("main_window.rename")).triggered.connect(
                 lambda _=False, p=item.path: self._rename_media(p)
             )
-            menu.addAction("删除到回收站…").triggered.connect(
+            menu.addAction(t("main_window.recycle")).triggered.connect(
                 lambda _=False, p=item.path: self._recycle_media([p])
             )
             menu.addSeparator()
 
         if self.folder is not None:
-            menu.addAction("打开所在文件夹").triggered.connect(
+            menu.addAction(t("main_window.open_containing_folder")).triggered.connect(
                 lambda _=False, f=self.folder: fileops.open_folder(f)
             )
-            menu.addAction("重新扫描  (F5)").triggered.connect(
+            menu.addAction(t("main_window.rescan")).triggered.connect(
                 lambda: self.set_folder(self.folder, force=True)
             )
         return menu
@@ -715,26 +716,26 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         if idx.isValid():
             folder = Path(self.fs_model.filePath(idx))
-            menu.addAction("在此浏览").triggered.connect(
+            menu.addAction(t("main_window.browse_here")).triggered.connect(
                 lambda _=False, f=folder: self.set_folder(f)
             )
-            menu.addAction("在资源管理器中打开").triggered.connect(
+            menu.addAction(t("main_window.open_in_explorer")).triggered.connect(
                 lambda _=False, f=folder: fileops.open_folder(f)
             )
             menu.addSeparator()
-            menu.addAction("复制路径").triggered.connect(
+            menu.addAction(t("main_window.copy_folder_path")).triggered.connect(
                 lambda _=False, f=folder: fileops.copy_to_clipboard(str(f))
             )
             # A drive root has no name to change, and renaming one is not a thing.
             if folder.parent != folder:
-                menu.addAction("重命名…").triggered.connect(
+                menu.addAction(t("main_window.rename")).triggered.connect(
                     lambda _=False, f=folder: self._rename_folder(f)
                 )
             menu.addSeparator()
-            menu.addAction("重新扫描这个文件夹").triggered.connect(
+            menu.addAction(t("main_window.rescan_folder")).triggered.connect(
                 lambda _=False, f=folder: self._rescan_folder(f)
             )
-        menu.addAction("折叠全部").triggered.connect(self.tree.collapseAll)
+        menu.addAction(t("main_window.collapse_all")).triggered.connect(self.tree.collapseAll)
         return menu
 
     def _rename_folder(self, folder: Path) -> None:
@@ -776,7 +777,7 @@ class MainWindow(QMainWindow):
         self.thumbs.invalidate_queue()
         self.thumbs.trim_memory(600)
         self.status_path.setText(str(folder))
-        self.setWindowTitle(f"{folder.name or str(folder)} — 媒体播放器")
+        self.setWindowTitle(t("main_window.title_with_folder").format(folder=folder.name or str(folder)))
         self._show_browser()
         self._remember_recent(folder)
         self._sync_tree(folder)
@@ -790,7 +791,7 @@ class MainWindow(QMainWindow):
         self._stream_timer.setInterval(self.STREAM_MIN_INTERVAL)
         self.all_items = []
         self.model.set_items([])
-        self.status_count.setText("扫描中…")
+        self.status_count.setText(t("main_window.scanning"))
 
         # One task, two phases: rebuild from cache with zero filesystem I/O so a folder
         # opened before is on screen at once, then the authoritative level-order pass in
@@ -815,10 +816,12 @@ class MainWindow(QMainWindow):
         """
         n = len(self._stream_items)
         if stats is None:
-            return "正在扫描…"
-        text = f"正在扫描…　已找到 {n} 项　·　目录 {stats.dirs_total}/{stats.dirs_found}"
+            return t("main_window.scanning_now")
+        text = t("main_window.scan_progress").format(
+            n=n, dirs_total=stats.dirs_total, dirs_found=stats.dirs_found
+        )
         if stats.levels > 1:
-            text += f"　·　第 {stats.levels} 层"
+            text += t("main_window.scan_level").format(levels=stats.levels)
         return text
 
     def _on_scan_batch(
@@ -849,7 +852,7 @@ class MainWindow(QMainWindow):
             self._stream_items = []
             self.all_items = items
             self._random_seed = random.randrange(1 << 30)
-            self._apply_view(count_suffix="　·　正在核对…")
+            self._apply_view(count_suffix=t("main_window.verifying_suffix"))
             return
 
         self._stream_items.extend(items)
@@ -871,7 +874,9 @@ class MainWindow(QMainWindow):
         self._random_seed = random.randrange(1 << 30)
         suffix = ""
         if stats is not None and stats.dirs_reused:
-            suffix = f"　·　{stats.dirs_reused}/{stats.dirs_total} 个目录来自缓存"
+            suffix = t("main_window.cache_hit_suffix").format(
+                reused=stats.dirs_reused, total=stats.dirs_total
+            )
         self._apply_view(count_suffix=suffix)
 
         # A folder picked from the panel's browser tab keeps playback going: hand the
@@ -902,7 +907,7 @@ class MainWindow(QMainWindow):
             return
         started = time.perf_counter()
         self.all_items = list(self._stream_items)
-        self._apply_view(count_suffix="　·　正在扫描…")
+        self._apply_view(count_suffix=t("main_window.scanning_suffix"))
         elapsed_ms = (time.perf_counter() - started) * 1000
         self._stream_timer.setInterval(
             int(min(self.STREAM_MAX_INTERVAL, max(self.STREAM_MIN_INTERVAL, elapsed_ms * 3)))
@@ -927,7 +932,9 @@ class MainWindow(QMainWindow):
         self._restore_scroll_pos()
         n_img = sum(1 for i in items if not i.is_video)
         self.status_count.setText(
-            f"{len(items)} 项　·　图片 {n_img}　·　视频 {len(items) - n_img}{count_suffix}"
+            t("main_window.item_count").format(
+                count=len(items), images=n_img, videos=len(items) - n_img, suffix=count_suffix
+            )
         )
         if keep_path is not None:
             for i, it in enumerate(items):

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from . import icons
 from .config import settings
+from .i18n import t
 from .media import format_duration
 from .mpv_widget import Track
 from .seekbar import SeekBar
@@ -32,11 +33,11 @@ class _EqPanel(QWidget):
     reset = Signal()
 
     ROWS = [
-        ("brightness", "亮度"),
-        ("contrast", "对比度"),
-        ("saturation", "饱和度"),
-        ("gamma", "伽马"),
-        ("hue", "色相"),
+        ("brightness", t("controls.eq_brightness")),
+        ("contrast", t("controls.eq_contrast")),
+        ("saturation", t("controls.eq_saturation")),
+        ("gamma", t("controls.eq_gamma")),
+        ("hue", t("controls.eq_hue")),
     ]
 
     def __init__(self, parent=None) -> None:
@@ -67,7 +68,7 @@ class _EqPanel(QWidget):
             lay.addLayout(r)
             self.sliders[name] = s
             self.vals[name] = val
-        btn = QPushButton("复位")
+        btn = QPushButton(t("controls.eq_reset"))
         btn.setFocusPolicy(Qt.NoFocus)
         btn.clicked.connect(self._do_reset)
         lay.addWidget(btn)
@@ -197,7 +198,7 @@ class TopBar(QWidget):
         self.counter.setObjectName("OverlayDim")
         lay.addWidget(self.counter)
 
-        btn_close = _overlay_button(icons.CLOSE, "关闭  (Esc)", icon=True)
+        btn_close = _overlay_button(icons.CLOSE, t("controls.close"), icon=True)
         btn_close.clicked.connect(self.close_clicked)
         lay.addWidget(btn_close)
 
@@ -265,15 +266,15 @@ class ControlBar(QWidget):
         row.setSpacing(6)
         root.addLayout(row)
 
-        self.btn_play = _overlay_button(icons.PLAY, "播放 / 暂停  (空格)", icon=True)
+        self.btn_play = _overlay_button(icons.PLAY, t("controls.play_pause"), icon=True)
         self.btn_play.clicked.connect(self.play_pause)
         row.addWidget(self.btn_play)
 
-        self.btn_prev = _overlay_button(icons.PREVIOUS, "上一个  (PageUp / 滚轮上)", icon=True)
+        self.btn_prev = _overlay_button(icons.PREVIOUS, t("controls.previous"), icon=True)
         self.btn_prev.clicked.connect(self.prev_media)
         row.addWidget(self.btn_prev)
 
-        self.btn_next = _overlay_button(icons.NEXT, "下一个  (PageDown / 滚轮下)", icon=True)
+        self.btn_next = _overlay_button(icons.NEXT, t("controls.next"), icon=True)
         self.btn_next.clicked.connect(self.next_media)
         row.addWidget(self.btn_next)
 
@@ -287,8 +288,8 @@ class ControlBar(QWidget):
         # ---- image-only controls
         self.img_widgets: list[QWidget] = []
         for glyph, tip, sig in (
-            (icons.ZOOM_OUT, "缩小  (Ctrl+滚轮 / -)", lambda: self.zoom_step.emit(-2)),
-            (icons.ZOOM_IN, "放大  (Ctrl+滚轮 / +)", lambda: self.zoom_step.emit(2)),
+            (icons.ZOOM_OUT, t("controls.zoom_out"), lambda: self.zoom_step.emit(-2)),
+            (icons.ZOOM_IN, t("controls.zoom_in"), lambda: self.zoom_step.emit(2)),
         ):
             b = _overlay_button(glyph, tip, icon=True)
             b.clicked.connect(sig)
@@ -302,12 +303,12 @@ class ControlBar(QWidget):
         row.addWidget(self.zoom_label)
         self.img_widgets.append(self.zoom_label)
 
-        b = _overlay_button(icons.FIT_PAGE, "适应窗口 / 原始大小  (双击画面)", icon=True)
+        b = _overlay_button(icons.FIT_PAGE, t("controls.fit_actual"), icon=True)
         b.clicked.connect(self.zoom_fit)
         row.addWidget(b)
         self.img_widgets.append(b)
 
-        b = _overlay_button(icons.ROTATE, "旋转 90°  (R，Shift+R 反向)", icon=True)
+        b = _overlay_button(icons.ROTATE, t("controls.rotate"), icon=True)
         b.clicked.connect(lambda: self.rotate_requested.emit(90))
         row.addWidget(b)
         self.img_widgets.append(b)
@@ -315,55 +316,55 @@ class ControlBar(QWidget):
         # ---- video-only controls
         self.vid_widgets: list[QWidget] = []
 
-        self.btn_speed = _overlay_button("1.0×", "播放速度  ([ / ] 调整，\\ 复位)", 56)
+        self.btn_speed = _overlay_button("1.0×", t("controls.speed_tip"), 56)
         self.btn_speed.setPopupMode(QToolButton.InstantPopup)
         self.btn_speed.setMenu(self._build_speed_menu())
         row.addWidget(self.btn_speed)
         self.vid_widgets.append(self.btn_speed)
 
-        self.btn_hwdec = _overlay_button("硬解", "解码模式  (硬解/软解切换)", 44)
+        self.btn_hwdec = _overlay_button(t("controls.hwdec_btn"), t("controls.hwdec_tip"), 44)
         self.btn_hwdec.setPopupMode(QToolButton.InstantPopup)
         self.btn_hwdec.setMenu(self._build_hwdec_menu())
         row.addWidget(self.btn_hwdec)
         self.vid_widgets.append(self.btn_hwdec)
 
-        self.btn_sub = _overlay_button("字幕", "字幕轨 / 字号 / 延迟  (V 显隐，J 切换)", 44)
+        self.btn_sub = _overlay_button(t("controls.sub_btn"), t("controls.sub_tip"), 44)
         self.btn_sub.setPopupMode(QToolButton.InstantPopup)
         self.btn_sub.setMenu(QMenu(self))
         self.btn_sub.menu().aboutToShow.connect(self._fill_sub_menu)
         row.addWidget(self.btn_sub)
         self.vid_widgets.append(self.btn_sub)
 
-        self.btn_audio = _overlay_button("音轨", "音轨切换  (A)", 44)
+        self.btn_audio = _overlay_button(t("controls.audio_btn"), t("controls.audio_tip"), 44)
         self.btn_audio.setPopupMode(QToolButton.InstantPopup)
         self.btn_audio.setMenu(QMenu(self))
         self.btn_audio.menu().aboutToShow.connect(self._fill_audio_menu)
         row.addWidget(self.btn_audio)
         self.vid_widgets.append(self.btn_audio)
 
-        self.btn_shot = _overlay_button("截图", "截取当前画面为 PNG  (S)", 44)
+        self.btn_shot = _overlay_button(t("controls.screenshot_btn"), t("controls.screenshot_tip"), 44)
         self.btn_shot.clicked.connect(self.screenshot_requested)
         row.addWidget(self.btn_shot)
         self.vid_widgets.append(self.btn_shot)
 
-        self.btn_gif = _overlay_button("GIF", "录制 GIF：开始 / 停止  (G)", 44)
+        self.btn_gif = _overlay_button("GIF", t("controls.gif_tip"), 44)
         self.btn_gif.setCheckable(True)
         self.btn_gif.clicked.connect(self.gif_toggle_requested)
         row.addWidget(self.btn_gif)
         self.vid_widgets.append(self.btn_gif)
 
-        self.btn_eq = _overlay_button("画面", "画面调节：亮度 / 对比 / 饱和 / 伽马 / 色相", 44)
+        self.btn_eq = _overlay_button(t("controls.eq_btn"), t("controls.eq_tip"), 44)
         self.btn_eq.setPopupMode(QToolButton.InstantPopup)
         self.btn_eq.setMenu(self._build_eq_menu())
         row.addWidget(self.btn_eq)
         self.vid_widgets.append(self.btn_eq)
 
-        self.btn_loop = _overlay_button(icons.REPEAT_ALL, "循环模式  (L)", icon=True)
+        self.btn_loop = _overlay_button(icons.REPEAT_ALL, t("controls.loop_tip"), icon=True)
         self.btn_loop.clicked.connect(self.loop_cycle_requested)
         row.addWidget(self.btn_loop)
         self.vid_widgets.append(self.btn_loop)
 
-        self.btn_mute = _overlay_button(icons.VOLUME, "静音  (M)", icon=True)
+        self.btn_mute = _overlay_button(icons.VOLUME, t("controls.mute_tip"), icon=True)
         self.btn_mute.clicked.connect(self.mute_toggled)
         row.addWidget(self.btn_mute)
         self.vid_widgets.append(self.btn_mute)
@@ -372,18 +373,18 @@ class ControlBar(QWidget):
         self.vol.setObjectName("OverlaySlider")
         self.vol.setRange(0, 130)
         self.vol.setFixedWidth(96)
-        self.vol.setToolTip("音量  (↑ / ↓)")
+        self.vol.setToolTip(t("controls.volume_tip"))
         self.vol.setFocusPolicy(Qt.NoFocus)
         self.vol.valueChanged.connect(self.volume_selected)
         row.addWidget(self.vol)
         self.vid_widgets.append(self.vol)
 
-        self.btn_panel = _overlay_button(icons.PLAYLIST, "播放列表面板  (Tab)", icon=True)
+        self.btn_panel = _overlay_button(icons.PLAYLIST, t("controls.panel_tip"), icon=True)
         self.btn_panel.setCheckable(True)
         self.btn_panel.clicked.connect(self.panel_toggled)
         row.addWidget(self.btn_panel)
 
-        self.btn_full = _overlay_button(icons.FULLSCREEN, "全屏  (F / 双击画面)", icon=True)
+        self.btn_full = _overlay_button(icons.FULLSCREEN, t("controls.fullscreen_tip"), icon=True)
         self.btn_full.clicked.connect(self.fullscreen_toggled)
         row.addWidget(self.btn_full)
 
@@ -406,9 +407,9 @@ class ControlBar(QWidget):
     # mpv hwdec modes we expose; the rest of mpv's options ('auto-copy', 'vdpau', ...)
     # are niche enough that a user who needs them can edit config.json by hand.
     HWDEC_MODES = [
-        ("auto-safe", "自动硬解", "GPU 能解就解，不行就回退软解（默认，最稳）"),
-        ("auto",     "强制硬解", "尽可能用 GPU，失败时可能无法播放"),
-        ("no",       "纯软解",   "完全走 CPU，兼容性最强，吃 CPU"),
+        ("auto-safe", t("controls.hwdec_auto_safe"), t("controls.hwdec_auto_safe_tip")),
+        ("auto", t("controls.hwdec_auto"), t("controls.hwdec_auto_tip")),
+        ("no", t("controls.hwdec_no"), t("controls.hwdec_no_tip")),
     ]
 
     def _build_hwdec_menu(self) -> QMenu:
@@ -441,7 +442,11 @@ class ControlBar(QWidget):
         self._hwdec_mode = mode
         settings["hwdec"] = mode
         # Button label: short tag that fits in the 44px overlay button.
-        label = {"auto-safe": "硬解", "auto": "强硬", "no": "软解"}.get(mode, "硬解")
+        label = {
+            "auto-safe": t("controls.hwdec_short_auto_safe"),
+            "auto": t("controls.hwdec_short_auto"),
+            "no": t("controls.hwdec_short_no"),
+        }.get(mode, t("controls.hwdec_short_auto_safe"))
         self.btn_hwdec.setText(label)
         for m, act in self._hwdec_actions.items():
             act.setChecked(m == mode)
@@ -454,7 +459,7 @@ class ControlBar(QWidget):
     def _fill_sub_menu(self) -> None:
         menu = self.btn_sub.menu()
         menu.clear()
-        act = QAction("显示字幕", menu)
+        act = QAction(t("controls.sub_visible"), menu)
         act.setCheckable(True)
         act.setChecked(self._sub_visible)
         act.triggered.connect(self.sub_visibility_toggled)
@@ -462,7 +467,7 @@ class ControlBar(QWidget):
         menu.addSeparator()
 
         subs = [t for t in self._tracks if t.kind == "sub"]
-        none_act = QAction("无", menu)
+        none_act = QAction(t("controls.none"), menu)
         none_act.setCheckable(True)
         none_act.setChecked(self._current_sid in (None, False, "no"))
         none_act.triggered.connect(lambda: self.sub_track_selected.emit("no"))
@@ -474,20 +479,24 @@ class ControlBar(QWidget):
             a.triggered.connect(lambda _c=False, tid=t.id: self.sub_track_selected.emit(tid))
             menu.addAction(a)
         if not subs:
-            placeholder = QAction("（没有内封字幕）", menu)
+            placeholder = QAction(t("controls.no_embedded_subs"), menu)
             placeholder.setEnabled(False)
             menu.addAction(placeholder)
 
         menu.addSeparator()
-        a = QAction("载入外挂字幕…", menu)
+        a = QAction(t("controls.load_external_sub"), menu)
         a.triggered.connect(self._pick_sub_file)
         menu.addAction(a)
         menu.addSeparator()
-        for label, step in (("字号增大", 4), ("字号减小", -4)):
+        for label, step in ((t("controls.sub_font_up"), 4), (t("controls.sub_font_down"), -4)):
             a = QAction(label, menu)
             a.triggered.connect(lambda _c=False, s=step: self.sub_font_step.emit(s))
             menu.addAction(a)
-        for label, delta in (("延迟 +0.1s", 0.1), ("延迟 -0.1s", -0.1), ("延迟归零", 0.0)):
+        for label, delta in (
+            (t("controls.sub_delay_plus"), 0.1),
+            (t("controls.sub_delay_minus"), -0.1),
+            (t("controls.sub_delay_reset"), 0.0),
+        ):
             a = QAction(label, menu)
             a.triggered.connect(lambda _c=False, d=delta: self.sub_delay_step.emit(d))
             menu.addAction(a)
@@ -497,7 +506,7 @@ class ControlBar(QWidget):
         menu.clear()
         auds = [t for t in self._tracks if t.kind == "audio"]
         if not auds:
-            a = QAction("（没有音轨）", menu)
+            a = QAction(t("controls.no_audio_tracks"), menu)
             a.setEnabled(False)
             menu.addAction(a)
             return
@@ -510,12 +519,23 @@ class ControlBar(QWidget):
 
     def _pick_sub_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择字幕文件", "", "字幕 (*.srt *.ass *.ssa *.sub *.vtt *.idx *.sup);;所有文件 (*.*)"
+            self, t("controls.pick_sub_title"), "", t("controls.sub_file_filter")
         )
         if path:
             self.sub_file_requested.emit(path)
 
     # -------------------------------------------------------------- state
+
+    def mousePressEvent(self, e) -> None:
+        # Clicks on the control bar's blank area must never reach the stage
+        # underneath (which would pause the video / toggle fullscreen).
+        e.accept()
+
+    def mouseReleaseEvent(self, e) -> None:
+        e.accept()
+
+    def mouseDoubleClickEvent(self, e) -> None:
+        e.accept()
 
     def set_media_kind(self, is_video: bool) -> None:
         self._is_video = is_video
@@ -561,8 +581,8 @@ class ControlBar(QWidget):
         self._current_aid = aid
         subs = sum(1 for t in tracks if t.kind == "sub")
         auds = sum(1 for t in tracks if t.kind == "audio")
-        self.btn_sub.setText("字幕" if subs <= 1 else f"字幕{subs}")
-        self.btn_audio.setText("音轨" if auds <= 1 else f"音轨{auds}")
+        self.btn_sub.setText(t("controls.sub_btn") if subs <= 1 else t("controls.sub_count").format(count=subs))
+        self.btn_audio.setText(t("controls.audio_btn") if auds <= 1 else t("controls.audio_count").format(count=auds))
         self.btn_sub.setEnabled(True)
         self.btn_audio.setEnabled(auds > 0)
 
@@ -579,9 +599,14 @@ class ControlBar(QWidget):
             "one": icons.REPEAT_ONE,
             "shuffle": icons.SHUFFLE,
         }
-        labels = {"off": "不循环", "list": "列表循环", "one": "单个循环", "shuffle": "随机播放"}
+        labels = {
+            "off": t("controls.loop_off"),
+            "list": t("controls.loop_list"),
+            "one": t("controls.loop_one"),
+            "shuffle": t("controls.loop_shuffle"),
+        }
         self.btn_loop.setText(glyphs.get(mode, icons.REPEAT_ALL))
-        self.btn_loop.setToolTip(f"循环模式：{labels.get(mode, '不循环')}　(L 切换)")
+        self.btn_loop.setToolTip(t("controls.loop_tooltip").format(mode=labels.get(mode, t("controls.loop_off"))))
         self.btn_loop.setCheckable(True)
         self.btn_loop.setChecked(mode != "off")
 
@@ -590,7 +615,7 @@ class ControlBar(QWidget):
 
     def set_fullscreen(self, on: bool) -> None:
         self.btn_full.setText(icons.FULLSCREEN_EXIT if on else icons.FULLSCREEN)
-        self.btn_full.setToolTip("退出全屏  (Esc / F)" if on else "全屏  (F / 双击画面)")
+        self.btn_full.setToolTip(t("controls.exit_fullscreen_tip") if on else t("controls.fullscreen_tip"))
 
     def set_navigation(self, has_prev: bool, has_next: bool) -> None:
         self.btn_prev.setEnabled(has_prev)

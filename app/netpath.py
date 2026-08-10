@@ -10,6 +10,8 @@ import ctypes
 import os
 from pathlib import Path
 
+from .i18n import t
+
 DRIVE_REMOTE = 4
 
 _cache: dict[str, bool] = {}
@@ -41,4 +43,4 @@ def is_remote(path: str | Path | None) -> bool:
 
 
 def describe(path: str | Path | None) -> str:
-    return "网络位置" if is_remote(path) else "本地磁盘"
+    return t("netpath.remote") if is_remote(path) else t("netpath.local")

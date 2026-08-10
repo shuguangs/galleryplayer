@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QLabel, QStackedLayout, QWidget
 from . import icons, theme
 from .config import resume, settings
 from .controls import SPEEDS, ControlBar, StageButton, TopBar
+from .i18n import t
 from .image_view import ImageView
 from .media import MediaItem, format_duration, item_for_path
 from .mpv_widget import MpvWidget
@@ -44,7 +45,7 @@ class Viewer(QWidget):
 
     def __init__(self, thumbs: ThumbnailCache, fs_model_provider=None) -> None:
         super().__init__(None)
-        self.setWindowTitle("查看器")
+        self.setWindowTitle(t("viewer.window_title"))
         self.setObjectName("ViewerRoot")
         self.setStyleSheet(f"QWidget#ViewerRoot {{ background: {theme.BG_DEEP}; }}")
         self.resize(1280, 800)
@@ -125,11 +126,11 @@ class Viewer(QWidget):
         # ---- on-stage buttons (play/pause in the middle, prev/next at the edges)
         # The middle one is plain (no translucent circle) and stays hidden while
         # playing; it only appears as a play glyph when the video is paused.
-        self.btn_stage_play = StageButton(icons.PLAY, "播放 / 暂停  (空格)", self, plain=True)
+        self.btn_stage_play = StageButton(icons.PLAY, t("viewer.play_pause"), self, plain=True)
         self.btn_stage_play.clicked.connect(self._toggle_pause)
-        self.btn_stage_prev = StageButton(icons.CHEVRON_LEFT, "上一个  (PageUp)", self)
+        self.btn_stage_prev = StageButton(icons.CHEVRON_LEFT, t("viewer.previous"), self)
         self.btn_stage_prev.clicked.connect(lambda: self.step(-1))
-        self.btn_stage_next = StageButton(icons.CHEVRON_RIGHT, "下一个  (PageDown)", self)
+        self.btn_stage_next = StageButton(icons.CHEVRON_RIGHT, t("viewer.next"), self)
         self.btn_stage_next.clicked.connect(lambda: self.step(1))
         self._stage_buttons = (self.btn_stage_play, self.btn_stage_prev, self.btn_stage_next)
         for b in self._stage_buttons:
@@ -298,7 +299,7 @@ class Viewer(QWidget):
             return
         target = self.index + delta
         if target < 0 or target >= len(self.items):
-            self._show_toast("已经是第一个" if target < 0 else "已经是最后一个")
+            self._show_toast(t("viewer.already_first") if target < 0 else t("viewer.already_last"))
             return
         self.show_index(target)
 
@@ -309,7 +310,7 @@ class Viewer(QWidget):
         self.index = index
         item = self.items[index]
         self.error_label.setVisible(False)
-        self.setWindowTitle(f"{item.name} — 媒体播放器")
+        self.setWindowTitle(t("viewer.window_title_media").format(name=item.name))
         self._update_top_bar(item)
         self.controls.set_media_kind(item.is_video)
         self.controls.set_navigation(index > 0, index < len(self.items) - 1)
@@ -330,7 +331,7 @@ class Viewer(QWidget):
             self.video_view.load(item.path, start)
             self.video_view.set_speed(float(settings["speed"]))
             if start:
-                self._show_toast(f"从 {format_duration(start)} 继续播放")
+                self._show_toast(t("viewer.resume_playback").format(pos=format_duration(start)))
         else:
             self.video_view.stop()
             self.previewer.set_media(None)
@@ -396,8 +397,12 @@ class Viewer(QWidget):
         # Top bar's hwdec tag is stale until the next frame; refresh now.
         if 0 <= self.index < len(self.items) and self.items[self.index].is_video:
             self._update_top_bar(self.items[self.index])
-        label = {"auto-safe": "自动硬解", "auto": "强制硬解", "no": "纯软解"}.get(mode, mode)
-        self._show_toast(f"解码模式：{label}")
+        label = {
+            "auto-safe": t("viewer.hwdec_auto_safe"),
+            "auto": t("viewer.hwdec_auto"),
+            "no": t("viewer.hwdec_no"),
+        }.get(mode, mode)
+        self._show_toast(t("viewer.hwdec_mode").format(label=label))
 
     # ------------------------------------------------------------ capture
 
@@ -433,11 +438,11 @@ class Viewer(QWidget):
 
     def _take_screenshot(self) -> None:
         if not self._current_is_video():
-            self._show_toast("只有视频可以截图")
+            self._show_toast(t("viewer.video_only_screenshot"))
             return
         path = self._capture_path("png")
         if self.video_view.screenshot(str(path)):
-            self._show_toast(f"截图已保存 → {path}")
+            self._show_toast(t("viewer.screenshot_saved").format(path=path))
             return
         # Source folder may be read-only: fall back to the app's 截图 folder.
         alt = APP_DIR / "截图" / path.name
@@ -446,16 +451,16 @@ class Viewer(QWidget):
         except Exception:
             pass
         if self.video_view.screenshot(str(alt)):
-            self._show_toast(f"截图已保存 → {alt}")
+            self._show_toast(t("viewer.screenshot_saved").format(path=alt))
         else:
-            self._show_toast("截图失败")
+            self._show_toast(t("viewer.screenshot_failed"))
 
     def _toggle_gif(self) -> None:
         if self._gif_recording:
             self._finish_gif()
             return
         if not self._current_is_video():
-            self._show_toast("只有视频可以录制 GIF")
+            self._show_toast(t("viewer.video_only_gif"))
             return
         # Read the (user-configurable) capture parameters afresh each time.
         fps = max(2, min(30, int(settings["gif_fps"])))
@@ -468,7 +473,7 @@ class Viewer(QWidget):
         self._gif_timer.setInterval(self._gif_interval)
         self._gif_timer.start()
         self.controls.set_gif_recording(True)
-        self._show_toast("GIF 录制中… 再按 G 结束")
+        self._show_toast(t("viewer.gif_recording"))
 
     def _gif_tick(self) -> None:
         if not self._gif_recording:
@@ -485,10 +490,10 @@ class Viewer(QWidget):
         self.controls.set_gif_recording(False)
         frames, self._gif_frames = self._gif_frames, []
         if len(frames) < 2:
-            self._show_toast("GIF 太短了，已取消")
+            self._show_toast(t("viewer.gif_too_short"))
             return
         path = self._capture_path("gif")
-        self._show_toast(f"正在生成 GIF（{len(frames)} 帧）…")
+        self._show_toast(t("viewer.gif_generating").format(count=len(frames)))
         import threading
 
         threading.Thread(
@@ -522,15 +527,15 @@ class Viewer(QWidget):
                     str(target), save_all=True, append_images=smalls[1:],
                     duration=self._gif_interval, loop=0, optimize=True, disposal=2,
                 )
-            self._capture_saved.emit(f"GIF 已保存 → {target}")
+            self._capture_saved.emit(t("viewer.gif_saved").format(path=target))
         except Exception:
-            self._capture_saved.emit("GIF 生成失败")
+            self._capture_saved.emit(t("viewer.gif_failed"))
 
     # ------------------------------------------------------- picture / A-B
 
     def _reset_video_eq(self) -> None:
         self.video_view.reset_video_eq()
-        self._show_toast("画面已复位")
+        self._show_toast(t("viewer.eq_reset"))
 
     def _set_ab_point(self) -> None:
         """I key: set A, then B, then (third press) clear -- an in/out loop."""
@@ -540,15 +545,15 @@ class Viewer(QWidget):
         if self._ab_a is None:
             self._ab_a = pos
             self.video_view.set_ab_loop("a", pos)
-            self._show_toast(f"A-B 循环：起点 {format_duration(pos)}")
+            self._show_toast(t("viewer.ab_loop_start").format(pos=format_duration(pos)))
         elif self._ab_b is None:
             if pos <= self._ab_a:
-                self._show_toast("终点需晚于起点")
+                self._show_toast(t("viewer.ab_end_after_start"))
                 return
             self._ab_b = pos
             self.video_view.set_ab_loop("b", pos)
             self._show_toast(
-                f"A-B 循环：{format_duration(self._ab_a)} → {format_duration(pos)}"
+                t("viewer.ab_loop_set").format(a=format_duration(self._ab_a), b=format_duration(pos))
             )
         else:
             self._clear_ab_loop()
@@ -558,7 +563,7 @@ class Viewer(QWidget):
             return
         self._ab_a = self._ab_b = None
         self.video_view.clear_ab_loop()
-        self._show_toast("已取消 A-B 循环")
+        self._show_toast(t("viewer.ab_loop_cleared"))
 
     # ------------------------------------------------------------ drag & drop
 
@@ -586,7 +591,7 @@ class Viewer(QWidget):
             self.open_playlist(items, 0)
             self.playlist_changed.emit(self.items)
         else:
-            self._show_toast("没有可播放的媒体文件")
+            self._show_toast(t("viewer.no_playable_media"))
 
     def _fit_window_to_video(self) -> None:
         """Resize the window so the video area matches the video's native pixels.
@@ -663,7 +668,7 @@ class Viewer(QWidget):
 
     def _set_speed(self, value: float) -> None:
         self.video_view.set_speed(value)
-        self._show_toast(f"{value:g}× 速度")
+        self._show_toast(t("viewer.speed_toast").format(speed=f"{value:g}"))
 
     def _nudge_speed(self, direction: int) -> None:
         cur = self.video_view.speed
@@ -672,24 +677,24 @@ class Viewer(QWidget):
 
     def _step_sub_font(self, step: int) -> None:
         self.video_view.set_sub_font_size(self.video_view.sub_font_size + step)
-        self._show_toast(f"字幕字号 {self.video_view.sub_font_size}")
+        self._show_toast(t("viewer.sub_font_toast").format(size=self.video_view.sub_font_size))
 
     def _step_sub_delay(self, delta: float) -> None:
         if delta == 0.0:
             self.video_view.mpv.sub_delay = 0.0
         else:
             self.video_view.adjust_sub_delay(delta)
-        self._show_toast(f"字幕延迟 {self.video_view.sub_delay:+.1f}s")
+        self._show_toast(t("viewer.sub_delay_toast").format(delay=f"{self.video_view.sub_delay:+.1f}"))
 
     def _toggle_sub_visible(self) -> None:
         vis = not self.video_view.sub_visible
         self.video_view.set_sub_visible(vis)
         self.controls.set_sub_visible(vis)
-        self._show_toast("字幕已显示" if vis else "字幕已隐藏")
+        self._show_toast(t("viewer.sub_visible") if vis else t("viewer.sub_hidden"))
 
     def _adjust_volume(self, delta: int) -> None:
         self.video_view.set_volume(self.video_view.volume + delta)
-        self._show_toast(f"音量 {int(self.video_view.volume)}%")
+        self._show_toast(t("viewer.volume_toast").format(volume=int(self.video_view.volume)))
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -715,7 +720,7 @@ class Viewer(QWidget):
             if codec:
                 bits.append(codec.split("(")[0].strip())
             hw = self.video_view.hwdec_active
-            bits.append(f"硬解 {hw}" if hw and hw != "no" else "软解")
+            bits.append(t("viewer.hwdec_on").format(mode=hw) if hw and hw != "no" else t("viewer.swdec"))
         else:
             if item.resolution_text():
                 bits.append(item.resolution_text())
@@ -1002,11 +1007,11 @@ class Viewer(QWidget):
                 return
             if k == Qt.Key_Period:
                 self.video_view.frame_step()
-                self._show_toast("下一帧")
+                self._show_toast(t("viewer.next_frame"))
                 return
             if k == Qt.Key_Comma:
                 self.video_view.frame_step(back=True)
-                self._show_toast("上一帧")
+                self._show_toast(t("viewer.prev_frame"))
                 return
             if k == Qt.Key_BracketLeft:
                 self._nudge_speed(-1)

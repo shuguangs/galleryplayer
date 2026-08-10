@@ -43,6 +43,7 @@ DEFAULTS: dict[str, Any] = {
     "gif_max_width": 480,           # GIF 缩放到的最大宽度（px）
     "capture_path": "",                # 截图/GIF 保存目录（空=自动：视频所在文件夹，不行则 exe 旁）
     "remember_scroll": True,           # 切换回之前访问过的文件夹时恢复滚动位置
+    "language": "zh",                  # zh | en
 }
 
 # Videos shorter than this are never resumed; nor are ones watched to the end.

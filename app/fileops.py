@@ -18,6 +18,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication, QInputDialog, QMessageBox
 
+from .i18n import t
+
 # --- SHFileOperationW ------------------------------------------------------------
 
 FO_DELETE = 3
@@ -49,7 +51,7 @@ def recycle(paths: list[Path]) -> tuple[int, str]:
     """
     real = [p for p in paths if p.exists()]
     if not real:
-        return 0, "文件已不存在"
+        return 0, t("fileops.gone")
     try:
         buf = "\0".join(str(p.resolve()) for p in real) + "\0\0"
         op = _SHFILEOPSTRUCTW(
@@ -64,12 +66,12 @@ def recycle(paths: list[Path]) -> tuple[int, str]:
         )
         rc = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
     except Exception as exc:  # no shell32, or the call could not be made at all
-        return 0, f"无法调用回收站：{exc}"
+        return 0, t("fileops.recycle_fail").format(err=exc)
     if rc != 0:
-        return 0, f"回收站操作失败（代码 {rc}）"
+        return 0, t("fileops.recycle_error").format(code=rc)
     if op.fAnyOperationsAborted:
         # partial: whatever is gone is gone, the rest the user cancelled
-        return sum(1 for p in real if not p.exists()), "已取消"
+        return sum(1 for p in real if not p.exists()), t("fileops.cancelled")
     return sum(1 for p in real if not p.exists()), ""
 
 
@@ -116,25 +118,27 @@ def rename(parent, path: Path, is_dir: bool = False) -> Path | None:
     Only the name is editable — the dialog cannot be used to move a file elsewhere,
     which is why separators are rejected rather than resolved.
     """
-    label = "文件夹新名称：" if is_dir else "文件新名称："
-    new_name, ok = QInputDialog.getText(parent, "重命名", label, text=path.name)
+    label = t("fileops.folder_name") if is_dir else t("fileops.file_name")
+    new_name, ok = QInputDialog.getText(parent, t("fileops.rename"), label, text=path.name)
     if not ok:
         return None
     new_name = new_name.strip().rstrip(".")
     if not new_name or new_name == path.name:
         return None
     if _INVALID & set(new_name):
-        QMessageBox.warning(parent, "重命名", '名称不能包含 < > : " / \\ | ? * 这些字符。')
+        QMessageBox.warning(parent, t("fileops.rename"), t("fileops.invalid_chars"))
         return None
 
     target = path.with_name(new_name)
     if target.exists():
-        QMessageBox.warning(parent, "重命名", f"「{new_name}」已经存在。")
+        QMessageBox.warning(parent, t("fileops.rename"), t("fileops.exists").format(name=new_name))
         return None
     try:
         os.rename(path, target)
     except OSError as exc:
-        QMessageBox.warning(parent, "重命名", f"重命名失败：{exc.strerror or exc}")
+        QMessageBox.warning(
+            parent, t("fileops.rename"), t("fileops.rename_fail").format(err=exc.strerror or exc)
+        )
         return None
     return target
 
@@ -143,16 +147,16 @@ def confirm_recycle(parent, paths: list[Path]) -> bool:
     if not paths:
         return False
     if len(paths) == 1:
-        text = f"把「{paths[0].name}」放入回收站？"
+        text = t("fileops.recycle_one").format(name=paths[0].name)
     else:
-        text = f"把选中的 {len(paths)} 个文件放入回收站？"
+        text = t("fileops.recycle_many").format(n=len(paths))
     box = QMessageBox(parent)
-    box.setWindowTitle("删除")
+    box.setWindowTitle(t("fileops.delete"))
     box.setText(text)
-    box.setInformativeText("可以在回收站中还原。")
+    box.setInformativeText(t("fileops.restorable"))
     box.setIcon(QMessageBox.Question)
-    yes = box.addButton("放入回收站", QMessageBox.AcceptRole)
-    box.addButton("取消", QMessageBox.RejectRole)
+    yes = box.addButton(t("fileops.recycle_btn"), QMessageBox.AcceptRole)
+    box.addButton(t("fileops.cancel"), QMessageBox.RejectRole)
     box.setDefaultButton(yes)
     box.exec()
     return box.clickedButton() is yes

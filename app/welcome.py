@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 
 from . import icons, theme
 from .config import settings
+from .i18n import t
 
 MAX_RECENT = 8
 MAX_RECENT_FILES = 10
@@ -35,12 +36,12 @@ class WelcomePage(QWidget):
         outer.setContentsMargins(40, 40, 40, 40)
         outer.addStretch(2)
 
-        title = QLabel("媒体播放器")
+        title = QLabel(t("welcome.title"))
         title.setObjectName("WelcomeTitle")
         title.setAlignment(Qt.AlignCenter)
         outer.addWidget(title)
 
-        hint = QLabel("打开一个文件夹开始浏览，或者把文件夹 / 文件直接拖进这个窗口")
+        hint = QLabel(t("welcome.hint"))
         hint.setObjectName("WelcomeHint")
         hint.setAlignment(Qt.AlignCenter)
         outer.addWidget(hint)
@@ -48,7 +49,7 @@ class WelcomePage(QWidget):
 
         row = QHBoxLayout()
         row.addStretch(1)
-        btn = QPushButton(icons.FOLDER_OPEN + "   打开文件夹")
+        btn = QPushButton(icons.FOLDER_OPEN + "   " + t("welcome.open_folder"))
         btn.setObjectName("WelcomeButton")
         btn.setCursor(Qt.PointingHandCursor)
         btn.clicked.connect(self.open_requested)
@@ -57,7 +58,7 @@ class WelcomePage(QWidget):
         outer.addLayout(row)
         outer.addSpacing(30)
 
-        self.recent_title = QLabel("最近打开")
+        self.recent_title = QLabel(t("welcome.recent_folders"))
         self.recent_title.setObjectName("WelcomeHint")
         self.recent_title.setAlignment(Qt.AlignCenter)
         outer.addWidget(self.recent_title)
@@ -75,7 +76,7 @@ class WelcomePage(QWidget):
         outer.addLayout(holder)
 
         outer.addSpacing(18)
-        self.recent_files_title = QLabel("最近播放")
+        self.recent_files_title = QLabel(t("welcome.recent_files"))
         self.recent_files_title.setObjectName("WelcomeHint")
         self.recent_files_title.setAlignment(Qt.AlignCenter)
         outer.addWidget(self.recent_files_title)

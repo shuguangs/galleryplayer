@@ -12,6 +12,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from .i18n import t
+
 PROGID = "MediaPlayer.PortableMedia"
 APP_NAME = "媒体播放器"
 
@@ -50,7 +52,7 @@ def _exe_name() -> str:
 def register() -> None:
     """Add the app to the Open-With menu for every supported extension."""
     if not is_supported():
-        raise RuntimeError("文件关联仅支持 Windows")
+        raise RuntimeError(t("assoc.win_only"))
     import winreg
 
     root = winreg.HKEY_CURRENT_USER
@@ -83,7 +85,7 @@ def register() -> None:
 def unregister() -> None:
     """Remove everything register() added."""
     if not is_supported():
-        raise RuntimeError("文件关联仅支持 Windows")
+        raise RuntimeError(t("assoc.win_only"))
     import winreg
 
     root = winreg.HKEY_CURRENT_USER

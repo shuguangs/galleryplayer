@@ -13,8 +13,9 @@ import threading
 from pathlib import Path
 
 from .runtime import USERDATA_DIR
+from .i18n import t
 
-DEFAULT_ALBUM = "默认专辑"
+DEFAULT_ALBUM = t("albums.default")
 
 
 class AlbumStore:
@@ -58,7 +59,8 @@ class AlbumStore:
 
     # -- mutations --------------------------------------------------------
 
-    def create(self, base: str = "新建专辑") -> str:
+    def create(self, base: str = "") -> str:
+        base = base or t("albums.new")
         with self._lock:
             existing = {a["name"] for a in self._albums}
             name = base

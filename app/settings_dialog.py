@@ -27,12 +27,13 @@ from PySide6.QtWidgets import (
 
 from . import assoc, theme
 from .config import flush, settings
+from .i18n import LANGUAGES, current_language, set_language, t
 from .runtime import APP_DIR
 
 _HWDEC_CHOICES = [
-    ("auto-safe", "自动硬解（默认，最稳）"),
-    ("auto", "强制硬解（更省电，个别文件可能黑屏）"),
-    ("no", "纯软解（最兼容，吃 CPU）"),
+    ("auto-safe", "settings.hwdec_auto_safe"),
+    ("auto", "settings.hwdec_auto"),
+    ("no", "settings.hwdec_no"),
 ]
 
 
@@ -69,7 +70,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("设置")
+        self.setWindowTitle(t("settings.title"))
         self.setMinimumWidth(520)
         self.setStyleSheet(
             f"QDialog {{ background:{theme.BG_BASE}; }}"
@@ -80,45 +81,58 @@ class SettingsDialog(QDialog):
         root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(2)
 
+        # ---- 界面语言
+        root.addWidget(_section(t("settings.section_lang")))
+        self.combo_lang = QComboBox()
+        for code, label in LANGUAGES:
+            self.combo_lang.addItem(label, code)
+        idx = self.combo_lang.findData(current_language())
+        self.combo_lang.setCurrentIndex(max(0, idx))
+        self.combo_lang.currentIndexChanged.connect(self._on_lang_changed)
+        root.addWidget(_row(t("settings.lang_label"), self.combo_lang))
+        lang_hint = QLabel(t("settings.lang_restart_hint"))
+        lang_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        root.addWidget(lang_hint)
+
         # ---- 播放
-        root.addWidget(_section("播放"))
-        self.cb_resume = QCheckBox("断点续播（关掉后每次都从头播放）")
+        root.addWidget(_section(t("settings.section_play")))
+        self.cb_resume = QCheckBox(t("settings.resume_label"))
         self.cb_resume.setChecked(bool(settings["resume_enabled"]))
         self.cb_resume.toggled.connect(lambda v: self._set("resume_enabled", v))
         root.addWidget(self.cb_resume)
 
-        self.cb_autoplay = QCheckBox("一个视频播完自动接着下一个")
+        self.cb_autoplay = QCheckBox(t("settings.autoplay_label"))
         self.cb_autoplay.setChecked(bool(settings["autoplay_next"]))
         self.cb_autoplay.toggled.connect(lambda v: self._set("autoplay_next", v))
         root.addWidget(self.cb_autoplay)
 
-        self.cb_native = QCheckBox("打开视频时按原始分辨率调整窗口（而不是最大化）")
+        self.cb_native = QCheckBox(t("settings.native_size_label"))
         self.cb_native.setChecked(bool(settings["open_native_size"]))
         self.cb_native.toggled.connect(lambda v: self._set("open_native_size", v))
         root.addWidget(self.cb_native)
 
-        self.cb_scroll = QCheckBox("切换回之前的文件夹时恢复滚动位置")
+        self.cb_scroll = QCheckBox(t("settings.remember_scroll_label"))
         self.cb_scroll.setChecked(bool(settings["remember_scroll"]))
         self.cb_scroll.toggled.connect(lambda v: self._set("remember_scroll", v))
         root.addWidget(self.cb_scroll)
 
         self.combo_hwdec = QComboBox()
-        for value, label in _HWDEC_CHOICES:
-            self.combo_hwdec.addItem(label, value)
+        for value, key in _HWDEC_CHOICES:
+            self.combo_hwdec.addItem(t(key), value)
         cur = self.combo_hwdec.findData(str(settings["hwdec"]))
         self.combo_hwdec.setCurrentIndex(max(0, cur))
         self.combo_hwdec.currentIndexChanged.connect(
             lambda _=0: self._set("hwdec", self.combo_hwdec.currentData())
         )
-        root.addWidget(_row("默认解码模式", self.combo_hwdec, "下个视频生效"))
+        root.addWidget(_row(t("settings.hwdec_label"), self.combo_hwdec, t("settings.next_video_hint")))
 
         # ---- 音量 / 字幕
-        root.addWidget(_section("音量 · 字幕"))
+        root.addWidget(_section(t("settings.section_volume")))
         self.sl_volume = QSlider(Qt.Horizontal)
         self.sl_volume.setRange(0, 130)
         self.sl_volume.setFixedWidth(180)
         self.sl_volume.setValue(int(settings["volume"]))
-        self.lab_volume = QLabel(f"{int(settings['volume'])}%")
+        self.lab_volume = QLabel(t("settings.volume_pct").format(v=int(settings['volume'])))
         self.sl_volume.valueChanged.connect(self._on_volume)
         vol_box = QWidget()
         vb = QHBoxLayout(vol_box)
@@ -126,39 +140,39 @@ class SettingsDialog(QDialog):
         vb.addWidget(self.sl_volume)
         vb.addWidget(self.lab_volume)
         vb.addStretch(1)
-        root.addWidget(_row("默认音量", vol_box, "下次启动生效"))
+        root.addWidget(_row(t("settings.volume_label"), vol_box, t("settings.next_launch_hint")))
 
         self.sp_subsize = QSpinBox()
         self.sp_subsize.setRange(16, 96)
         self.sp_subsize.setValue(int(settings["sub_font_size"]))
         self.sp_subsize.valueChanged.connect(lambda v: self._set("sub_font_size", v))
-        root.addWidget(_row("默认字幕字号", self.sp_subsize, "下个视频生效"))
+        root.addWidget(_row(t("settings.subsize_label"), self.sp_subsize, t("settings.next_video_hint")))
 
-        self.cb_subvis = QCheckBox("默认显示字幕")
+        self.cb_subvis = QCheckBox(t("settings.sub_visible_label"))
         self.cb_subvis.setChecked(bool(settings["sub_visible"]))
         self.cb_subvis.toggled.connect(lambda v: self._set("sub_visible", v))
         root.addWidget(self.cb_subvis)
 
         # ---- 截图 / GIF
-        root.addWidget(_section("截图 · GIF 录制"))
+        root.addWidget(_section(t("settings.section_capture")))
         self.sp_fps = QSpinBox()
         self.sp_fps.setRange(2, 30)
         self.sp_fps.setValue(int(settings["gif_fps"]))
         self.sp_fps.valueChanged.connect(lambda v: self._set("gif_fps", v))
-        root.addWidget(_row("GIF 帧率", self.sp_fps, "帧/秒"))
+        root.addWidget(_row(t("settings.gif_fps_label"), self.sp_fps, t("settings.fps_unit")))
 
         self.sp_secs = QSpinBox()
         self.sp_secs.setRange(1, 120)
         self.sp_secs.setValue(int(settings["gif_max_seconds"]))
         self.sp_secs.valueChanged.connect(lambda v: self._set("gif_max_seconds", v))
-        root.addWidget(_row("GIF 最长时长", self.sp_secs, "秒（到时自动结束）"))
+        root.addWidget(_row(t("settings.gif_secs_label"), self.sp_secs, t("settings.secs_hint")))
 
         self.sp_width = QSpinBox()
         self.sp_width.setRange(120, 1920)
         self.sp_width.setSingleStep(40)
         self.sp_width.setValue(int(settings["gif_max_width"]))
         self.sp_width.valueChanged.connect(lambda v: self._set("gif_max_width", v))
-        root.addWidget(_row("GIF 最大宽度", self.sp_width, "像素"))
+        root.addWidget(_row(t("settings.gif_width_label"), self.sp_width, t("settings.pixels_unit")))
 
         # ---- 截图保存路径
         shot_box = QWidget()
@@ -167,7 +181,7 @@ class SettingsDialog(QDialog):
         sb.setSpacing(6)
         self.edit_shot_path = QLineEdit()
         self.edit_shot_path.setReadOnly(True)
-        self.edit_shot_path.setPlaceholderText("自动（先试视频所在文件夹，不行则存到程序旁的「截图」目录）")
+        self.edit_shot_path.setPlaceholderText(t("settings.shot_path_placeholder"))
         self.edit_shot_path.setStyleSheet(
             f"QLineEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
             f" border:1px solid {theme.BORDER}; border-radius:4px; padding:3px 6px; }}"
@@ -176,31 +190,31 @@ class SettingsDialog(QDialog):
         if custom:
             self.edit_shot_path.setText(custom)
         sb.addWidget(self.edit_shot_path, 1)
-        btn_browse = QPushButton("浏览…")
+        btn_browse = QPushButton(t("settings.browse_ellipsis"))
         btn_browse.setFocusPolicy(Qt.NoFocus)
         btn_browse.clicked.connect(self._browse_shot_path)
         sb.addWidget(btn_browse)
-        btn_open = QPushButton("打开")
+        btn_open = QPushButton(t("settings.open"))
         btn_open.setFocusPolicy(Qt.NoFocus)
         btn_open.clicked.connect(self._open_shot_folder)
         sb.addWidget(btn_open)
-        btn_clear = QPushButton("清除")
+        btn_clear = QPushButton(t("settings.clear"))
         btn_clear.setFocusPolicy(Qt.NoFocus)
         btn_clear.clicked.connect(lambda: (self.edit_shot_path.clear(), self._set("capture_path", "")))
         sb.addWidget(btn_clear)
-        root.addWidget(_row("截图保存到", shot_box, "留空=自动选择"))
+        root.addWidget(_row(t("settings.shot_path_label"), shot_box, t("settings.shot_path_hint")))
 
         # ---- 文件关联
-        root.addWidget(_section("文件关联（Windows）"))
+        root.addWidget(_section(t("settings.section_assoc")))
         assoc_box = QWidget()
         ab = QHBoxLayout(assoc_box)
         ab.setContentsMargins(0, 0, 0, 0)
         ab.setSpacing(8)
-        self.btn_assoc = QPushButton("注册到「打开方式」")
+        self.btn_assoc = QPushButton(t("settings.assoc_register"))
         self.btn_assoc.setFocusPolicy(Qt.NoFocus)
         self.btn_assoc.clicked.connect(self._register_assoc)
         ab.addWidget(self.btn_assoc)
-        self.btn_unassoc = QPushButton("取消关联")
+        self.btn_unassoc = QPushButton(t("settings.assoc_unregister"))
         self.btn_unassoc.setFocusPolicy(Qt.NoFocus)
         self.btn_unassoc.clicked.connect(self._unregister_assoc)
         ab.addWidget(self.btn_unassoc)
@@ -214,14 +228,14 @@ class SettingsDialog(QDialog):
 
         # ---- footer
         root.addSpacing(8)
-        note = QLabel("提示：解码模式 / 字幕字号 / 默认音量在下个视频或下次启动时生效，其它即时生效。")
+        note = QLabel(t("settings.footer_note"))
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{theme.TEXT_DIM}; font-size:12px;")
         root.addWidget(note)
 
         footer = QHBoxLayout()
         footer.addStretch(1)
-        btn_close = QPushButton("完成")
+        btn_close = QPushButton(t("settings.done"))
         btn_close.setFocusPolicy(Qt.NoFocus)
         btn_close.clicked.connect(self.accept)
         footer.addWidget(btn_close)
@@ -232,15 +246,20 @@ class SettingsDialog(QDialog):
     def _set(self, key: str, value) -> None:
         settings[key] = value
 
+    def _on_lang_changed(self, _index: int) -> None:
+        code = self.combo_lang.currentData()
+        if code:
+            set_language(str(code))
+
     def _on_volume(self, v: int) -> None:
-        self.lab_volume.setText(f"{v}%")
+        self.lab_volume.setText(t("settings.volume_pct").format(v=v))
         settings["volume"] = int(v)
 
     def _browse_shot_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
         start = self.edit_shot_path.text() or str(APP_DIR)
-        d = QFileDialog.getExistingDirectory(self, "选择截图保存目录", start)
+        d = QFileDialog.getExistingDirectory(self, t("settings.pick_shot_dir"), start)
         if d:
             self.edit_shot_path.setText(d)
             self._set("capture_path", d)
@@ -263,32 +282,27 @@ class SettingsDialog(QDialog):
     def _register_assoc(self) -> None:
         try:
             assoc.register()
-            self.assoc_hint.setText(
-                "已注册。现在右键任意视频/图片 →「打开方式」即可看到「媒体播放器」，"
-                "选中并勾选「始终使用」就能设为默认。"
-            )
+            self.assoc_hint.setText(t("settings.assoc_registered_hint"))
         except Exception as exc:  # pragma: no cover - registry edge cases
-            self.assoc_hint.setText(f"注册失败：{exc}")
+            self.assoc_hint.setText(t("settings.assoc_register_failed").format(err=exc))
 
     def _unregister_assoc(self) -> None:
         try:
             assoc.unregister()
-            self.assoc_hint.setText("已取消关联。")
+            self.assoc_hint.setText(t("settings.assoc_unregistered_hint"))
         except Exception as exc:  # pragma: no cover
-            self.assoc_hint.setText(f"取消失败：{exc}")
+            self.assoc_hint.setText(t("settings.assoc_unregister_failed").format(err=exc))
 
     def _refresh_assoc_hint(self) -> None:
         if not assoc.is_supported():
             self.btn_assoc.setEnabled(False)
             self.btn_unassoc.setEnabled(False)
-            self.assoc_hint.setText("文件关联仅在 Windows 上可用。")
+            self.assoc_hint.setText(t("settings.assoc_windows_only"))
             return
         if assoc.is_registered():
-            self.assoc_hint.setText("状态：已注册到「打开方式」。")
+            self.assoc_hint.setText(t("settings.assoc_status_registered"))
         else:
-            self.assoc_hint.setText(
-                "把本程序加入右键「打开方式」列表（仅当前用户，无需管理员）。"
-            )
+            self.assoc_hint.setText(t("settings.assoc_status_unregistered"))
 
     def closeEvent(self, e):  # noqa: ANN001
         flush()

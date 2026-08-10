@@ -9,6 +9,8 @@
 ![Portable](https://img.shields.io/badge/便携-免安装-green)
 ![License](https://img.shields.io/badge/License-保留所有权利-lightgrey)
 
+**English version: [README.en.md](README.en.md)**
+
 ---
 
 ## ✨ 特性一览

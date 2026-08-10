@@ -15,6 +15,7 @@ import mpv
 
 from . import netpath
 from .config import settings
+from .i18n import t
 
 
 class Track:
@@ -31,9 +32,9 @@ class Track:
 
     def label(self) -> str:
         bits = [b for b in (self.title, self.lang.upper() if self.lang else "") if b]
-        name = " · ".join(bits) if bits else f"轨道 {self.id}"
+        name = " · ".join(bits) if bits else t("mpv.track_label").format(id=self.id)
         if self.external:
-            name += "（外挂）"
+            name += t("mpv.external")
         return name
 
 
@@ -155,7 +156,7 @@ class MpvWidget(QOpenGLWidget):
             reason = data.get("reason") if isinstance(data, dict) else None
             if reason == "error":
                 try:
-                    self.error.emit(str(data.get("file_error") or "无法播放该文件"))
+                    self.error.emit(str(data.get("file_error") or t("mpv.play_failed")))
                 except RuntimeError:
                     pass
 

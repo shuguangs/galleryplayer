@@ -19,6 +19,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from . import theme
+from .i18n import t
 
 MIN_SCALE = 0.04
 MAX_SCALE = 32.0
@@ -107,12 +108,12 @@ class ImageView(QWidget):
             try:
                 frames, _ = _load_with_pillow(path)
             except Exception as exc:
-                self.load_failed.emit(f"{path.name}：{exc}")
+                self.load_failed.emit(t("image_view.load_failed").format(name=path.name, error=exc))
                 self.update()
                 return False
 
         if not frames:
-            self.load_failed.emit(f"{path.name}：无法解码")
+            self.load_failed.emit(t("image_view.decode_failed").format(name=path.name))
             self.update()
             return False
 

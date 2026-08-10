@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 from . import fileops, icons, media, theme
 from .albums import DEFAULT_ALBUM, albums
 from .config import settings
+from .i18n import t
 from .media import MediaItem, format_duration
 from .thumbs import ThumbnailCache
 
@@ -57,7 +58,12 @@ PANEL_MAX_W = 640
 GRIP_W = 5
 
 LOOP_MODES = ["off", "list", "one", "shuffle"]
-LOOP_LABELS = {"off": "不循环", "list": "列表循环", "one": "单个循环", "shuffle": "随机播放"}
+LOOP_LABELS = {
+    "off": "panel.loop_off",
+    "list": "panel.loop_list",
+    "one": "panel.loop_one",
+    "shuffle": "panel.loop_shuffle",
+}
 LOOP_ICONS = {
     "off": icons.REPEAT_ALL,
     "list": icons.REPEAT_ALL,
@@ -176,7 +182,7 @@ class MediaRowDelegate(QStyledItemDelegate):
             bits.append(item.resolution_text())
         bits.append(item.size_text())
         if missing:
-            bits = ["文件已不存在"]
+            bits = [t("panel.file_missing")]
         f2 = QFont(p.font()); f2.setPointSize(7); p.setFont(f2)
         fm2 = QFontMetrics(f2)
         p.setPen(dim_color)
@@ -191,7 +197,7 @@ class MediaRowDelegate(QStyledItemDelegate):
         fm = QFontMetrics(f)
         dur = item.duration_text() if (item.is_video and item.duration) else ""
         if not item.exists:
-            dur = "缺失"
+            dur = t("panel.missing")
         dur_w = fm.horizontalAdvance(dur) + 10 if dur else 0
         left = rect.left() + 9
         name_w = rect.width() - 18 - dur_w
@@ -341,9 +347,9 @@ class PlaylistPanel(QWidget):
 
         self.tab_buttons: list[QToolButton] = []
         for i, (label, tip) in enumerate(
-            (("播放列表", "当前文件夹的播放列表"),
-             ("专辑", "自建专辑，可跨文件夹收藏"),
-             ("浏览器", "在面板里切换文件夹"))
+            ((t("panel.playlist_tab"), t("panel.playlist_tab_tip")),
+             (t("panel.album_tab"), t("panel.album_tab_tip")),
+             (t("panel.browser_tab"), t("panel.browser_tab_tip")))
         ):
             b = QToolButton()
             b.setObjectName("PanelTab")
@@ -357,10 +363,10 @@ class PlaylistPanel(QWidget):
             self.tab_buttons.append(b)
 
         lay.addStretch(1)
-        self.btn_density = _tool(icons.VIEW_TILES, "切换缩略图 / 紧凑行样式")
+        self.btn_density = _tool(icons.VIEW_TILES, t("panel.density_tip"))
         self.btn_density.clicked.connect(self._toggle_density)
         lay.addWidget(self.btn_density)
-        btn_close = _tool(icons.CHEVRON_RIGHT, "收起面板  (Tab)")
+        btn_close = _tool(icons.CHEVRON_RIGHT, t("panel.collapse_tip"))
         btn_close.clicked.connect(self.closed)
         lay.addWidget(btn_close)
         return bar
@@ -411,50 +417,50 @@ class PlaylistPanel(QWidget):
         if not rows:
             return
         menu = QMenu(self)
-        act_play = QAction("播放", menu)
+        act_play = QAction(t("panel.play"), menu)
         act_play.triggered.connect(lambda: self._on_activate_playlist(rows[0]))
         menu.addAction(act_play)
         menu.addSeparator()
 
-        sub = menu.addMenu("添加到专辑")
+        sub = menu.addMenu(t("panel.add_to_album"))
         for name in albums.names():
             a = QAction(name, sub)
             a.triggered.connect(lambda _=False, n=name, r=tuple(rows): self._add_to_album(n, r))
             sub.addAction(a)
         sub.addSeparator()
-        a_new = QAction("新建专辑…", sub)
+        a_new = QAction(t("panel.new_album_ellipsis"), sub)
         a_new.triggered.connect(lambda _=False, r=tuple(rows): self._add_to_new_album(r))
         sub.addAction(a_new)
 
         menu.addSeparator()
         paths = self._paths_for(rows)
         if len(paths) == 1:
-            menu.addAction("用默认程序打开").triggered.connect(
+            menu.addAction(t("panel.open_default")).triggered.connect(
                 lambda _=False, p=paths[0]: fileops.open_default(p)
             )
-        menu.addAction("在资源管理器中显示").triggered.connect(
+        menu.addAction(t("panel.reveal_in_explorer")).triggered.connect(
             lambda _=False, r=rows[0]: self._reveal(r)
         )
         if paths:
-            menu.addAction("复制完整路径").triggered.connect(
+            menu.addAction(t("panel.copy_full_path")).triggered.connect(
                 lambda _=False, ps=tuple(paths): fileops.copy_to_clipboard(
                     "\n".join(str(p) for p in ps)
                 )
             )
         if len(paths) == 1:
-            menu.addAction("复制文件名").triggered.connect(
+            menu.addAction(t("panel.copy_filename")).triggered.connect(
                 lambda _=False, p=paths[0]: fileops.copy_to_clipboard(p.name)
             )
-            menu.addAction("重命名…").triggered.connect(
+            menu.addAction(t("panel.rename_ellipsis")).triggered.connect(
                 lambda _=False, p=paths[0]: self._rename(p)
             )
 
         menu.addSeparator()
-        act_rm = QAction("从列表移除", menu)
+        act_rm = QAction(t("panel.remove_from_list"), menu)
         act_rm.triggered.connect(self._remove_selected)
         menu.addAction(act_rm)
         if paths:
-            menu.addAction("删除到回收站…").triggered.connect(
+            menu.addAction(t("panel.recycle_ellipsis")).triggered.connect(
                 lambda _=False, ps=tuple(paths): self._recycle(list(ps))
             )
         menu.exec(self.list.viewport().mapToGlobal(pos))
@@ -498,24 +504,24 @@ class PlaylistPanel(QWidget):
             return
         done, err = fileops.recycle(paths)
         if not done:
-            self._toast(err or "没有文件被删除")
+            self._toast(err or t("panel.no_files_deleted"))
             return
         gone = {p for p in paths if not p.exists()}
         remaining = [i for i in self._all_items if i.path not in gone]
-        self._toast(f"已把 {done} 项放入回收站")
+        self._toast(t("panel.recycled_count").format(done=done))
         self.playlist_removed.emit(remaining)
 
     def _add_to_album(self, name: str, rows: tuple[int, ...]) -> None:
         paths = [self.list.item(r).data(ITEM_ROLE).path for r in rows if self.list.item(r)]
         added = albums.add(name, paths)
         albums.save()
-        self._toast(f"已添加 {added} 项到「{name}」" if added else "这些项目已在专辑中")
+        self._toast(t("panel.added_to_album").format(added=added, name=name) if added else t("panel.already_in_album"))
 
     def _add_to_new_album(self, rows: tuple[int, ...]) -> None:
-        name, ok = QInputDialog.getText(self, "新建专辑", "专辑名称：", text="新建专辑")
+        name, ok = QInputDialog.getText(self, t("panel.new_album_dialog"), t("panel.album_name_label"), text=t("panel.new_album_default"))
         if not ok:
             return
-        created = albums.create(name.strip() or "新建专辑")
+        created = albums.create(name.strip() or t("panel.new_album_default"))
         self._add_to_album(created, rows)
         self._reload_album_tabs()
 
@@ -566,7 +572,7 @@ class PlaylistPanel(QWidget):
                 lambda _p, n=name: self._album_tab_menu(n)
             )
             self.album_strip.addWidget(b)
-        plus = _tool(icons.NEW_ALBUM, "新建专辑", 26)
+        plus = _tool(icons.NEW_ALBUM, t("panel.new_album_tip"), 26)
         plus.clicked.connect(self._new_album)
         self.album_strip.addWidget(plus)
         self.album_strip.addStretch(1)
@@ -574,14 +580,14 @@ class PlaylistPanel(QWidget):
 
     def _album_tab_menu(self, name: str) -> None:
         menu = QMenu(self)
-        a1 = QAction("重命名…", menu)
+        a1 = QAction(t("panel.rename_ellipsis"), menu)
         a1.triggered.connect(lambda: self._rename_album(name))
         menu.addAction(a1)
-        a2 = QAction("清理失效项", menu)
+        a2 = QAction(t("panel.prune_album"), menu)
         a2.triggered.connect(lambda: self._prune_album(name))
         menu.addAction(a2)
         menu.addSeparator()
-        a3 = QAction("删除这个专辑", menu)
+        a3 = QAction(t("panel.delete_album"), menu)
         a3.triggered.connect(lambda: self._delete_album(name))
         menu.addAction(a3)
         menu.exec(QCursor.pos())
@@ -591,15 +597,15 @@ class PlaylistPanel(QWidget):
         self._reload_album_tabs()
 
     def _new_album(self) -> None:
-        name, ok = QInputDialog.getText(self, "新建专辑", "专辑名称：", text="新建专辑")
+        name, ok = QInputDialog.getText(self, t("panel.new_album_dialog"), t("panel.album_name_label"), text=t("panel.new_album_default"))
         if not ok:
             return
-        self._current_album = albums.create(name.strip() or "新建专辑")
+        self._current_album = albums.create(name.strip() or t("panel.new_album_default"))
         albums.save()
         self._reload_album_tabs()
 
     def _rename_album(self, name: str) -> None:
-        new, ok = QInputDialog.getText(self, "重命名专辑", "新名称：", text=name)
+        new, ok = QInputDialog.getText(self, t("panel.rename_album_dialog"), t("panel.new_name_label"), text=name)
         if not ok:
             return
         if albums.rename(name, new.strip()):
@@ -608,10 +614,10 @@ class PlaylistPanel(QWidget):
             albums.save()
             self._reload_album_tabs()
         else:
-            self._toast("重命名失败：名称重复或为空")
+            self._toast(t("panel.rename_failed"))
 
     def _delete_album(self, name: str) -> None:
-        if QMessageBox.question(self, "删除专辑", f"确定删除专辑「{name}」吗？\n（只删列表，不动硬盘上的文件）") != QMessageBox.Yes:
+        if QMessageBox.question(self, t("panel.delete_album_title"), t("panel.delete_album_confirm").format(name=name)) != QMessageBox.Yes:
             return
         albums.delete(name)
         albums.save()
@@ -621,7 +627,7 @@ class PlaylistPanel(QWidget):
         removed = albums.prune_missing(name)
         albums.save()
         self._reload_album_items()
-        self._toast(f"清理了 {removed} 个失效项" if removed else "没有失效项")
+        self._toast(t("panel.pruned_count").format(removed=removed) if removed else t("panel.no_stale_items"))
 
     def _reload_album_items(self) -> None:
         paths = albums.paths(self._current_album)
@@ -632,7 +638,7 @@ class PlaylistPanel(QWidget):
     def _on_activate_album(self, row: int) -> None:
         items = [i for i in self.album_list.items() if i.exists]
         if not items:
-            self._toast("这个专辑里的文件都不在了")
+            self._toast(t("panel.album_files_gone"))
             return
         target = self.album_list.item(row).data(ITEM_ROLE)
         start = next((i for i, it in enumerate(items) if it.path == target.path), 0)
@@ -647,11 +653,11 @@ class PlaylistPanel(QWidget):
         if not rows:
             return
         menu = QMenu(self)
-        a0 = QAction("播放", menu)
+        a0 = QAction(t("panel.play"), menu)
         a0.triggered.connect(lambda: self._on_activate_album(rows[0]))
         menu.addAction(a0)
         menu.addSeparator()
-        a1 = QAction("从专辑移除", menu)
+        a1 = QAction(t("panel.remove_from_album"), menu)
         a1.triggered.connect(lambda: self._album_remove(tuple(rows)))
         menu.addAction(a1)
         menu.exec(self.album_list.viewport().mapToGlobal(pos))
@@ -664,9 +670,8 @@ class PlaylistPanel(QWidget):
 
     def _album_add_files(self) -> None:
         paths, _sel = QFileDialog.getOpenFileNames(
-            self, "添加到专辑", str(settings["last_folder"] or ""),
-            "媒体文件 (*.mp4 *.mkv *.avi *.mov *.wmv *.flv *.ts *.webm *.rmvb "
-            "*.jpg *.jpeg *.png *.gif *.webp *.bmp *.avif *.heic);;所有文件 (*.*)",
+            self, t("panel.add_to_album_files"), str(settings["last_folder"] or ""),
+            t("panel.filter_media") + ";;" + t("panel.filter_all"),
         )
         if paths:
             albums.add(self._current_album, paths)
@@ -745,7 +750,7 @@ class PlaylistPanel(QWidget):
         row1.setSpacing(3)
         self.search = QLineEdit()
         self.search.setObjectName("PanelSearch")
-        self.search.setPlaceholderText("在列表中搜索…")
+        self.search.setPlaceholderText(t("panel.search_placeholder"))
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._apply_filter)
         row1.addWidget(self.search, 1)
@@ -753,39 +758,39 @@ class PlaylistPanel(QWidget):
 
         row2 = QHBoxLayout()
         row2.setSpacing(3)
-        b_up = _tool(icons.MOVE_UP, "上移选中项")
+        b_up = _tool(icons.MOVE_UP, t("panel.move_up_tip"))
         b_up.clicked.connect(lambda: self._move_selected(-1))
         row2.addWidget(b_up)
-        b_down = _tool(icons.MOVE_DOWN, "下移选中项")
+        b_down = _tool(icons.MOVE_DOWN, t("panel.move_down_tip"))
         b_down.clicked.connect(lambda: self._move_selected(1))
         row2.addWidget(b_down)
-        b_add = _tool(icons.PLUS, "添加文件到当前专辑")
+        b_add = _tool(icons.PLUS, t("panel.add_files_tip"))
         b_add.clicked.connect(self._footer_add)
         row2.addWidget(b_add)
-        b_rm = _tool(icons.MINUS, "从列表移除选中项  (Delete)")
+        b_rm = _tool(icons.MINUS, t("panel.remove_selected_tip"))
         b_rm.clicked.connect(self._remove_selected)
         row2.addWidget(b_rm)
 
-        self.btn_io = _tool(icons.PLAYLIST, "导入 / 导出播放列表")
+        self.btn_io = _tool(icons.PLAYLIST, t("panel.io_tip"))
         self.btn_io.setPopupMode(QToolButton.InstantPopup)
         io_menu = QMenu(self)
-        act_imp = QAction("导入播放列表…", io_menu)
+        act_imp = QAction(t("panel.import_playlist_ellipsis"), io_menu)
         act_imp.triggered.connect(self._import_playlist)
         io_menu.addAction(act_imp)
-        act_exp = QAction("导出当前列表…", io_menu)
+        act_exp = QAction(t("panel.export_playlist_ellipsis"), io_menu)
         act_exp.triggered.connect(self._export_playlist)
         io_menu.addAction(act_exp)
         self.btn_io.setMenu(io_menu)
         row2.addWidget(self.btn_io)
 
         row2.addStretch(1)
-        self.btn_loop = _tool(icons.REPEAT_ALL, "循环模式", 28)
+        self.btn_loop = _tool(icons.REPEAT_ALL, t("panel.loop_tip"), 28)
         self.btn_loop.clicked.connect(self._cycle_loop)
         row2.addWidget(self.btn_loop)
         self.btn_autoplay = QToolButton()
         self.btn_autoplay.setObjectName("PanelBtn")
-        self.btn_autoplay.setText("连放")
-        self.btn_autoplay.setToolTip("一个播完自动接下一个")
+        self.btn_autoplay.setText(t("panel.autoplay_text"))
+        self.btn_autoplay.setToolTip(t("panel.autoplay_tip"))
         self.btn_autoplay.setCheckable(True)
         self.btn_autoplay.setFixedHeight(24)
         self.btn_autoplay.setCursor(Qt.PointingHandCursor)
@@ -800,7 +805,7 @@ class PlaylistPanel(QWidget):
             self._album_add_files()
         else:
             self._select_tab(1)
-            self._toast("切到「专辑」标签后即可添加文件")
+            self._toast(t("panel.switch_to_album_hint"))
 
     def _active_list(self) -> MediaListWidget:
         return self.album_list if self.stack.currentIndex() == 1 else self.list
@@ -855,10 +860,10 @@ class PlaylistPanel(QWidget):
     def _export_playlist(self) -> None:
         items = self.list.items()
         if not items:
-            self._toast("当前列表是空的")
+            self._toast(t("panel.playlist_empty"))
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, "导出播放列表", "playlist.m3u8", "播放列表 (*.m3u8 *.m3u)"
+            self, t("panel.export_dialog_title"), "playlist.m3u8", t("panel.filter_playlist")
         )
         if not path:
             return
@@ -868,20 +873,20 @@ class PlaylistPanel(QWidget):
                 lines.append(f"#EXTINF:-1,{it.name}")
                 lines.append(str(it.path))
             Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
-            self._toast(f"已导出 {len(items)} 项")
+            self._toast(t("panel.exported_count").format(count=len(items)))
         except OSError as exc:
-            self._toast(f"导出失败：{exc}")
+            self._toast(t("panel.export_failed").format(err=exc))
 
     def _import_playlist(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "导入播放列表", "", "播放列表 (*.m3u8 *.m3u *.txt);;所有文件 (*.*)"
+            self, t("panel.import_dialog_title"), "", t("panel.filter_playlist_all")
         )
         if not path:
             return
         try:
             raw = Path(path).read_text(encoding="utf-8", errors="ignore").splitlines()
         except OSError as exc:
-            self._toast(f"读取失败：{exc}")
+            self._toast(t("panel.read_failed").format(err=exc))
             return
         base = Path(path).parent
         items = []
@@ -901,9 +906,9 @@ class PlaylistPanel(QWidget):
             if it is not None:
                 items.append(it)
         if not items:
-            self._toast("没有找到可播放的条目")
+            self._toast(t("panel.no_playable_items"))
             return
-        self._toast(f"已导入 {len(items)} 项")
+        self._toast(t("panel.imported_count").format(count=len(items)))
         self.playlist_imported.emit(items)
 
     # ---------------------------------------------------------- loop modes
@@ -919,7 +924,7 @@ class PlaylistPanel(QWidget):
             mode = "off"
         settings["loop_mode"] = mode
         self.btn_loop.setText(LOOP_ICONS[mode])
-        self.btn_loop.setToolTip(f"循环模式：{LOOP_LABELS[mode]}（点击切换）")
+        self.btn_loop.setToolTip(t("panel.loop_tooltip").format(mode=t(LOOP_LABELS[mode])))
         self.btn_loop.setProperty("active", mode != "off")
         self.btn_loop.style().unpolish(self.btn_loop)
         self.btn_loop.style().polish(self.btn_loop)
@@ -942,7 +947,7 @@ class PlaylistPanel(QWidget):
         self.list.set_thumb_mode(on)
         self.album_list.set_thumb_mode(on)
         self.btn_density.setText(icons.VIEW_TILES if on else icons.VIEW_LIST)
-        self.btn_density.setToolTip("当前：缩略图行（点击切紧凑）" if on else "当前：紧凑行（点击切缩略图）")
+        self.btn_density.setToolTip(t("panel.density_thumb_tip") if on else t("panel.density_compact_tip"))
         settings["panel_thumb_mode"] = on
 
     # -------------------------------------------------------------- public

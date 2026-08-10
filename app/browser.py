@@ -31,6 +31,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QAbstractScrollArea, QTableView, QHeaderView
 
 from . import theme
+from .i18n import t
 from .media import MediaItem, format_duration
 from .thumbs import ThumbnailCache
 
@@ -46,7 +47,15 @@ GRID_TILE_ASPECT = 3 / 4
 class MediaModel(QAbstractTableModel):
     """Backing store for both views. Columns are only used by the details table."""
 
-    COLUMNS = ["名称", "类型", "大小", "分辨率", "时长", "修改时间"]
+    # Column keys are i18n keys; headerData() renders them via t().
+    COLUMNS = [
+        "browser.col_name",
+        "browser.col_type",
+        "browser.col_size",
+        "browser.col_resolution",
+        "browser.col_duration",
+        "browser.col_mtime",
+    ]
     sort_requested = Signal(str, bool)
 
     def __init__(self, parent=None) -> None:
@@ -71,7 +80,7 @@ class MediaModel(QAbstractTableModel):
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
-            return self.COLUMNS[section]
+            return t(self.COLUMNS[section])
         return None
 
     def data(self, index, role=Qt.DisplayRole):
@@ -83,7 +92,7 @@ class MediaModel(QAbstractTableModel):
             if col == 0:
                 return it.name
             if col == 1:
-                return "视频" if it.is_video else "图片"
+                return t("browser.type_video") if it.is_video else t("browser.type_image")
             if col == 2:
                 return it.size_text()
             if col == 3:
@@ -371,7 +380,7 @@ class TileView(QAbstractScrollArea):
             p.drawText(
                 self.viewport().rect(),
                 Qt.AlignCenter,
-                "这个文件夹里没有图片或视频\n\n用左上角「打开文件夹」选择目录，或把文件夹拖进来",
+                t("browser.empty_folder"),
             )
             return
 
@@ -430,7 +439,7 @@ class TileView(QAbstractScrollArea):
         # badge: duration for video, GIF marker for animations
         badge = ""
         if it.is_video:
-            badge = format_duration(it.duration) if it.duration else "视频"
+            badge = format_duration(it.duration) if it.duration else t("browser.badge_video")
         elif it.is_animated and it.suffix == ".gif":
             badge = "GIF"
         if badge and img_rect.width() > 60:
