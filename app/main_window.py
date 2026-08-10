@@ -957,7 +957,21 @@ class MainWindow(QMainWindow):
             self.viewer.index_changed.connect(self._on_viewer_index)
             self.viewer.folder_requested.connect(self._on_panel_folder_requested)
             self.viewer.playlist_changed.connect(self._on_playlist_changed)
+            self.viewer.sort_requested.connect(self._on_panel_sort_requested)
         return self.viewer
+
+    def _on_panel_sort_requested(self, key: str, desc: bool) -> None:
+        """The panel's sort combo changed; mirror it into the toolbar and re-sort."""
+        idx = self.sort_combo.findData(key)
+        if idx >= 0:
+            self.sort_combo.blockSignals(True)
+            self.sort_combo.setCurrentIndex(idx)
+            self.sort_combo.blockSignals(False)
+        self.btn_desc.blockSignals(True)
+        self.btn_desc.setChecked(desc)
+        self.btn_desc.blockSignals(False)
+        self._update_desc_icon()
+        self._apply_view()
 
     def _on_panel_folder_requested(self, folder: Path) -> None:
         """Browser tab picked a folder: rescan and hand the new list to the viewer."""

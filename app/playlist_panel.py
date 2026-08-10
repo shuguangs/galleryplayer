@@ -304,6 +304,7 @@ class PlaylistPanel(QWidget):
     album_play_requested = Signal(list, int)  # [MediaItem], start index
     loop_mode_changed = Signal(str)
     autoplay_changed = Signal(bool)
+    sort_requested = Signal(str, bool)  # (sort_key, desc) — shared with main window
     playlist_imported = Signal(list)          # [MediaItem] loaded from a .m3u/.m3u8
     closed = Signal()
     width_changed = Signal(int)
@@ -783,17 +784,18 @@ class PlaylistPanel(QWidget):
         self.btn_io.setMenu(io_menu)
         row2.addWidget(self.btn_io)
 
-        # ---- sort the panel's own list (independent of the main window) ----
+        # ---- sort the panel's list; shares settings["sort_key"] with the main
+        #      window so the playlist always inherits the browser's ordering ----
         self.sort_combo = icons.ArrowComboBox()
         for key, label in media.SORT_LABELS.items():
             self.sort_combo.addItem(t(label), key)
-        idx = self.sort_combo.findData(str(settings["panel_sort_key"]))
+        idx = self.sort_combo.findData(str(settings["sort_key"]))
         self.sort_combo.setCurrentIndex(max(0, idx))
         self.sort_combo.currentIndexChanged.connect(self._apply_panel_sort)
         row2.addWidget(self.sort_combo)
         self.btn_sort_desc = _tool(icons.SORT_ASC, t("main_window.sort_toggle_tip"), 22)
         self.btn_sort_desc.setCheckable(True)
-        self.btn_sort_desc.setChecked(bool(settings["panel_sort_desc"]))
+        self.btn_sort_desc.setChecked(bool(settings["sort_desc"]))
         self.btn_sort_desc.clicked.connect(self._apply_panel_sort)
         row2.addWidget(self.btn_sort_desc)
 
@@ -823,9 +825,10 @@ class PlaylistPanel(QWidget):
         self.list.set_items(self._all_items, -1)
         self._apply_filter(self.search.text())
         self.list.set_playing(current)
-        self.playlist_reordered.emit(self._all_items)
-        settings["panel_sort_key"] = key
-        settings["panel_sort_desc"] = desc
+        # shared with the main window: persist + tell it to re-sort the browser
+        settings["sort_key"] = key
+        settings["sort_desc"] = desc
+        self.sort_requested.emit(key, desc)
 
     def _footer_add(self) -> None:
         if self.stack.currentIndex() == 1:
@@ -980,10 +983,22 @@ class PlaylistPanel(QWidget):
     # -------------------------------------------------------------- public
 
     def set_playlist(self, items: list[MediaItem], current: int) -> None:
+        # Inherit the browser's current ordering: the playlist opens sorted the
+        # same way the main window's file browser is sorted.
+        target = items[current].path if 0 <= current < len(items) else None
+        items = media.sort_items(
+            list(items), str(settings["sort_key"]), bool(settings["sort_desc"])
+        )
         self._all_items = list(items)
-        self.list.set_items(self._all_items, current)
+        cur = -1
+        if target is not None:
+            for i, it in enumerate(items):
+                if it.path == target:
+                    cur = i
+                    break
+        self.list.set_items(self._all_items, cur)
         self._apply_filter(self.search.text())
-        self.list.set_playing(current)
+        self.list.set_playing(cur)
 
     def set_current(self, index: int) -> None:
         target = self._all_items[index].path if 0 <= index < len(self._all_items) else None

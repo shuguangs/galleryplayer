@@ -41,6 +41,7 @@ class Viewer(QWidget):
     index_changed = Signal(int)
     folder_requested = Signal(object)     # Path, from the panel's browser tab
     playlist_changed = Signal(list)       # reordered / trimmed MediaItem list
+    sort_requested = Signal(str, bool)    # (sort_key, desc) from the panel
     _capture_saved = Signal(str)          # toast text, emitted from a worker thread
 
     def __init__(self, thumbs: ThumbnailCache, fs_model_provider=None) -> None:
@@ -193,6 +194,7 @@ class Viewer(QWidget):
         p.folder_requested.connect(self.folder_requested)
         p.loop_mode_changed.connect(self._on_loop_mode)
         p.autoplay_changed.connect(lambda on: settings.__setitem__("autoplay_next", on))
+        p.sort_requested.connect(self.sort_requested)
         p.playlist_imported.connect(self._on_playlist_imported)
         p.closed.connect(lambda: self.set_panel_visible(False))
         p.width_changed.connect(self._on_panel_width)
