@@ -1,0 +1,537 @@
+"""libmpv video surface rendered into a QOpenGLWidget.
+
+Using mpv's render API (rather than handing mpv a native window id) is what lets
+ordinary Qt widgets — the control bar, the top bar — sit on top of the video,
+because Qt 6 composites QOpenGLWidget into the window's backing store.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
+
+import mpv
+
+from . import netpath
+from .config import settings
+
+
+class Track:
+    __slots__ = ("id", "kind", "title", "lang", "codec", "selected", "external")
+
+    def __init__(self, raw: dict) -> None:
+        self.id = raw.get("id")
+        self.kind = raw.get("type")
+        self.title = raw.get("title") or ""
+        self.lang = raw.get("lang") or ""
+        self.codec = raw.get("codec") or ""
+        self.selected = bool(raw.get("selected"))
+        self.external = bool(raw.get("external"))
+
+    def label(self) -> str:
+        bits = [b for b in (self.title, self.lang.upper() if self.lang else "") if b]
+        name = " · ".join(bits) if bits else f"轨道 {self.id}"
+        if self.external:
+            name += "（外挂）"
+        return name
+
+
+class MpvWidget(QOpenGLWidget):
+    position_changed = Signal(float)
+    duration_changed = Signal(float)
+    pause_changed = Signal(bool)
+    speed_changed = Signal(float)
+    volume_changed = Signal(float)
+    mute_changed = Signal(bool)
+    cache_changed = Signal(float)
+    tracks_changed = Signal(list)
+    file_loaded = Signal()
+    eof_reached = Signal()
+    error = Signal(str)
+
+    _redraw = Signal()
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        self._ctx: mpv.MpvRenderContext | None = None
+        self._alive = True
+        self._observers: list[tuple[str, object]] = []
+        self._event_callbacks: list[object] = []
+        self._pending_seek: float | None = None
+        self.mpv = mpv.MPV(
+            vo="libmpv",
+            hwdec=str(settings["hwdec"]),
+            keep_open="always",
+            idle="yes",
+            terminal="no",
+            osc="no",
+            ytdl="no",
+            input_default_bindings="no",
+            input_vo_keyboard="no",
+            load_scripts="no",
+            hr_seek="yes",
+            volume=float(settings["volume"]),
+            mute="yes" if settings["muted"] else "no",
+            **{
+                "sub-auto": "fuzzy",
+                "sub-font-size": str(int(settings["sub_font_size"])),
+                "sub-border-size": "2.4",
+                "sub-shadow-offset": "0.6",
+                "sub-visibility": "yes" if settings["sub_visible"] else "no",
+                "demuxer-max-bytes": "32MiB",  # plenty for local files
+                "cache": "yes",
+                "audio-file-auto": "fuzzy",
+                "screenshot-format": "png",
+                "alang": "chi,zho,jpn,eng",
+                "slang": "chi,zho,eng",
+            },
+        )
+        self._redraw.connect(self.update, Qt.QueuedConnection)
+        self._wire_observers()
+
+    # -------------------------------------------------------------- wiring
+
+    def _observe(self, name: str, fn) -> None:
+        """Register a property observer that is inert once the widget is shut down.
+
+        mpv delivers property changes on its own event thread. Without this guard a
+        change that lands after teardown emits into an already-deleted QObject, which
+        crashes the process with an access violation on exit.
+        """
+
+        def handler(_name, value, fn=fn):
+            if not self._alive:
+                return
+            try:
+                fn(value)
+            except RuntimeError:
+                pass  # underlying C++ object is gone
+
+        self._observers.append((name, handler))
+        self.mpv.observe_property(name, handler)
+
+    def _wire_observers(self) -> None:
+        m = self.mpv
+        observe = self._observe
+
+        observe("time-pos", lambda v: self.position_changed.emit(float(v)) if v is not None else None)
+        observe("duration", lambda v: self.duration_changed.emit(float(v)) if v else None)
+        observe("pause", lambda v: self.pause_changed.emit(bool(v)))
+        observe("speed", lambda v: self.speed_changed.emit(float(v)) if v else None)
+        observe("volume", lambda v: self.volume_changed.emit(float(v)) if v is not None else None)
+        observe("mute", lambda v: self.mute_changed.emit(bool(v)))
+        observe("demuxer-cache-time", lambda v: self.cache_changed.emit(float(v)) if v else None)
+        observe("track-list", self._on_track_list)
+        observe("eof-reached", lambda v: self.eof_reached.emit() if v else None)
+
+        @m.event_callback("file-loaded")
+        def _loaded(_evt):  # noqa: ANN001
+            if not self._alive:
+                return
+            # Resume by a *keyframe* seek here rather than an exact --start seek on
+            # load: an exact seek decodes from the previous keyframe forward to the
+            # target, which stalls 1-2s on long clips with sparse keyframes and is
+            # felt as a freeze when switching videos. A keyframe seek is ~20x faster
+            # and lands a little before the saved spot -- fine for "continue".
+            seek_to = self._pending_seek
+            self._pending_seek = None
+            if seek_to:
+                try:
+                    self.mpv.command("seek", seek_to, "absolute+keyframes")
+                except Exception:
+                    pass
+            try:
+                self.file_loaded.emit()
+            except RuntimeError:
+                pass
+
+        @m.event_callback("end-file")
+        def _end(evt):  # noqa: ANN001
+            if not self._alive:
+                return
+            data = getattr(evt, "data", None) or {}
+            reason = data.get("reason") if isinstance(data, dict) else None
+            if reason == "error":
+                try:
+                    self.error.emit(str(data.get("file_error") or "无法播放该文件"))
+                except RuntimeError:
+                    pass
+
+        self._event_callbacks = [_loaded, _end]
+
+    def _on_track_list(self, raw) -> None:
+        try:
+            self.tracks_changed.emit([Track(t) for t in (raw or [])])
+        except Exception:
+            self.tracks_changed.emit([])
+
+    # ------------------------------------------------------------- OpenGL
+
+    def initializeGL(self) -> None:
+        glctx = self.context()
+
+        def get_proc(_ctx, name):
+            if isinstance(name, bytes):
+                name = name.decode()
+            addr = glctx.getProcAddress(name)
+            return int(addr) if addr else 0
+
+        self._ctx = mpv.MpvRenderContext(
+            self.mpv,
+            "opengl",
+            opengl_init_params={"get_proc_address": mpv.MpvGlGetProcAddressFn(get_proc)},
+        )
+        self._ctx.update_cb = self._request_redraw
+
+    def _request_redraw(self) -> None:
+        """Called from mpv's render thread whenever a new frame is ready."""
+        if not self._alive:
+            return
+        try:
+            self._redraw.emit()
+        except RuntimeError:
+            pass  # widget already destroyed
+
+    def paintGL(self) -> None:
+        if not self._ctx or not self._alive:
+            return
+        r = self.devicePixelRatioF()
+        try:
+            self._ctx.render(
+                flip_y=True,
+                opengl_fbo={
+                    "w": max(1, int(self.width() * r)),
+                    "h": max(1, int(self.height() * r)),
+                    "fbo": self.defaultFramebufferObject(),
+                },
+            )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------- playback API
+
+    # Local files can be read on demand; a share needs a real read-ahead buffer or
+    # every seek and every bitrate spike turns into a stall.
+    LOCAL_CACHE = {"demuxer-max-bytes": "32MiB", "cache-secs": "10", "demuxer-readahead-secs": "5"}
+    REMOTE_CACHE = {"demuxer-max-bytes": "192MiB", "cache-secs": "60", "demuxer-readahead-secs": "30"}
+
+    def load(self, path: str | Path, start_at: float | None = None) -> None:
+        for key, value in (self.REMOTE_CACHE if netpath.is_remote(path) else self.LOCAL_CACHE).items():
+            try:
+                self.mpv[key] = value
+            except Exception:
+                pass
+        self._pending_seek = float(start_at) if (start_at and start_at > 1) else None
+        self.mpv.loadfile(str(path), "replace")
+        self.mpv.pause = False
+
+    def stop(self) -> None:
+        try:
+            self.mpv.command("stop")
+        except Exception:
+            pass
+
+    def toggle_pause(self) -> None:
+        self.mpv.pause = not bool(self.mpv.pause)
+
+    def set_pause(self, value: bool) -> None:
+        self.mpv.pause = bool(value)
+
+    @property
+    def paused(self) -> bool:
+        return bool(self.mpv.pause)
+
+    @property
+    def position(self) -> float:
+        return float(self.mpv.time_pos or 0.0)
+
+    @property
+    def duration(self) -> float:
+        return float(self.mpv.duration or 0.0)
+
+    def seek_absolute(self, seconds: float) -> None:
+        try:
+            self.mpv.command("seek", max(0.0, seconds), "absolute+exact")
+        except Exception:
+            pass
+
+    def seek_relative(self, delta: float) -> None:
+        try:
+            self.mpv.command("seek", delta, "relative")
+        except Exception:
+            pass
+
+    def set_speed(self, value: float) -> None:
+        self.mpv.speed = max(0.1, min(8.0, value))
+        settings["speed"] = float(self.mpv.speed)
+
+    @property
+    def speed(self) -> float:
+        return float(self.mpv.speed or 1.0)
+
+    def set_volume(self, value: float) -> None:
+        v = max(0.0, min(150.0, value))
+        self.mpv.volume = v
+        settings["volume"] = int(v)
+
+    @property
+    def volume(self) -> float:
+        return float(self.mpv.volume or 0.0)
+
+    def toggle_mute(self) -> None:
+        self.mpv.mute = not bool(self.mpv.mute)
+        settings["muted"] = bool(self.mpv.mute)
+
+    @property
+    def muted(self) -> bool:
+        return bool(self.mpv.mute)
+
+    def set_loop(self, on: bool) -> None:
+        self.mpv.loop_file = "inf" if on else "no"
+
+    # ------------------------------------------------------ subs / audio
+
+    def set_track(self, kind: str, track_id) -> None:
+        prop = {"sub": "sid", "audio": "aid", "video": "vid"}[kind]
+        try:
+            setattr(self.mpv, prop, track_id)
+        except Exception:
+            pass
+
+    def current_track(self, kind: str):
+        prop = {"sub": "sid", "audio": "aid", "video": "vid"}[kind]
+        try:
+            return getattr(self.mpv, prop)
+        except Exception:
+            return None
+
+    def cycle_track(self, kind: str) -> None:
+        """Advance to the next track of `kind`, wrapping.
+
+        mpv's own `cycle audio` also steps through the no-track state, so pressing A
+        on a two-language file lands on silence every third press. Cycling only over
+        real tracks is what the key is for; V / the menu turn things off.
+        """
+        try:
+            ids = [
+                t.get("id")
+                for t in (self.mpv.track_list or [])
+                if t.get("type") == kind and t.get("id") is not None
+            ]
+        except Exception:
+            ids = []
+        if not ids:
+            return
+        current = self.current_track(kind)
+        try:
+            nxt = ids[(ids.index(current) + 1) % len(ids)]
+        except ValueError:
+            nxt = ids[0]
+        self.set_track(kind, nxt)
+
+    def add_subtitle_file(self, path: str) -> None:
+        try:
+            self.mpv.command("sub-add", path, "select")
+        except Exception:
+            pass
+
+    def set_sub_visible(self, visible: bool) -> None:
+        self.mpv.sub_visibility = bool(visible)
+        settings["sub_visible"] = bool(visible)
+
+    @property
+    def sub_visible(self) -> bool:
+        return bool(self.mpv.sub_visibility)
+
+    def set_sub_font_size(self, size: int) -> None:
+        size = max(16, min(96, size))
+        self.mpv.sub_font_size = size
+        settings["sub_font_size"] = size
+
+    @property
+    def sub_font_size(self) -> int:
+        try:
+            return int(self.mpv.sub_font_size)
+        except Exception:
+            return int(settings["sub_font_size"])
+
+    def adjust_sub_delay(self, delta: float) -> float:
+        try:
+            self.mpv.sub_delay = float(self.mpv.sub_delay or 0.0) + delta
+            return float(self.mpv.sub_delay)
+        except Exception:
+            return 0.0
+
+    @property
+    def sub_delay(self) -> float:
+        try:
+            return float(self.mpv.sub_delay or 0.0)
+        except Exception:
+            return 0.0
+
+    @property
+    def media_title(self) -> str:
+        try:
+            return str(self.mpv.media_title or "")
+        except Exception:
+            return ""
+
+    @property
+    def hwdec_active(self) -> str:
+        try:
+            return str(self.mpv.hwdec_current or "no")
+        except Exception:
+            return "no"
+
+    def set_hwdec(self, mode: str) -> None:
+        """Switch hardware/software decoding at runtime.
+
+        mpv accepts 'auto-safe' / 'auto' / 'auto-copy' / 'no' (and a few more).
+        'no' forces CPU decoding; the others let the GPU handle it when possible.
+        """
+        try:
+            self.mpv.hwdec = str(mode)
+        except Exception:
+            pass
+
+    @property
+    def video_native_size(self) -> tuple[int, int]:
+        """Return the video's native (width, height) in pixels, or (0, 0) if unknown.
+
+        'dwidth'/'dheight' are the destination dimensions after any rotation or
+        anamorphic stretch, which is what the window should match; 'video-params'
+        gives the raw codec dimensions, which can differ for anamorphic sources.
+        """
+        try:
+            w = int(self.mpv.dwidth or 0)
+            h = int(self.mpv.dheight or 0)
+            if w and h:
+                return w, h
+        except Exception:
+            pass
+        try:
+            params = self.mpv.video_params or {}
+            return int(params.get("w", 0) or 0), int(params.get("h", 0) or 0)
+        except Exception:
+            return 0, 0
+
+    @property
+    def video_codec(self) -> str:
+        try:
+            return str(self.mpv.video_codec or "")
+        except Exception:
+            return ""
+
+    def screenshot(self, path: str) -> bool:
+        try:
+            self.mpv.command("screenshot-to-file", path, "video")
+            return True
+        except Exception:
+            return False
+
+    def grab_frame(self):
+        """Current video frame as a PIL image (or None). Used for GIF capture."""
+        try:
+            return self.mpv.screenshot_raw(includes="video")
+        except Exception:
+            return None
+
+    # ------------------------------------------------------ A-B loop / step
+
+    def set_ab_loop(self, which: str, pos: float | None) -> None:
+        """Set the A or B point of mpv's native A-B loop (None clears that point)."""
+        prop = "ab-loop-a" if which == "a" else "ab-loop-b"
+        try:
+            self.mpv[prop] = "no" if pos is None else float(pos)
+        except Exception:
+            pass
+
+    def clear_ab_loop(self) -> None:
+        for prop in ("ab-loop-a", "ab-loop-b"):
+            try:
+                self.mpv[prop] = "no"
+            except Exception:
+                pass
+
+    def frame_step(self, back: bool = False) -> None:
+        """Advance (or rewind) exactly one frame; mpv pauses as a side effect."""
+        try:
+            self.mpv.command("frame-back-step" if back else "frame-step")
+        except Exception:
+            pass
+
+    # ------------------------------------------------------ video equalizer
+
+    # mpv exposes these as integer properties in the -100..100 range; 0 is neutral.
+    EQ_PROPS = ("brightness", "contrast", "saturation", "gamma", "hue")
+
+    def set_video_eq(self, name: str, value: int) -> None:
+        if name not in self.EQ_PROPS:
+            return
+        try:
+            setattr(self.mpv, name, max(-100, min(100, int(value))))
+        except Exception:
+            pass
+
+    def get_video_eq(self, name: str) -> int:
+        try:
+            return int(getattr(self.mpv, name) or 0)
+        except Exception:
+            return 0
+
+    def reset_video_eq(self) -> None:
+        for name in self.EQ_PROPS:
+            self.set_video_eq(name, 0)
+
+    # ------------------------------------------------------------ teardown
+
+    def shutdown(self) -> None:
+        if not self._alive:
+            return
+        self._alive = False  # from here on, mpv-thread callbacks are no-ops
+
+        for name, handler in self._observers:
+            try:
+                self.mpv.unobserve_property(name, handler)
+            except Exception:
+                pass
+        self._observers.clear()
+        for cb in self._event_callbacks:
+            try:
+                cb.unregister_mpv_event_callback()
+            except Exception:
+                pass
+        self._event_callbacks.clear()
+        try:
+            self.mpv.command("stop")
+        except Exception:
+            pass
+
+        ctx, self._ctx = self._ctx, None
+        if ctx is not None:
+            # NOT None: python-mpv wraps the value in `lambda: func()` and re-registers
+            # it, so assigning None installs a callback that raises on the next frame.
+            ctx.update_cb = lambda: None
+            # mpv_render_context_free() must run with the GL context current on this
+            # thread; freeing it without makeCurrent() faults inside the driver.
+            made_current = False
+            try:
+                self.makeCurrent()
+                made_current = True
+            except Exception:
+                pass
+            try:
+                ctx.free()
+            except Exception:
+                pass
+            if made_current:
+                try:
+                    self.doneCurrent()
+                except Exception:
+                    pass
+        try:
+            self.mpv.terminate()
+        except Exception:
+            pass
