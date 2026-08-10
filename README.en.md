@@ -19,6 +19,7 @@
 - **Subtitles just work**: drop a same-name subtitle file next to the video; adjust the font size and timing on the fly.
 - **Phone photos included**: HEIC and other modern image formats open directly.
 - **Network folders work too**: browse and play from shared LAN folders and mapped network drives.
+- **Sort it your way**: sort the file browser and the left folder tree by name / modified time / size, ascending or descending; the playlist inherits your chosen order when the player opens.
 - **Truly portable**: copy the whole folder to a USB stick and it runs on any PC — no install, no registry, nothing left behind.
 - **Clean, immersive UI**: dark theme; the controls fade out when the mouse is idle.
 
