@@ -107,6 +107,9 @@ def main() -> int:
         "--contents-directory", "_internal",
         "--distpath", str(DIST),
         "--workpath", str(BUILD),
+        # keep the generated .spec inside build/, not at the project root,
+        # so a build never rewrites the committed relative-path spec
+        "--specpath", str(BUILD),
         str(ROOT / "main.py"),
     ]
     for mod in EXCLUDES:
