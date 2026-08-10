@@ -783,6 +783,20 @@ class PlaylistPanel(QWidget):
         self.btn_io.setMenu(io_menu)
         row2.addWidget(self.btn_io)
 
+        # ---- sort the panel's own list (independent of the main window) ----
+        self.sort_combo = icons.ArrowComboBox()
+        for key, label in media.SORT_LABELS.items():
+            self.sort_combo.addItem(t(label), key)
+        idx = self.sort_combo.findData(str(settings["panel_sort_key"]))
+        self.sort_combo.setCurrentIndex(max(0, idx))
+        self.sort_combo.currentIndexChanged.connect(self._apply_panel_sort)
+        row2.addWidget(self.sort_combo)
+        self.btn_sort_desc = _tool(icons.SORT_ASC, t("main_window.sort_toggle_tip"), 22)
+        self.btn_sort_desc.setCheckable(True)
+        self.btn_sort_desc.setChecked(bool(settings["panel_sort_desc"]))
+        self.btn_sort_desc.clicked.connect(self._apply_panel_sort)
+        row2.addWidget(self.btn_sort_desc)
+
         row2.addStretch(1)
         self.btn_loop = _tool(icons.REPEAT_ALL, t("panel.loop_tip"), 28)
         self.btn_loop.clicked.connect(self._cycle_loop)
@@ -799,6 +813,19 @@ class PlaylistPanel(QWidget):
         row2.addWidget(self.btn_autoplay)
         outer.addLayout(row2)
         return self.footer
+
+    def _apply_panel_sort(self) -> None:
+        key = self.sort_combo.currentData() or "name"
+        desc = self.btn_sort_desc.isChecked()
+        items = media.sort_items(self._all_items, key, desc)
+        current = getattr(self.list, "playing_row", -1)
+        self._all_items = list(items)
+        self.list.set_items(self._all_items, -1)
+        self._apply_filter(self.search.text())
+        self.list.set_playing(current)
+        self.playlist_reordered.emit(self._all_items)
+        settings["panel_sort_key"] = key
+        settings["panel_sort_desc"] = desc
 
     def _footer_add(self) -> None:
         if self.stack.currentIndex() == 1:

@@ -7,6 +7,7 @@ next launch rather than mid-playback -- the footer says so.
 """
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt
@@ -248,8 +249,33 @@ class SettingsDialog(QDialog):
 
     def _on_lang_changed(self, _index: int) -> None:
         code = self.combo_lang.currentData()
-        if code:
-            set_language(str(code))
+        if not code or str(code) == current_language():
+            return
+        set_language(str(code))
+        box = QMessageBox(self)
+        box.setWindowTitle(t("settings.section_lang"))
+        box.setText(t("settings.lang_restart_confirm"))
+        box.setIcon(QMessageBox.Question)
+        now = box.addButton(t("settings.restart_now"), QMessageBox.AcceptRole)
+        box.addButton(t("settings.restart_later"), QMessageBox.RejectRole)
+        box.setDefaultButton(now)
+        box.exec()
+        if box.clickedButton() is now:
+            flush()
+            self._restart_app()
+
+    @staticmethod
+    def _restart_app() -> None:
+        """Restart the whole app so the new language takes effect everywhere."""
+        from PySide6.QtCore import QProcess
+        from PySide6.QtWidgets import QApplication
+
+        if getattr(sys, "frozen", False):  # packaged exe: just re-launch it
+            QProcess.startDetached(sys.executable, [])
+        else:  # source tree: relaunch via the entry script
+            entry = str(Path(__file__).resolve().parents[1] / "main.py")
+            QProcess.startDetached(sys.executable, [entry])
+        QApplication.quit()
 
     def _on_volume(self, v: int) -> None:
         self.lab_volume.setText(t("settings.volume_pct").format(v=v))

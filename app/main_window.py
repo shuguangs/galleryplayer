@@ -970,11 +970,6 @@ class MainWindow(QMainWindow):
         if self.folder is not None:
             orders.set(self.folder, [i.name for i in items])
             orders.save()
-            idx = self.sort_combo.findData("custom")
-            if idx >= 0 and self.sort_combo.currentData() != "custom":
-                self.sort_combo.blockSignals(True)
-                self.sort_combo.setCurrentIndex(idx)
-                self.sort_combo.blockSignals(False)
         self.model.set_items(list(items))
         self.tiles.relayout()
 

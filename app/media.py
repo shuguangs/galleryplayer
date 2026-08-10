@@ -37,7 +37,6 @@ SORT_LABELS = {
     "size": "media.sort_size",
     "duration": "media.sort_duration",
     "random": "media.sort_random",
-    "custom": "media.sort_custom",
 }
 FILTER_LABELS = {
     "all": "media.filter_all",

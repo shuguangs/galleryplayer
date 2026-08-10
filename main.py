@@ -45,6 +45,25 @@ def main() -> int:
     # icon font detection needs a live QApplication, and the stylesheet needs the result
     app.setStyleSheet(theme.build_stylesheet(icons.detect_family()))
 
+    # First launch: ask for the interface language before any window shows.
+    from app.config import flush, settings
+
+    if not settings["language"]:
+        from PySide6.QtWidgets import QMessageBox
+
+        box = QMessageBox()
+        box.setWindowTitle("选择界面语言 / Choose language")
+        box.setText(
+            "欢迎使用！请选择界面语言：\n"
+            "Welcome! Choose your interface language:"
+        )
+        btn_zh = box.addButton("中文", QMessageBox.AcceptRole)
+        btn_en = box.addButton("English", QMessageBox.AcceptRole)
+        box.setDefaultButton(btn_zh)
+        box.exec()
+        settings["language"] = "zh" if box.clickedButton() is btn_zh else "en"
+        flush()
+
     from app.main_window import MainWindow
 
     win = MainWindow()
