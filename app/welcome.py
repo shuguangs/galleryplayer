@@ -92,7 +92,20 @@ class WelcomePage(QWidget):
         fholder.addStretch(1)
         outer.addLayout(fholder)
 
+        outer.addSpacing(14)
+        crow = QHBoxLayout()
+        crow.addStretch(1)
+        self.btn_clear = QPushButton(t("welcome.clear_history"))
+        self.btn_clear.setObjectName("WelcomeHint")
+        self.btn_clear.setFlat(True)
+        self.btn_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_clear.clicked.connect(self._clear_history)
+        crow.addWidget(self.btn_clear)
+        crow.addStretch(1)
+        outer.addLayout(crow)
+
         outer.addStretch(3)
+        self._cleared = False
         self.refresh_recent()
 
     # ------------------------------------------------------------------
@@ -127,8 +140,38 @@ class WelcomePage(QWidget):
             QTimer.singleShot(0, lambda: self._apply_pruned(alive))
 
     def _apply_pruned(self, alive: list[str]) -> None:
+        if getattr(self, "_cleared", False):
+            return
         settings["recent_folders"] = alive
         self._show_recent(alive)
+
+    def _clear_history(self) -> None:
+        """Wipe the remembered folders and files after a confirmation."""
+        from PySide6.QtWidgets import QMessageBox
+
+        if (
+            not settings["recent_folders"]
+            and not settings["recent_files"]
+        ):
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle(t("welcome.clear_history"))
+        box.setText(t("welcome.clear_history_confirm"))
+        box.setIcon(QMessageBox.Question)
+        yes = box.addButton(t("welcome.clear_history_yes"), QMessageBox.AcceptRole)
+        box.addButton(t("welcome.clear_history_no"), QMessageBox.RejectRole)
+        box.setDefaultButton(yes)
+        box.exec()
+        if box.clickedButton() is not yes:
+            return
+        # ignore the pruning worker's result if it is still running
+        self._cleared = True
+        settings["recent_folders"] = []
+        settings["recent_files"] = []
+        from .config import flush
+
+        flush()
+        self.refresh_recent()
 
     def _show_recent(self, paths: list[str]) -> None:
         while self.recent_box.count():

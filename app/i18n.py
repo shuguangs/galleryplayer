@@ -466,4 +466,8 @@ _TR: dict[str, dict[str, str]] = {
     "welcome.open_folder": {"zh": "   打开文件夹", "en": "   Open Folder"},
     "welcome.recent_folders": {"zh": "最近打开", "en": "Recently opened"},
     "welcome.recent_files": {"zh": "最近播放", "en": "Recently played"},
+    "welcome.clear_history": {"zh": "清空历史记录", "en": "Clear history"},
+    "welcome.clear_history_confirm": {"zh": "确定要清空所有历史记录吗？此操作不可撤销。", "en": "Clear all history? This cannot be undone."},
+    "welcome.clear_history_yes": {"zh": "清空", "en": "Clear"},
+    "welcome.clear_history_no": {"zh": "取消", "en": "Cancel"},
 }
