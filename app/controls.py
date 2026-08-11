@@ -319,18 +319,21 @@ class ControlBar(QWidget):
         self.btn_speed = _overlay_button("1.0×", t("controls.speed_tip"), 56)
         self.btn_speed.setPopupMode(QToolButton.InstantPopup)
         self.btn_speed.setMenu(self._build_speed_menu())
+        self.btn_speed.menu().setTitle(t("controls.menu_speed"))
         row.addWidget(self.btn_speed)
         self.vid_widgets.append(self.btn_speed)
 
         self.btn_hwdec = _overlay_button(t("controls.hwdec_btn"), t("controls.hwdec_tip"), 44)
         self.btn_hwdec.setPopupMode(QToolButton.InstantPopup)
         self.btn_hwdec.setMenu(self._build_hwdec_menu())
+        self.btn_hwdec.menu().setTitle(t("controls.menu_hwdec"))
         row.addWidget(self.btn_hwdec)
         self.vid_widgets.append(self.btn_hwdec)
 
         self.btn_sub = _overlay_button(t("controls.sub_btn"), t("controls.sub_tip"), 44)
         self.btn_sub.setPopupMode(QToolButton.InstantPopup)
         self.btn_sub.setMenu(QMenu(self))
+        self.btn_sub.menu().setTitle(t("controls.menu_sub"))
         self.btn_sub.menu().aboutToShow.connect(self._fill_sub_menu)
         row.addWidget(self.btn_sub)
         self.vid_widgets.append(self.btn_sub)
@@ -338,6 +341,7 @@ class ControlBar(QWidget):
         self.btn_audio = _overlay_button(t("controls.audio_btn"), t("controls.audio_tip"), 44)
         self.btn_audio.setPopupMode(QToolButton.InstantPopup)
         self.btn_audio.setMenu(QMenu(self))
+        self.btn_audio.menu().setTitle(t("controls.menu_audio"))
         self.btn_audio.menu().aboutToShow.connect(self._fill_audio_menu)
         row.addWidget(self.btn_audio)
         self.vid_widgets.append(self.btn_audio)
@@ -356,6 +360,7 @@ class ControlBar(QWidget):
         self.btn_eq = _overlay_button(t("controls.eq_btn"), t("controls.eq_tip"), 44)
         self.btn_eq.setPopupMode(QToolButton.InstantPopup)
         self.btn_eq.setMenu(self._build_eq_menu())
+        self.btn_eq.menu().setTitle(t("controls.menu_eq"))
         row.addWidget(self.btn_eq)
         self.vid_widgets.append(self.btn_eq)
 
@@ -387,6 +392,33 @@ class ControlBar(QWidget):
         self.btn_full = _overlay_button(icons.FULLSCREEN, t("controls.fullscreen_tip"), icon=True)
         self.btn_full.clicked.connect(self.fullscreen_toggled)
         row.addWidget(self.btn_full)
+
+        # ---- responsive "more" overflow: on narrow windows the less-used
+        #      video buttons fold into this menu, from the least important first.
+        self._row = row
+        self._more_btn = _overlay_button(chr(0xE712), t("controls.more"), icon=True)
+        self._more_btn.setPopupMode(QToolButton.InstantPopup)
+        self._more_menu = QMenu(self)
+        self._more_menu.aboutToShow.connect(self._rebuild_more_menu)
+        self._more_btn.setMenu(self._more_menu)
+        self._more_btn.hide()
+        row.addWidget(self._more_btn)
+
+        # (widget, menu label) — fold order: earlier = folded away first.
+        self._flex: list[tuple[QToolButton, str]] = [
+            (self.btn_eq, t("controls.menu_eq")),
+            (self.btn_gif, t("controls.menu_gif")),
+            (self.btn_shot, t("controls.menu_shot")),
+            (self.btn_speed, t("controls.menu_speed")),
+            (self.btn_hwdec, t("controls.menu_hwdec")),
+            (self.btn_sub, t("controls.menu_sub")),
+            (self.btn_audio, t("controls.menu_audio")),
+            (self.btn_loop, t("controls.menu_loop")),
+            (self.btn_mute, t("controls.menu_mute")),
+            (self.btn_panel, t("controls.menu_panel")),
+            (self.btn_full, t("controls.menu_full")),
+        ]
+        self._update_flex()
 
     # ------------------------------------------------------------- menus
 
@@ -537,6 +569,61 @@ class ControlBar(QWidget):
     def mouseDoubleClickEvent(self, e) -> None:
         e.accept()
 
+    # -------------------------------------------- responsive overflow
+
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
+        self._update_flex()
+
+    def _row_width(self) -> int:
+        total = 0
+        n = 0
+        for i in range(self._row.count()):
+            item = self._row.itemAt(i)
+            w = item.widget()
+            # isHidden() rather than isVisible(): the latter is False whenever the
+            # parent chain is not mapped (offscreen tests, hidden overlay), which
+            # would make every button invisible and the row "empty".
+            if w is not None and not w.isHidden():
+                total += w.sizeHint().width()
+                n += 1
+        return total + self._row.spacing() * max(0, n - 1)
+
+    def _update_flex(self) -> None:
+        """Fold the least-used video buttons into the "more" menu when narrow."""
+        if not hasattr(self, "_flex"):
+            return
+        # start fully expanded
+        for w, _ in self._flex:
+            w.show()
+        self._more_btn.hide()
+        # reserve room for the more button itself (icon ~30px) + margins
+        avail = self.width() - 28 - 34
+        if self._row_width() <= avail:
+            return
+        for w, _ in self._flex:
+            if self._row_width() <= avail:
+                break
+            w.hide()
+        hidden = [w for w, _ in self._flex if w.isHidden()]
+        self._more_btn.setVisible(bool(hidden))
+
+    def _rebuild_more_menu(self) -> None:
+        self._more_menu.clear()
+        for w, label in self._flex:
+            if not w.isHidden():
+                continue
+            if w.menu() is not None:
+                # buttons that open their own menu become submenus here,
+                # keeping their dynamic fill logic (subs / audio tracks, ...)
+                self._more_menu.addMenu(w.menu())
+            else:
+                act = self._more_menu.addAction(label)
+                act.triggered.connect(lambda _=False, ww=w: self._flex_trigger(ww))
+
+    def _flex_trigger(self, w: QToolButton) -> None:
+        w.click()
+
     def set_media_kind(self, is_video: bool) -> None:
         self._is_video = is_video
         for w in self.vid_widgets:
@@ -547,6 +634,7 @@ class ControlBar(QWidget):
         self.seek.setVisible(is_video)
         self.seek.set_active(is_video)
         self.time_label.setVisible(is_video)
+        self._update_flex()
 
     def set_playing(self, playing: bool) -> None:
         self.btn_play.setText(icons.PAUSE if playing else icons.PLAY)
