@@ -9,9 +9,9 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, Signal
 from PySide6.QtGui import QCursor
-from PySide6.QtWidgets import QLabel, QStackedLayout, QWidget
+from PySide6.QtWidgets import QLabel, QMenu, QStackedLayout, QWidget
 
-from . import icons, theme
+from . import fileops, icons, theme
 from .config import resume, settings
 from .controls import SPEEDS, ControlBar, StageButton, TopBar
 from .i18n import t
@@ -888,6 +888,27 @@ class Viewer(QWidget):
         # must not count the teleport as deliberate travel.
         self._last_move_pos = None
         super().leaveEvent(e)
+
+    def contextMenuEvent(self, e) -> None:
+        """Right-click on the playing media: copy the image itself / the file."""
+        if not self.items or not (0 <= self.index < len(self.items)):
+            return
+        item = self.items[self.index]
+        menu = QMenu(self)
+        if not item.is_video:
+            act = menu.addAction(t("menu.copy_image"))
+            act.triggered.connect(lambda _=False, it=item: self._copy_current_image(it))
+        act = menu.addAction(t("menu.copy_file"))
+        act.triggered.connect(lambda _=False, it=item: self._copy_current_file(it))
+        menu.exec(e.globalPos())
+
+    def _copy_current_image(self, item: MediaItem) -> None:
+        ok = fileops.copy_image_to_clipboard(item.path)
+        self._show_toast(t("menu.copy_done") if ok else t("menu.copy_failed"))
+
+    def _copy_current_file(self, item: MediaItem) -> None:
+        fileops.copy_files_to_clipboard([item.path])
+        self._show_toast(t("menu.copy_done"))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self._current_is_video():

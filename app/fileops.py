@@ -107,6 +107,43 @@ def copy_to_clipboard(text: str) -> None:
         cb.setText(text)
 
 
+def copy_files_to_clipboard(paths: list[Path]) -> None:
+    """Put real file references on the clipboard.
+
+    Pasting in Explorer copies the files (Windows CF_HDROP via QMimeData urls).
+    """
+    from PySide6.QtCore import QMimeData, QUrl
+
+    mime = QMimeData()
+    mime.setUrls([QUrl.fromLocalFile(str(p)) for p in paths])
+    cb = QApplication.clipboard()
+    if cb is not None:
+        cb.setMimeData(mime)
+
+
+def copy_image_to_clipboard(path: Path) -> bool:
+    """Copy the image itself (pixels) to the clipboard, e.g. to paste into a chat.
+
+    Uses Pillow so HEIC / AVIF / JXL work too. Returns False if the file cannot
+    be decoded. Animated images paste as their first frame.
+    """
+    from PIL import Image
+
+    from .thumbs import pil_to_qimage  # registers HEIF/AVIF openers on import
+
+    try:
+        with Image.open(path) as im:
+            mode = im.mode
+            img = im.convert("RGBA") if mode in ("RGBA", "LA", "P") else im.convert("RGB")
+            qimg = pil_to_qimage(img)
+        cb = QApplication.clipboard()
+        if cb is not None:
+            cb.setImage(qimg)
+        return True
+    except Exception:
+        return False
+
+
 # --- renaming --------------------------------------------------------------------
 
 _INVALID = set('<>:"/\\|?*')

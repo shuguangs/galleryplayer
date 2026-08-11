@@ -452,8 +452,20 @@ class PlaylistPanel(QWidget):
             menu.addAction(t("panel.copy_filename")).triggered.connect(
                 lambda _=False, p=paths[0]: fileops.copy_to_clipboard(p.name)
             )
+            p0 = paths[0]
+            if p0.suffix.lower() in media.IMAGE_EXTS:
+                menu.addAction(t("menu.copy_image")).triggered.connect(
+                    lambda _=False, p=p0: fileops.copy_image_to_clipboard(p)
+                )
+            menu.addAction(t("menu.copy_file")).triggered.connect(
+                lambda _=False, p=p0: fileops.copy_files_to_clipboard([p])
+            )
             menu.addAction(t("panel.rename_ellipsis")).triggered.connect(
                 lambda _=False, p=paths[0]: self._rename(p)
+            )
+        elif paths:
+            menu.addAction(t("menu.copy_file")).triggered.connect(
+                lambda _=False, ps=tuple(paths): fileops.copy_files_to_clipboard(list(ps))
             )
 
         menu.addSeparator()

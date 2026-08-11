@@ -701,6 +701,14 @@ class MainWindow(QMainWindow):
                 lambda _=False, p=item.path: fileops.copy_to_clipboard(p.name)
             )
             menu.addSeparator()
+            if not item.is_video:
+                menu.addAction(t("menu.copy_image")).triggered.connect(
+                    lambda _=False, p=item.path: fileops.copy_image_to_clipboard(p)
+                )
+            menu.addAction(t("menu.copy_file")).triggered.connect(
+                lambda _=False, p=item.path: fileops.copy_files_to_clipboard([p])
+            )
+            menu.addSeparator()
             menu.addAction(t("main_window.rename")).triggered.connect(
                 lambda _=False, p=item.path: self._rename_media(p)
             )
