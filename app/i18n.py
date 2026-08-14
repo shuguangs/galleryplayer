@@ -292,10 +292,10 @@ _TR: dict[str, dict[str, str]] = {
     "main_window.collapse_all": {"zh": "折叠全部", "en": "Collapse all"},
     "main_window.scanning": {"zh": "扫描中…", "en": "Scanning…"},
     "main_window.scanning_now": {"zh": "正在扫描…", "en": "Scanning…"},
-    "main_window.scan_progress": {"zh": "正在扫描…　已找到 {n} 项　·　目录 {stats.dirs_total}/{stats.dirs_found}", "en": "Scanning…　{n} found　·　folders {stats.dirs_total}/{stats.dirs_found}"},
-    "main_window.scan_level": {"zh": "　·　第 {stats.levels} 层", "en": "　·　level {stats.levels}"},
+    "main_window.scan_progress": {"zh": "正在扫描…　已找到 {n} 项　·　目录 {dirs_total}/{dirs_found}", "en": "Scanning…　{n} found　·　folders {dirs_total}/{dirs_found}"},
+    "main_window.scan_level": {"zh": "　·　第 {levels} 层", "en": "　·　level {levels}"},
     "main_window.verifying_suffix": {"zh": "　·　正在核对…", "en": "　·　verifying…"},
-    "main_window.cache_hit_suffix": {"zh": "　·　{stats.dirs_reused}/{stats.dirs_total} 个目录来自缓存", "en": "　·　{stats.dirs_reused}/{stats.dirs_total} folders from cache"},
+    "main_window.cache_hit_suffix": {"zh": "　·　{reused}/{total} 个目录来自缓存", "en": "　·　{reused}/{total} folders from cache"},
     "main_window.scanning_suffix": {"zh": "　·　正在扫描…", "en": "　·　scanning…"},
     "main_window.item_count": {"zh": "{count} 项　·　图片 {images}　·　视频 {videos}{suffix}", "en": "{count} items　·　{images} images　·　{videos} videos{suffix}"},
 
