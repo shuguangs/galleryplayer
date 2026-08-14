@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QToolButton,
     QTreeView,
+    QTreeWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -206,6 +207,9 @@ class MainWindow(QMainWindow):
         self._archive_mode = False
         self._archive_back: Path | None = None
         self._archive_archive: Path | None = None
+        self._archive_entries: list = []
+        self._archive_password: str | None = None
+        self._archive_tree: QTreeWidget | None = None
 
         # Progressive scan bookkeeping
         self._streaming = False
@@ -642,11 +646,12 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------- archive mode
 
     def _enter_archive(self, path: Path) -> None:
-        """Open an archive inside the browser: extract its media members to the
-        cache and list them, with a "back" button to return to the folder."""
+        """Open an archive the way a zip program does: show its folder tree in the
+        side panel, list the media of the selected folder, and extract members on
+        demand when a folder is browsed or a file is played."""
         from PySide6.QtWidgets import QInputDialog, QMessageBox
 
-        from .archive import cache_dir, extract_member, list_archive
+        from .archive import cache_dir, list_archive
 
         if self._archive_mode:
             return
@@ -670,21 +675,85 @@ class MainWindow(QMainWindow):
                 t("archive.error").format(error=err),
             )
             return
-        members = [e for e in entries if e.is_media]
-        if not members:
+        if not any(e.is_media for e in entries):
             QMessageBox.information(self, t("archive.title_suffix"), t("archive.empty"))
             return
 
-        self.status_count.setText(t("archive.extracting"))
-        dest = cache_dir() / path.stem
-        dest.mkdir(parents=True, exist_ok=True)
+        self._archive_back = self.folder
+        self._archive_archive = path
+        self._archive_password = password
+        self._archive_entries = entries
+        self._archive_mode = True
+        self.btn_archive_back.setVisible(True)
+        self._materialize_archive_tree(entries)
+        self._show_archive_dir("")
+        self.setWindowTitle(t("main_window.archive_title").format(name=path.stem))
+        self.status_path.setText(str(path))
+
+    def _materialize_archive_tree(self, entries: list) -> None:
+        """Build (or rebuild) the archive's folder tree in the side panel."""
+        from PySide6.QtWidgets import QTreeWidgetItem
+
+        if self._archive_tree is None:
+            self._archive_tree = QTreeWidget()
+            self._archive_tree.setHeaderHidden(True)
+            self._archive_tree.setIndentation(14)
+            self._archive_tree.itemClicked.connect(self._on_archive_item)
+            self._tree_layout.addWidget(self._archive_tree)
+        self._archive_tree.clear()
+        # all parent folders of every member (media or not)
+        dirs: set[str] = set()
+        for e in entries:
+            parts = [p for p in e.name.replace("\\", "/").split("/") if p]
+            for i in range(1, len(parts)):
+                dirs.add("/".join(parts[:i]))
+        nodes: dict[str, object] = {"": self._archive_tree.invisibleRootItem()}
+        for d in sorted(dirs):
+            cur = ""
+            parent = ""
+            for i, part in enumerate(d.split("/")):
+                parent = cur
+                cur = "/".join(d.split("/")[: i + 1])
+                if cur not in nodes:
+                    item = QTreeWidgetItem(nodes[parent])
+                    item.setText(0, part)
+                    item.setData(0, Qt.UserRole, cur)
+                    nodes[cur] = item
+        if self.tree is not None:
+            self.tree.setVisible(False)
+        self._archive_tree.setVisible(True)
+
+    def _on_archive_item(self, item, _col: int = 0) -> None:
+        rel = item.data(0, Qt.UserRole)
+        if rel is not None:
+            self._show_archive_dir(str(rel))
+
+    def _show_archive_dir(self, rel_dir: str) -> None:
+        """List the media directly inside `rel_dir` of the open archive,
+        extracting just those files to the cache."""
+        from PySide6.QtWidgets import QInputDialog
+
+        from .archive import cache_dir, extract_member
+
+        if not self._archive_mode or self._archive_archive is None:
+            return
+        dest = cache_dir() / self._archive_archive.stem
+        prefix = rel_dir + "/" if rel_dir else ""
         items: list[media.MediaItem] = []
-        for e in members:
+        self.status_count.setText(t("archive.extracting"))
+        for e in self._archive_entries:
+            if not e.is_media:
+                continue
+            name = e.name.replace("\\", "/")
+            if prefix and not name.startswith(prefix):
+                continue
+            rest = name[len(prefix):] if prefix else name
+            if "/" in rest:
+                continue  # belongs to a subfolder that has its own tree node
             try:
-                f = extract_member(path, e.name, dest, password)
-                item = media.item_for_path(f)
-                if item is not None:
-                    items.append(item)
+                f = extract_member(
+                    self._archive_archive, name, dest, self._archive_password
+                )
             except RuntimeError as exc:
                 if str(exc) == "password":
                     pwd, ok = QInputDialog.getText(
@@ -692,35 +761,24 @@ class MainWindow(QMainWindow):
                         QInputDialog.Password,
                     )
                     if not ok:
-                        break
-                    password = pwd
+                        continue
+                    self._archive_password = pwd
                     try:
-                        f = extract_member(path, e.name, dest, password)
-                        item = media.item_for_path(f)
-                        if item is not None:
-                            items.append(item)
+                        f = extract_member(self._archive_archive, name, dest, pwd)
                     except Exception:  # noqa: BLE001
                         continue
-                continue
+                else:
+                    continue
             except Exception:  # noqa: BLE001
                 continue
-        if not items:
-            QMessageBox.information(self, t("archive.title_suffix"), t("archive.empty"))
-            return
-
-        self._archive_back = self.folder
-        self._archive_archive = path
-        self._archive_mode = True
-        self.btn_archive_back.setVisible(True)
+            item = media.item_for_path(f)
+            if item is not None:
+                items.append(item)
         self.all_items = items
         self.model.set_items(items)
         if self.tiles is not None:
             self.tiles.set_current_row(0, scroll=False)
         self._show_browser()
-        self.setWindowTitle(
-            t("main_window.archive_title").format(name=path.stem)
-        )
-        self.status_path.setText(str(path))
         self.status_count.setText(
             t("main_window.item_count").format(
                 count=len(items),
@@ -738,6 +796,13 @@ class MainWindow(QMainWindow):
         self._archive_mode = False
         self._archive_archive = None
         self._archive_back = None
+        self._archive_entries = []
+        self._archive_password = None
+        if self._archive_tree is not None:
+            self._archive_tree.setVisible(False)
+            self._archive_tree.clear()
+        if self.tree is not None:
+            self.tree.setVisible(True)
         self.btn_archive_back.setVisible(False)
         self.set_folder(back)
 

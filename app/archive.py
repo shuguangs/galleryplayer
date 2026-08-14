@@ -6,6 +6,7 @@ because Python has no built-in decoder for them.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -70,6 +71,14 @@ def cache_dir() -> Path:
     return base / "archive-cache"
 
 
+def _run_7z(cmd: list[str], timeout: int) -> subprocess.CompletedProcess:
+    """Run 7z.exe without flashing a console window."""
+    kwargs = {"capture_output": True, "text": True, "errors": "replace", "timeout": timeout}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.run(cmd, **kwargs)
+
+
 def _check_password_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     return "password" in msg or "encrypted" in msg or "bad password" in msg
@@ -130,7 +139,7 @@ def _list_7z(path: Path, password: str | None) -> tuple[list[ArchiveEntry], str 
     cmd = [str(sz), "l", "-slt", str(path)]
     if password:
         cmd.append(f"-p{password}")
-    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=120)
+    proc = _run_7z(cmd, 120)
     if proc.returncode != 0:
         err = (proc.stdout + proc.stderr).lower()
         if any(k in err for k in ("wrong password", "break signaled", "can not open encrypted")):
@@ -181,11 +190,16 @@ def _append_7z(entries: list[ArchiveEntry], cur: dict[str, str]) -> None:
 def extract_member(
     path: Path, member: str, dest_dir: Path, password: str | None = None
 ) -> Path:
-    """Extract a single member into `dest_dir`, preserving its basename. Returns
-    the extracted file's path. Raises RuntimeError("password") on a wrong password."""
+    """Extract a single member into `dest_dir`, keeping its relative sub-paths so
+    same-named files in different folders do not collide. Returns the extracted
+    path. Raises RuntimeError("password") on a wrong password."""
     kind = _kind_of(path)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    target = dest_dir / Path(member).name
+    rel = Path(member.replace("\\", "/"))
+    if rel.is_absolute() or ".." in rel.parts:
+        raise RuntimeError(f"unsafe member: {member}")
+    target = dest_dir / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
     if kind == "zip":
         with zipfile.ZipFile(path) as zf:
             if password:
@@ -211,11 +225,11 @@ def extract_member(
         sz = find_7z()
         if sz is None:
             raise RuntimeError("no7z")
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        cmd = [str(sz), "e", str(path), member, f"-o{dest_dir}", "-y"]
+        # `x` keeps the member's folder structure (unlike `e`, which flattens)
+        cmd = [str(sz), "x", str(path), member, f"-o{dest_dir}", "-y"]
         if password:
             cmd.append(f"-p{password}")
-        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=300)
+        proc = _run_7z(cmd, 300)
         if proc.returncode != 0:
             err = (proc.stdout + proc.stderr).lower()
             if any(k in err for k in ("wrong password", "break signaled", "can not open encrypted")):
