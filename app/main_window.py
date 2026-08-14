@@ -263,6 +263,7 @@ class MainWindow(QMainWindow):
         self.splitter = QSplitter(Qt.Horizontal)
         self.splitter.setChildrenCollapsible(False)
         self.splitter.addWidget(self._build_tree())
+        self.splitter.widget(0).setMinimumWidth(300)
 
         self.stack = QStackedWidget()
         self.welcome = WelcomePage()
@@ -282,7 +283,7 @@ class MainWindow(QMainWindow):
         self.splitter.addWidget(self.stack)
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([250, 1100])
+        self.splitter.setSizes([340, 1100])
         root.addWidget(self.splitter, 1)
 
         root.addWidget(self._build_statusbar())
@@ -600,6 +601,8 @@ class MainWindow(QMainWindow):
             button.setChecked(mode == saved_mode)
         sizes = settings["splitter_sizes"]
         if isinstance(sizes, list) and len(sizes) == 2 and all(isinstance(s, int) for s in sizes):
+            # Old builds saved a narrow left pane (250px) that hid folder names.
+            sizes = [max(300, sizes[0]), sizes[1]]
             self.splitter.setSizes(sizes)
 
     def _save_state(self) -> None:
