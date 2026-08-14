@@ -203,6 +203,9 @@ class MainWindow(QMainWindow):
         self._scan_signals = _ScanSignals()
         self._scan_signals.batch.connect(self._on_scan_batch)
         self._pending_viewer_folder: Path | None = None
+        self._archive_mode = False
+        self._archive_back: Path | None = None
+        self._archive_archive: Path | None = None
 
         # Progressive scan bookkeeping
         self._streaming = False
@@ -307,6 +310,11 @@ class MainWindow(QMainWindow):
         btn_archive = _icon_button(chr(0xE7B8) + "  " + t("main_window.open_archive"), t("main_window.open_archive_tip"), 112)
         btn_archive.clicked.connect(self._open_archive)
         lay.addWidget(btn_archive)
+
+        self.btn_archive_back = _icon_button(icons.CHEVRON_LEFT, t("main_window.archive_back_tip"), 32)
+        self.btn_archive_back.setVisible(False)
+        self.btn_archive_back.clicked.connect(self._exit_archive)
+        lay.addWidget(self.btn_archive_back)
 
         btn_up = _icon_button(icons.LEVEL_UP, t("main_window.go_up_tip"))
         btn_up.clicked.connect(self._go_up)
@@ -419,14 +427,15 @@ class MainWindow(QMainWindow):
         self._tree_layout.setContentsMargins(0, 0, 0, 0)
         self._tree_layout.setSpacing(0)
 
-        # ---- quick system locations (Desktop / Pictures / Videos / ...)
+        # ---- quick access combo: system locations + drives, top of the tree
         from PySide6.QtCore import QStandardPaths
 
         loc_box = QWidget()
         ll = QVBoxLayout(loc_box)
-        ll.setContentsMargins(6, 6, 6, 2)
-        ll.setSpacing(2)
-        self._loc_buttons: list[QToolButton] = []
+        ll.setContentsMargins(6, 4, 6, 2)
+        ll.setSpacing(4)
+        self.loc_combo = icons.ArrowComboBox()
+        self.loc_combo.setToolTip(t("main_window.loc_tip"))
         for kind, key in (
             (QStandardPaths.DesktopLocation, "main_window.loc_desktop"),
             (QStandardPaths.PicturesLocation, "main_window.loc_pictures"),
@@ -437,14 +446,18 @@ class MainWindow(QMainWindow):
         ):
             p = QStandardPaths.writableLocation(kind)
             if p and Path(p).is_dir():
-                b = QToolButton()
-                b.setText(t(key))
-                b.setToolTip(p)
-                b.setAutoRaise(True)
-                b.setCursor(Qt.PointingHandCursor)
-                b.clicked.connect(lambda _=False, d=Path(p): self.set_folder(d))
-                ll.addWidget(b)
-                self._loc_buttons.append(b)
+                self.loc_combo.addItem(t(key), str(Path(p)))
+        if self.loc_combo.count():
+            self.loc_combo.insertSeparator(self.loc_combo.count())
+        import string
+
+        for letter in string.ascii_uppercase:
+            d = Path(f"{letter}:/")
+            if d.exists():
+                self.loc_combo.addItem(f"{letter}:", str(d))
+        self.loc_combo.setCurrentIndex(-1)
+        self.loc_combo.activated.connect(self._on_loc_chosen)
+        ll.addWidget(self.loc_combo)
         self._tree_layout.addWidget(loc_box)
 
         # ---- sort bar for the folder tree itself (independent of the media sort)
@@ -606,10 +619,13 @@ class MainWindow(QMainWindow):
         if d:
             self.set_folder(Path(d))
 
-    def _open_archive(self, path: Path | None = None) -> None:
-        """Browse a compressed archive and play media inside it."""
-        from .archive_browser import ArchiveBrowser
+    def _on_loc_chosen(self, index: int) -> None:
+        d = self.loc_combo.itemData(index)
+        if d:
+            self.set_folder(Path(d))
 
+    def _open_archive(self, path: Path | None = None) -> None:
+        """Browse a compressed archive in the main view (like a zip program)."""
         if path is None:
             start = str(self.folder) if self.folder else ""
             picked, _ = QFileDialog.getOpenFileName(
@@ -621,7 +637,109 @@ class MainWindow(QMainWindow):
             if not picked:
                 return
             path = Path(picked)
-        ArchiveBrowser(path, self).exec()
+        self._enter_archive(path)
+
+    # --------------------------------------------------------- archive mode
+
+    def _enter_archive(self, path: Path) -> None:
+        """Open an archive inside the browser: extract its media members to the
+        cache and list them, with a "back" button to return to the folder."""
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+        from .archive import cache_dir, extract_member, list_archive
+
+        if self._archive_mode:
+            return
+        password: str | None = None
+        entries, err = list_archive(path, None)
+        while err == "password":
+            pwd, ok = QInputDialog.getText(
+                self, t("archive.password_title"), t("archive.password_prompt"),
+                QInputDialog.Password,
+            )
+            if not ok:
+                return
+            password = pwd
+            entries, err = list_archive(path, password)
+        if err == "no7z":
+            QMessageBox.warning(self, t("archive.title_suffix"), t("archive.no7z"))
+            return
+        if err:
+            QMessageBox.warning(
+                self, t("archive.title_suffix"),
+                t("archive.error").format(error=err),
+            )
+            return
+        members = [e for e in entries if e.is_media]
+        if not members:
+            QMessageBox.information(self, t("archive.title_suffix"), t("archive.empty"))
+            return
+
+        self.status_count.setText(t("archive.extracting"))
+        dest = cache_dir() / path.stem
+        dest.mkdir(parents=True, exist_ok=True)
+        items: list[media.MediaItem] = []
+        for e in members:
+            try:
+                f = extract_member(path, e.name, dest, password)
+                item = media.item_for_path(f)
+                if item is not None:
+                    items.append(item)
+            except RuntimeError as exc:
+                if str(exc) == "password":
+                    pwd, ok = QInputDialog.getText(
+                        self, t("archive.password_title"), t("archive.password_prompt"),
+                        QInputDialog.Password,
+                    )
+                    if not ok:
+                        break
+                    password = pwd
+                    try:
+                        f = extract_member(path, e.name, dest, password)
+                        item = media.item_for_path(f)
+                        if item is not None:
+                            items.append(item)
+                    except Exception:  # noqa: BLE001
+                        continue
+                continue
+            except Exception:  # noqa: BLE001
+                continue
+        if not items:
+            QMessageBox.information(self, t("archive.title_suffix"), t("archive.empty"))
+            return
+
+        self._archive_back = self.folder
+        self._archive_archive = path
+        self._archive_mode = True
+        self.btn_archive_back.setVisible(True)
+        self.all_items = items
+        self.model.set_items(items)
+        if self.tiles is not None:
+            self.tiles.set_current_row(0, scroll=False)
+        self._show_browser()
+        self.setWindowTitle(
+            t("main_window.archive_title").format(name=path.stem)
+        )
+        self.status_path.setText(str(path))
+        self.status_count.setText(
+            t("main_window.item_count").format(
+                count=len(items),
+                images=sum(1 for i in items if not i.is_video),
+                videos=sum(1 for i in items if i.is_video),
+                suffix="",
+            )
+        )
+
+    def _exit_archive(self) -> None:
+        """Leave archive browsing back to the folder we came from."""
+        if not self._archive_mode:
+            return
+        back = self._archive_back
+        self._archive_mode = False
+        self._archive_archive = None
+        self._archive_back = None
+        self.btn_archive_back.setVisible(False)
+        self.set_folder(back)
 
     def _go_up(self) -> None:
         if self.folder and self.folder.parent != self.folder:
@@ -660,10 +778,7 @@ class MainWindow(QMainWindow):
         from .archive import is_archive
 
         if is_archive(target):
-            from .archive_browser import ArchiveBrowser
-
-            ArchiveBrowser(target, self).exec()
-            self._show_welcome()
+            self._enter_archive(target)
             return
         item = media.item_for_path(target)
         self.ensure_viewer().open_playlist([item], 0)

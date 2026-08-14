@@ -251,6 +251,7 @@ _TR: dict[str, dict[str, str]] = {
     "main_window.loc_music": {"zh": "音乐", "en": "Music"},
     "main_window.loc_documents": {"zh": "文档", "en": "Documents"},
     "main_window.loc_downloads": {"zh": "下载", "en": "Downloads"},
+    "main_window.loc_tip": {"zh": "快速访问：常用位置与磁盘", "en": "Quick access: locations and drives"},
     "main_window.go_up_tip": {"zh": "上一级目录  (Backspace)", "en": "Parent folder  (Backspace)"},
     "main_window.back_tip": {"zh": "返回上一个文件夹  (Alt+←)", "en": "Back to previous folder  (Alt+←)"},
     "main_window.forward_tip": {"zh": "前进到下一个文件夹  (Alt+→)", "en": "Forward to next folder  (Alt+→)"},
@@ -496,4 +497,7 @@ _TR: dict[str, dict[str, str]] = {
     "archive.password_prompt": {"zh": "该压缩包已加密，请输入密码：", "en": "This archive is encrypted. Enter the password:"},
     "archive.no7z": {"zh": "打开 RAR / 7Z 压缩包需要先安装 7-Zip（zip / tar 等格式无需）", "en": "RAR / 7Z archives require 7-Zip to be installed (zip / tar work without it)"},
     "archive.error": {"zh": "打开压缩包失败：{error}", "en": "Failed to open archive: {error}"},
+    "archive.extracting": {"zh": "正在解压压缩包…", "en": "Extracting archive…"},
+    "main_window.archive_title": {"zh": "{name} — 压缩包", "en": "{name} — Archive"},
+    "main_window.archive_back_tip": {"zh": "返回文件夹（退出压缩包）", "en": "Back to folder (leave archive)"},
 }
