@@ -20,6 +20,7 @@
 - **Phone photos included**: HEIC and other modern image formats open directly.
 - **Network folders work too**: browse and play from shared LAN folders and mapped network drives.
 - **Sort it your way**: sort the file browser and the left folder tree by name / modified time / size, ascending or descending; the playlist inherits your chosen order when the player opens.
+- **Open from outside, play in the current window**: while the player is running, double-click a video or image in Explorer (or pick it via "Open with") and it plays right in the current window — no second window. Folders and archives work the same way.
 - **Truly portable**: copy the whole folder to a USB stick and it runs on any PC — no install, no registry, nothing left behind.
 - **Clean, immersive UI**: dark theme; the controls fade out when the mouse is idle.
 

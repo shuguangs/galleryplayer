@@ -860,6 +860,36 @@ class MainWindow(QMainWindow):
         # background must not switch the UI to (and build) the browser.
         self.set_folder(target.parent, quiet=True)
 
+    def handle_external_paths(self, paths) -> None:
+        """Files/folders forwarded by a second launch (single-instance mode).
+
+        Play the media file right away in this window and scan its folder in
+        the background, mirroring the command-line startup path; raise the
+        window so the user sees the result.
+        """
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        print(f"[single-instance] external paths: {list(paths)}")
+        for raw in paths:
+            p = Path(raw)
+            if p.is_dir():
+                self.set_folder(p)
+                return
+            if not p.is_file():
+                continue
+            from .archive import is_archive
+
+            if is_archive(p):
+                self._open_archive(p)
+                return
+            item = media.item_for_path(p)
+            if item is None:
+                continue
+            self.ensure_viewer().open_playlist([item], 0)
+            self.set_folder(p.parent, quiet=True)
+            return
+
     def _show_browser(self) -> None:
         """Leave the welcome page for whichever view mode is selected."""
         if self.stack.currentWidget() is self.welcome:

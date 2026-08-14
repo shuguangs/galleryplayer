@@ -12,18 +12,7 @@ _qt_translator = None  # kept alive for the lifetime of the process
 
 
 def main() -> int:
-    try:
-        init_libmpv()
-    except RuntimeError as exc:
-        from PySide6.QtWidgets import QApplication, QMessageBox
-
-        app = QApplication(sys.argv)
-        QMessageBox.critical(None, "缺少组件", str(exc))
-        return 2
-
-    init_gl_format()
-
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QMessageBox
 
     from PySide6.QtCore import QLibraryInfo, QLocale, QTranslator
 
@@ -32,6 +21,21 @@ def main() -> int:
     QApplication.setApplicationName("媒体播放器")
     QApplication.setOrganizationName("LocalMediaPlayer")
     app = QApplication(sys.argv)
+
+    # 单实例：播放器已在运行时，外部“打开方式 / 双击”启动的第二个进程
+    # 把文件路径转发给已有窗口后直接退出，不再开第二个界面。
+    from app.single_instance import forward_to_running
+
+    if forward_to_running(sys.argv[1:]):
+        return 0
+
+    try:
+        init_libmpv()
+    except RuntimeError as exc:
+        QMessageBox.critical(None, "缺少组件", str(exc))
+        return 2
+
+    init_gl_format()
 
     # Qt's own strings (file dialog, standard buttons) default to English otherwise.
     # The translator must stay referenced or it gets garbage collected.
@@ -66,6 +70,11 @@ def main() -> int:
 
     from app.main_window import MainWindow
 
+    from app.single_instance import InstanceServer
+
+    server = InstanceServer()
+    server.listen()
+
     startup_file = None
     if len(sys.argv) > 1:
         target = Path(sys.argv[1])
@@ -73,6 +82,7 @@ def main() -> int:
             startup_file = target
 
     win = MainWindow(startup_file=startup_file)
+    server.paths_received.connect(win.handle_external_paths)
     win.show()
 
     # A folder passed on the command line wins over the remembered location.
