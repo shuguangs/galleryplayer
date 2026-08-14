@@ -19,6 +19,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFileSystemModel,
@@ -361,12 +362,15 @@ class MainWindow(QMainWindow):
         self.btn_desc.clicked.connect(self._on_sort_changed)
         lay.addWidget(self.btn_desc)
 
-        self.filter_combo = icons.ArrowComboBox()
-        for key, label in media.FILTER_LABELS.items():
-            self.filter_combo.addItem(t(label), key)
-        # wrapped: the signal's own argument must not land in _apply_view(count_suffix)
-        self.filter_combo.currentIndexChanged.connect(lambda _=0: self._apply_view())
-        lay.addWidget(self.filter_combo)
+        self.chk_image = QCheckBox(t("media.filter_image"))
+        self.chk_video = QCheckBox(t("media.filter_video"))
+        self.chk_archive = QCheckBox(t("media.filter_archive"))
+        for chk in (self.chk_image, self.chk_video, self.chk_archive):
+            chk.setChecked(True)
+            chk.setToolTip(t("main_window.filter_check_tip"))
+            # wrapped: the signal's own argument must not land in _apply_view()
+            chk.toggled.connect(lambda _=False: self._apply_view())
+            lay.addWidget(chk)
 
         self.btn_recursive = QToolButton()
         self.btn_recursive.setText(t("main_window.recursive"))
@@ -536,8 +540,9 @@ class MainWindow(QMainWindow):
         self.sort_combo.setCurrentIndex(max(0, idx))
         self.btn_desc.setChecked(bool(settings["sort_desc"]))
         self._update_desc_icon()
-        idx = self.filter_combo.findData(settings["filter_kind"])
-        self.filter_combo.setCurrentIndex(max(0, idx))
+        self.chk_image.setChecked(bool(settings["filter_show_image"]))
+        self.chk_video.setChecked(bool(settings["filter_show_video"]))
+        self.chk_archive.setChecked(bool(settings["filter_show_archive"]))
         self.btn_recursive.setChecked(bool(settings["recursive"]))
         self.btn_tree.setChecked(bool(settings["tree_visible"]))
         self.splitter.widget(0).setVisible(bool(settings["tree_visible"]))
@@ -555,7 +560,9 @@ class MainWindow(QMainWindow):
         settings["grid_columns"] = self.col_slider.value()
         settings["sort_key"] = self.sort_combo.currentData()
         settings["sort_desc"] = self.btn_desc.isChecked()
-        settings["filter_kind"] = self.filter_combo.currentData()
+        settings["filter_show_image"] = self.chk_image.isChecked()
+        settings["filter_show_video"] = self.chk_video.isChecked()
+        settings["filter_show_archive"] = self.chk_archive.isChecked()
         settings["recursive"] = self.btn_recursive.isChecked()
         settings["tree_visible"] = self.btn_tree.isChecked()
         settings["splitter_sizes"] = self.splitter.sizes()
@@ -768,13 +775,17 @@ class MainWindow(QMainWindow):
                 lambda _=False, p=item.path: fileops.copy_to_clipboard(p.name)
             )
             menu.addSeparator()
-            if not item.is_video:
+            if not item.is_video and not item.is_archive:
                 menu.addAction(t("menu.copy_image")).triggered.connect(
                     lambda _=False, p=item.path: fileops.copy_image_to_clipboard(p)
                 )
             menu.addAction(t("menu.copy_file")).triggered.connect(
                 lambda _=False, p=item.path: fileops.copy_files_to_clipboard([p])
             )
+            if item.is_archive:
+                menu.addAction(t("main_window.open_archive_entry")).triggered.connect(
+                    lambda _=False, p=item.path: self._open_archive(p)
+                )
             menu.addSeparator()
             menu.addAction(t("main_window.rename")).triggered.connect(
                 lambda _=False, p=item.path: self._rename_media(p)
@@ -1046,8 +1057,14 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_view(self, count_suffix: str = "") -> None:
-        kind = self.filter_combo.currentData() or "all"
-        items = media.apply_filter(self.all_items, kind, self.search.text().strip())
+        flags: set[str] = set()
+        if self.chk_image.isChecked():
+            flags.add("image")
+        if self.chk_video.isChecked():
+            flags.add("video")
+        if self.chk_archive.isChecked():
+            flags.add("archive")
+        items = media.apply_filter(self.all_items, flags, self.search.text().strip())
         sort_key = self.sort_combo.currentData() or "name"
         items = media.sort_items(
             items,
@@ -1123,6 +1140,10 @@ class MainWindow(QMainWindow):
     def _open_viewer(self, row: int) -> None:
         if not self.model.items:
             return
+        item = self.model.items[row] if 0 <= row < len(self.model.items) else None
+        if item is not None and item.is_archive:
+            self._open_archive(item.path)
+            return
         if self.tiles is not None:
             self.tiles.set_current_row(row, scroll=False)
         self.ensure_viewer().open_playlist(self.model.items, row)
@@ -1148,6 +1169,9 @@ class MainWindow(QMainWindow):
             if p.is_file() and media.classify(p) is not None:
                 self.set_folder(p.parent)
                 QTimer.singleShot(400, lambda target=p: self._open_path(target))
+                return
+            if p.is_file() and media.is_archive_name(p.name):
+                self._open_archive(p)
                 return
 
     def _open_path(self, path: Path) -> None:

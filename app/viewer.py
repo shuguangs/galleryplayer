@@ -277,7 +277,21 @@ class Viewer(QWidget):
     # ------------------------------------------------------------ playlist
 
     def open_playlist(self, items: list[MediaItem], index: int) -> None:
+        # Archives are browsable but not playable: keep them out of the playlist.
+        target = items[index].path if 0 <= index < len(items) else None
+        items = [i for i in items if not getattr(i, "is_archive", False)]
+        if not items:
+            return
         self.items = list(items)
+        if target is not None:
+            for i, it in enumerate(items):
+                if it.path == target:
+                    index = i
+                    break
+            else:
+                index = 0
+        if index >= len(items):
+            index = len(items) - 1
         self.index = -1
         self._native_size_applied = False
         if not self.isVisible():

@@ -391,7 +391,9 @@ class TileView(QAbstractScrollArea):
             self._paint_tile(p, rect, it, i)
         # keep decode work focused on what the user can actually see
         for i in rows:
-            self.thumbs.request(self.model.items[i])
+            it = self.model.items[i]
+            if not it.is_archive:
+                self.thumbs.request(it)
 
     def _paint_tile(self, p: QPainter, rect: QRect, it: MediaItem, row: int) -> None:
         selected = row == self._current

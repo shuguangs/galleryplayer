@@ -26,6 +26,17 @@ IMAGE_EXTS = {
     ".tiff", ".ico", ".avif", ".heic", ".heif", ".jxl", ".tga", ".ppm", ".pgm",
     ".pbm", ".dib", ".apng",
 }
+# Compound suffixes (".tar.gz" etc.) are checked by endswith in is_archive_name().
+ARCHIVE_EXTS = {
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2",
+}
+_ARCHIVE_COMPOUND = (".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz2")
+
+
+def is_archive_name(name: str) -> bool:
+    """True for .zip/.rar/.7z/.tar(.gz|.bz2|.xz) — cheap suffix check, no I/O."""
+    n = name.lower()
+    return n.endswith(_ARCHIVE_COMPOUND) or n.endswith(tuple(ARCHIVE_EXTS))
 # Animated images are shown in the image pane but need frame timing.
 ANIMATED_EXTS = {".gif", ".webp", ".apng", ".png"}
 MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
@@ -42,6 +53,7 @@ FILTER_LABELS = {
     "all": "media.filter_all",
     "image": "media.filter_image",
     "video": "media.filter_video",
+    "archive": "media.filter_archive",
 }
 
 _natkey = natsort_keygen(alg=ns.IGNORECASE | ns.PATH)
@@ -55,6 +67,7 @@ class MediaItem:
     mtime: float
     # Filled in lazily by the metadata cache / thumbnail worker.
     duration: float | None = None
+    is_archive: bool = False
     width: int | None = None
     height: int | None = None
     # Memoised derived values; see the properties below for why they are worth keeping.
@@ -239,11 +252,14 @@ def _enumerate(d: Path) -> tuple[list, list[str]]:
                         continue
                     kind = classify_name(e.name)
                     if kind is None:
-                        continue
+                        kind = dircache.KIND_ARCHIVE if is_archive_name(e.name) else None
+                        if kind is None:
+                            continue
                     st = e.stat()
                     files.append(
                         [e.name, st.st_size, st.st_mtime,
-                         dircache.KIND_VIDEO if kind else dircache.KIND_IMAGE]
+                         dircache.KIND_VIDEO if kind is True else
+                         (dircache.KIND_IMAGE if kind is False else kind)]
                     )
                 except OSError:
                     continue
@@ -280,7 +296,10 @@ def _items_from_records(folder: Path, files: list) -> list[MediaItem]:
     """
     out = []
     for name, size, mtime, kind in files:
-        item = MediaItem(folder / name, kind == dircache.KIND_VIDEO, size, mtime)
+        if kind == dircache.KIND_ARCHIVE:
+            item = MediaItem(folder / name, False, size, mtime, is_archive=True)
+        else:
+            item = MediaItem(folder / name, kind == dircache.KIND_VIDEO, size, mtime)
         metadata.apply(item)
         item.prime_sort_key()
         out.append(item)
@@ -295,12 +314,18 @@ def item_for_path(path: Path) -> MediaItem | None:
     surfaced greyed out rather than silently vanishing.
     """
     kind = classify(path)
+    if kind is None and is_archive_name(path.name):
+        kind = dircache.KIND_ARCHIVE
     if kind is None:
         return None
     try:
         st = path.stat()
+        if kind == dircache.KIND_ARCHIVE:
+            return MediaItem(path, False, st.st_size, st.st_mtime, is_archive=True)
         item = MediaItem(path, kind, st.st_size, st.st_mtime)
     except OSError:
+        if kind == dircache.KIND_ARCHIVE:
+            return MediaItem(path, False, 0, 0.0, is_archive=True)
         item = MediaItem(path, kind, 0, 0.0)
     metadata.apply(item)
     return item
@@ -492,12 +517,17 @@ def scan_folder(
     return items
 
 
-def apply_filter(items: list[MediaItem], kind: str, search: str = "") -> list[MediaItem]:
+def apply_filter(items: list[MediaItem], flags: set[str], search: str = "") -> list[MediaItem]:
+    """Filter by kind. `flags` is a subset of {"image", "video", "archive"};
+    an empty set (or the full set) shows everything."""
     out = items
-    if kind == "image":
-        out = [i for i in out if not i.is_video]
-    elif kind == "video":
-        out = [i for i in out if i.is_video]
+    if flags and flags != {"image", "video", "archive"}:
+        out = [
+            i for i in out
+            if ("image" in flags and not i.is_video and not i.is_archive)
+            or ("video" in flags and i.is_video)
+            or ("archive" in flags and i.is_archive)
+        ]
     if search:
         needle = search.lower()
         out = [i for i in out if needle in i.name.lower()]

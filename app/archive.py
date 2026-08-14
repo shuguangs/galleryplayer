@@ -21,12 +21,6 @@ _7Z_CANDIDATES = (
     Path(r"C:\Program Files (x86)\7-Zip\7z.exe"),
 )
 
-ARCHIVE_EXTS = {
-    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".tbz2",
-}
-# compound suffixes like "name.tar.gz"
-_COMPOUND = (".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".tbz2")
-
 
 @dataclass
 class ArchiveEntry:
@@ -40,8 +34,7 @@ class ArchiveEntry:
 
 
 def is_archive(path: Path) -> bool:
-    name = path.name.lower()
-    return any(name.endswith(s) for s in _COMPOUND) or name.endswith(tuple(ARCHIVE_EXTS))
+    return media.is_archive_name(path.name)
 
 
 def _kind_of(path: Path) -> str:

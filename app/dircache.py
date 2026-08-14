@@ -24,6 +24,7 @@ from .runtime import USERDATA_DIR
 
 KIND_IMAGE = 0
 KIND_VIDEO = 1
+KIND_ARCHIVE = 2
 
 MAX_DIRS = 20000  # keep the cache file bounded
 
