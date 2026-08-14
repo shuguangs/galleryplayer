@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -101,7 +102,7 @@ class ArchiveBrowser(QDialog):
             self,
             t("archive.password_title"),
             t("archive.password_prompt"),
-            QInputDialog.Password,
+            QLineEdit.Password,
         )
         if not ok:
             return False

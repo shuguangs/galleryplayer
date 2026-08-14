@@ -661,7 +661,7 @@ class MainWindow(QMainWindow):
         while err == "password":
             pwd, ok = QInputDialog.getText(
                 self, t("archive.password_title"), t("archive.password_prompt"),
-                QInputDialog.Password,
+                QLineEdit.Password,
             )
             if not ok:
                 return
@@ -759,7 +759,7 @@ class MainWindow(QMainWindow):
                 if str(exc) == "password":
                     pwd, ok = QInputDialog.getText(
                         self, t("archive.password_title"), t("archive.password_prompt"),
-                        QInputDialog.Password,
+                        QLineEdit.Password,
                     )
                     if not ok:
                         continue
