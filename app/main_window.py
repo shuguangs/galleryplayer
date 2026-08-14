@@ -180,11 +180,12 @@ class _ScanTask(QRunnable):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, startup_file: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle(t("main_window.title"))
         self.resize(1360, 850)
         self.setAcceptDrops(True)
+        self._startup_file: Path | None = startup_file
 
         self.thumbs = ThumbnailCache(self)
         self.model = MediaModel(self)
@@ -233,7 +234,12 @@ class MainWindow(QMainWindow):
 
         # No folder is opened on launch: the welcome page waits for the user. The
         # remembered folder is only used as the file dialog's starting directory.
-        self._show_welcome()
+        # A media file passed on the command line ("open with") skips the browser
+        # and goes straight to the player window.
+        if self._startup_file is not None:
+            self._startup_play()
+        else:
+            self._show_welcome()
 
     # ------------------------------------------------------------------ UI
 
@@ -255,8 +261,11 @@ class MainWindow(QMainWindow):
         self.welcome.folder_chosen.connect(self.set_folder)
         self.welcome.file_chosen.connect(self._open_recent_file)
         self.stack.addWidget(self.welcome)
-        self.tiles = TileView(self.model, self.thumbs)
-        self.stack.addWidget(self.tiles)
+        # The tile view is a QTableView subclass; the first one in a process costs
+        # ~2s of one-time Qt item-view initialisation. It is built lazily so that
+        # opening a video from the command line shows the player first, not a
+        # frozen browser. Same reason the details table is deferred.
+        self.tiles: TileView | None = None
         # The first QTableView in a process costs ~2s of one-time Qt item-view
         # initialisation regardless of its model, so the details table is built only
         # if the user actually asks for list view.
@@ -270,9 +279,17 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_statusbar())
         self.setCentralWidget(central)
 
-        self.tiles.activatedRow.connect(self._open_viewer)
-        self.tiles.contextRow.connect(self._media_menu)
         self.model.sort_requested.connect(self._on_header_sort)
+
+    def _ensure_tiles(self) -> TileView:
+        """Lazily build the tile view (its first construction costs ~2s)."""
+        if self.tiles is None:
+            self.tiles = TileView(self.model, self.thumbs)
+            self.tiles.set_columns(int(settings["grid_columns"]))
+            self.stack.addWidget(self.tiles)
+            self.tiles.activatedRow.connect(self._open_viewer)
+            self.tiles.contextRow.connect(self._media_menu)
+        return self.tiles
 
     def _build_toolbar(self) -> QFrame:
         bar = QFrame()
@@ -285,6 +302,10 @@ class MainWindow(QMainWindow):
         btn_open = _icon_button(icons.FOLDER_OPEN + "  " + t("main_window.open_folder"), t("main_window.choose_folder_tip"), 118)
         btn_open.clicked.connect(self._choose_folder)
         lay.addWidget(btn_open)
+
+        btn_archive = _icon_button(chr(0xE7B8) + "  " + t("main_window.open_archive"), t("main_window.open_archive_tip"), 112)
+        btn_archive.clicked.connect(self._open_archive)
+        lay.addWidget(btn_archive)
 
         btn_up = _icon_button(icons.LEVEL_UP, t("main_window.go_up_tip"))
         btn_up.clicked.connect(self._go_up)
@@ -509,7 +530,8 @@ class MainWindow(QMainWindow):
 
     def _restore_state(self) -> None:
         self.col_slider.setValue(int(settings["grid_columns"]))
-        self.tiles.set_columns(int(settings["grid_columns"]))
+        if self.tiles is not None:
+            self.tiles.set_columns(int(settings["grid_columns"]))
         idx = self.sort_combo.findData(settings["sort_key"])
         self.sort_combo.setCurrentIndex(max(0, idx))
         self.btn_desc.setChecked(bool(settings["sort_desc"]))
@@ -549,6 +571,23 @@ class MainWindow(QMainWindow):
         if d:
             self.set_folder(Path(d))
 
+    def _open_archive(self, path: Path | None = None) -> None:
+        """Browse a compressed archive and play media inside it."""
+        from .archive_browser import ArchiveBrowser
+
+        if path is None:
+            start = str(self.folder) if self.folder else ""
+            picked, _ = QFileDialog.getOpenFileName(
+                self,
+                t("main_window.open_archive"),
+                start,
+                t("main_window.archive_filter"),
+            )
+            if not picked:
+                return
+            path = Path(picked)
+        ArchiveBrowser(path, self).exec()
+
     def _go_up(self) -> None:
         if self.folder and self.folder.parent != self.folder:
             self._save_scroll_pos()
@@ -569,6 +608,33 @@ class MainWindow(QMainWindow):
         self.status_path.setText(t("main_window.no_folder"))
         self.status_count.setText("")
         self.setWindowTitle(t("main_window.title"))
+
+    def _startup_play(self) -> None:
+        """A file was passed on the command line ("open with").
+
+        Media files: show the player window immediately with a single-item
+        playlist instead of building the whole browser first (the first tile
+        view costs ~2s); the folder is scanned in the background and the full
+        list is handed to the player when the scan reports done.
+        Archives: open the archive browser so the user can pick what to play.
+        """
+        target = self._startup_file
+        if target is None or not target.is_file():
+            self._show_welcome()
+            return
+        from .archive import is_archive
+
+        if is_archive(target):
+            from .archive_browser import ArchiveBrowser
+
+            ArchiveBrowser(target, self).exec()
+            self._show_welcome()
+            return
+        item = media.item_for_path(target)
+        self.ensure_viewer().open_playlist([item], 0)
+        # quiet: the player window is already up; scanning the folder in the
+        # background must not switch the UI to (and build) the browser.
+        self.set_folder(target.parent, quiet=True)
 
     def _show_browser(self) -> None:
         """Leave the welcome page for whichever view mode is selected."""
@@ -597,13 +663,14 @@ class MainWindow(QMainWindow):
         self.col_slider.setVisible(is_tile)
         self.col_label.setVisible(is_tile)
         if is_tile:
-            self.tiles.set_mode(mode)
+            self._ensure_tiles().set_mode(mode)
             self.stack.setCurrentWidget(self.tiles)
         else:
             self.stack.setCurrentWidget(self._ensure_details())
 
     def _on_columns_changed(self, n: int) -> None:
-        self.tiles.set_columns(n)
+        if self.tiles is not None:
+            self.tiles.set_columns(n)
 
     def _on_sort_changed(self) -> None:
         self._update_desc_icon()
@@ -798,8 +865,11 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ scanning
 
-    def set_folder(self, folder: Path | None, force: bool = False) -> None:
+    def set_folder(self, folder: Path | None, force: bool = False, quiet: bool = False) -> None:
         """Open `folder`. Returns immediately; everything slow happens on a pool thread.
+
+        `quiet` skips switching the UI to the browser (used when a file was opened
+        from the command line: the player window is already showing).
 
         Note what is deliberately *not* done here: no `is_dir()`, no cache walk, no
         listing built. A single `stat()` against a sleeping USB disk or a network share
@@ -821,7 +891,8 @@ class MainWindow(QMainWindow):
         self.thumbs.trim_memory(600)
         self.status_path.setText(str(folder))
         self.setWindowTitle(t("main_window.title_with_folder").format(folder=folder.name or str(folder)))
-        self._show_browser()
+        if not quiet:
+            self._show_browser()
         self._remember_recent(folder)
         self._sync_tree(folder)
 
@@ -935,6 +1006,24 @@ class MainWindow(QMainWindow):
         ):
             self.viewer.open_playlist(self.model.items, 0)
 
+        # A file passed on the command line: the player opened instantly with a
+        # single-item list; now the folder scan is done, hand it the full listing
+        # and keep the current position.
+        startup = self._startup_file
+        self._startup_file = None
+        if (
+            startup is not None
+            and self.viewer is not None
+            and self.viewer.isVisible()
+            and self.model.items
+        ):
+            row = next(
+                (i for i, it in enumerate(self.model.items) if it.path == startup),
+                -1,
+            )
+            if row >= 0:
+                self.viewer.open_playlist(self.model.items, row)
+
     STREAM_MIN_INTERVAL = 220
     STREAM_MAX_INTERVAL = 1500
 
@@ -967,7 +1056,7 @@ class MainWindow(QMainWindow):
             self._random_seed,
             orders.get(self.folder) if (sort_key == "custom" and self.folder) else None,
         )
-        keep_row = self.tiles.current_row()
+        keep_row = self.tiles.current_row() if self.tiles is not None else -1
         keep_path = None
         if 0 <= keep_row < len(self.model.items):
             keep_path = self.model.items[keep_row].path
@@ -979,7 +1068,7 @@ class MainWindow(QMainWindow):
                 count=len(items), images=n_img, videos=len(items) - n_img, suffix=count_suffix
             )
         )
-        if keep_path is not None:
+        if keep_path is not None and self.tiles is not None:
             for i, it in enumerate(items):
                 if it.path == keep_path:
                     self.tiles.set_current_row(i)
@@ -1028,16 +1117,19 @@ class MainWindow(QMainWindow):
             orders.set(self.folder, [i.name for i in items])
             orders.save()
         self.model.set_items(list(items))
-        self.tiles.relayout()
+        if self.tiles is not None:
+            self.tiles.relayout()
 
     def _open_viewer(self, row: int) -> None:
         if not self.model.items:
             return
-        self.tiles.set_current_row(row, scroll=False)
+        if self.tiles is not None:
+            self.tiles.set_current_row(row, scroll=False)
         self.ensure_viewer().open_playlist(self.model.items, row)
 
     def _on_viewer_index(self, row: int) -> None:
-        self.tiles.set_current_row(row)
+        if self.tiles is not None:
+            self.tiles.set_current_row(row)
         if self.details is not None and self.stack.currentWidget() is self.details:
             self.details.selectRow(row)
 

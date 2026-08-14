@@ -205,6 +205,32 @@ class SettingsDialog(QDialog):
         sb.addWidget(btn_clear)
         root.addWidget(_row(t("settings.shot_path_label"), shot_box, t("settings.shot_path_hint")))
 
+        # ---- 压缩包解压缓存路径
+        arch_box = QWidget()
+        ab = QHBoxLayout(arch_box)
+        ab.setContentsMargins(0, 0, 0, 0)
+        ab.setSpacing(6)
+        self.edit_archive_path = QLineEdit()
+        self.edit_archive_path.setReadOnly(True)
+        self.edit_archive_path.setPlaceholderText(t("settings.archive_path_placeholder"))
+        self.edit_archive_path.setStyleSheet(
+            f"QLineEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
+            f" border:1px solid {theme.BORDER}; border-radius:4px; padding:3px 6px; }}"
+        )
+        custom_arch = str(settings["archive_cache"] or "").strip()
+        if custom_arch:
+            self.edit_archive_path.setText(custom_arch)
+        ab.addWidget(self.edit_archive_path, 1)
+        btn_ab = QPushButton(t("settings.browse_ellipsis"))
+        btn_ab.setFocusPolicy(Qt.NoFocus)
+        btn_ab.clicked.connect(self._browse_archive_path)
+        ab.addWidget(btn_ab)
+        btn_ac = QPushButton(t("settings.clear"))
+        btn_ac.setFocusPolicy(Qt.NoFocus)
+        btn_ac.clicked.connect(lambda: (self.edit_archive_path.clear(), self._set("archive_cache", "")))
+        ab.addWidget(btn_ac)
+        root.addWidget(_row(t("settings.archive_path_label"), arch_box, t("settings.archive_path_hint")))
+
         # ---- 文件关联
         root.addWidget(_section(t("settings.section_assoc")))
         assoc_box = QWidget()
@@ -289,6 +315,15 @@ class SettingsDialog(QDialog):
         if d:
             self.edit_shot_path.setText(d)
             self._set("capture_path", d)
+
+    def _browse_archive_path(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        start = self.edit_archive_path.text() or str(APP_DIR)
+        d = QFileDialog.getExistingDirectory(self, t("settings.pick_archive_dir"), start)
+        if d:
+            self.edit_archive_path.setText(d)
+            self._set("archive_cache", d)
 
     def _open_shot_folder(self) -> None:
         from PySide6.QtGui import QDesktopServices

@@ -66,20 +66,21 @@ def main() -> int:
 
     from app.main_window import MainWindow
 
-    win = MainWindow()
+    startup_file = None
+    if len(sys.argv) > 1:
+        target = Path(sys.argv[1])
+        if target.is_file():
+            startup_file = target
+
+    win = MainWindow(startup_file=startup_file)
     win.show()
 
-    # A folder or file passed on the command line (e.g. "open with") wins over the
-    # remembered location.
+    # A folder passed on the command line wins over the remembered location.
+    # Files are handled inside MainWindow (player first, then the folder scan).
     if len(sys.argv) > 1:
         target = Path(sys.argv[1])
         if target.is_dir():
             win.set_folder(target)
-        elif target.is_file():
-            win.set_folder(target.parent)
-            from PySide6.QtCore import QTimer
-
-            QTimer.singleShot(600, lambda: win._open_path(target))
 
     return app.exec()
 

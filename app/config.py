@@ -46,6 +46,7 @@ DEFAULTS: dict[str, Any] = {
     "language": "",                    # ""=未选择(首启弹窗) | zh | en
     "tree_sort_key": "name",           # 左侧目录树排序: name | mtime | size
     "tree_sort_desc": False,
+    "archive_cache": "",               # 压缩包解压缓存目录（空=系统临时目录）
 }
 
 # Videos shorter than this are never resumed; nor are ones watched to the end.
