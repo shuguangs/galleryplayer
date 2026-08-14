@@ -245,6 +245,12 @@ _TR: dict[str, dict[str, str]] = {
     "main_window.archive_filter": {"zh": "压缩包 (*.zip *.rar *.7z *.tar *.gz *.bz2 *.xz *.tgz *.tbz2)", "en": "Archives (*.zip *.rar *.7z *.tar *.gz *.bz2 *.xz *.tgz *.tbz2)"},
     "main_window.open_archive_entry": {"zh": "打开压缩包浏览…", "en": "Open archive…"},
     "main_window.filter_check_tip": {"zh": "勾选要显示的类型（图片 / 视频 / 压缩包），全部不勾=全部显示", "en": "Check the types to show (images / videos / archives); none checked = show all"},
+    "main_window.loc_desktop": {"zh": "桌面", "en": "Desktop"},
+    "main_window.loc_pictures": {"zh": "图片", "en": "Pictures"},
+    "main_window.loc_videos": {"zh": "视频", "en": "Videos"},
+    "main_window.loc_music": {"zh": "音乐", "en": "Music"},
+    "main_window.loc_documents": {"zh": "文档", "en": "Documents"},
+    "main_window.loc_downloads": {"zh": "下载", "en": "Downloads"},
     "main_window.go_up_tip": {"zh": "上一级目录  (Backspace)", "en": "Parent folder  (Backspace)"},
     "main_window.back_tip": {"zh": "返回上一个文件夹  (Alt+←)", "en": "Back to previous folder  (Alt+←)"},
     "main_window.forward_tip": {"zh": "前进到下一个文件夹  (Alt+→)", "en": "Forward to next folder  (Alt+→)"},
@@ -300,8 +306,8 @@ _TR: dict[str, dict[str, str]] = {
     "media.sort_random": {"zh": "随机", "en": "Random"},
     "media.sort_custom": {"zh": "自定义", "en": "Custom"},
     "media.filter_all": {"zh": "全部", "en": "All"},
-    "media.filter_image": {"zh": "仅图片", "en": "Images only"},
-    "media.filter_video": {"zh": "仅视频", "en": "Videos only"},
+    "media.filter_image": {"zh": "图片", "en": "Images"},
+    "media.filter_video": {"zh": "视频", "en": "Videos"},
     "media.filter_archive": {"zh": "压缩包", "en": "Archives"},
 
     # ---- playlist panel ----

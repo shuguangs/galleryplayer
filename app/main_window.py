@@ -419,6 +419,34 @@ class MainWindow(QMainWindow):
         self._tree_layout.setContentsMargins(0, 0, 0, 0)
         self._tree_layout.setSpacing(0)
 
+        # ---- quick system locations (Desktop / Pictures / Videos / ...)
+        from PySide6.QtCore import QStandardPaths
+
+        loc_box = QWidget()
+        ll = QVBoxLayout(loc_box)
+        ll.setContentsMargins(6, 6, 6, 2)
+        ll.setSpacing(2)
+        self._loc_buttons: list[QToolButton] = []
+        for kind, key in (
+            (QStandardPaths.DesktopLocation, "main_window.loc_desktop"),
+            (QStandardPaths.PicturesLocation, "main_window.loc_pictures"),
+            (QStandardPaths.MoviesLocation, "main_window.loc_videos"),
+            (QStandardPaths.MusicLocation, "main_window.loc_music"),
+            (QStandardPaths.DocumentsLocation, "main_window.loc_documents"),
+            (QStandardPaths.DownloadLocation, "main_window.loc_downloads"),
+        ):
+            p = QStandardPaths.writableLocation(kind)
+            if p and Path(p).is_dir():
+                b = QToolButton()
+                b.setText(t(key))
+                b.setToolTip(p)
+                b.setAutoRaise(True)
+                b.setCursor(Qt.PointingHandCursor)
+                b.clicked.connect(lambda _=False, d=Path(p): self.set_folder(d))
+                ll.addWidget(b)
+                self._loc_buttons.append(b)
+        self._tree_layout.addWidget(loc_box)
+
         # ---- sort bar for the folder tree itself (independent of the media sort)
         bar = QWidget()
         bl = QHBoxLayout(bar)
