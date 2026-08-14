@@ -788,11 +788,8 @@ class MainWindow(QMainWindow):
             )
         )
 
-    def _exit_archive(self) -> None:
-        """Leave archive browsing back to the folder we came from."""
-        if not self._archive_mode:
-            return
-        back = self._archive_back
+    def _leave_archive_state(self) -> None:
+        """Swap the archive tree back to the real folder tree (no navigation)."""
         self._archive_mode = False
         self._archive_archive = None
         self._archive_back = None
@@ -804,6 +801,13 @@ class MainWindow(QMainWindow):
         if self.tree is not None:
             self.tree.setVisible(True)
         self.btn_archive_back.setVisible(False)
+
+    def _exit_archive(self) -> None:
+        """Leave archive browsing back to the folder we came from."""
+        if not self._archive_mode:
+            return
+        back = self._archive_back
+        self._leave_archive_state()
         self.set_folder(back)
 
     def _go_up(self) -> None:
@@ -1090,12 +1094,17 @@ class MainWindow(QMainWindow):
         `quiet` skips switching the UI to the browser (used when a file was opened
         from the command line: the player window is already showing).
 
+        Navigating anywhere leaves archive browsing automatically: the archive
+        tree is swapped back for the real folder tree.
+
         Note what is deliberately *not* done here: no `is_dir()`, no cache walk, no
         listing built. A single `stat()` against a sleeping USB disk or a network share
         that has to be re-dialled costs seconds, and on the GUI thread those seconds are
         a frozen window. A folder that turns out not to be readable simply comes back
         empty, which the status line says.
         """
+        if self._archive_mode:
+            self._leave_archive_state()
         if folder is None:
             return
         folder = Path(folder)
