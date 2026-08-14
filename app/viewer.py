@@ -59,6 +59,7 @@ class Viewer(QWidget):
         self.items: list[MediaItem] = []
         self.index = -1
         self._scrubbing = False
+        self._at_eof = False                  # 播放完停在最后一帧（等待再次播放从头开始）
         self._bars_visible = True
         self._move_accum = 0.0                    # travel since the bars hid
         self._last_move_pos = None                # None after leaving the window
@@ -160,7 +161,7 @@ class Viewer(QWidget):
         c.play_pause.connect(self._toggle_pause)
         c.prev_media.connect(lambda: self.step(-1))
         c.next_media.connect(lambda: self.step(1))
-        c.seek_requested.connect(self.video_view.seek_absolute)
+        c.seek_requested.connect(self._seek_absolute)
         c.scrub_started.connect(lambda: setattr(self, "_scrubbing", True))
         c.scrub_finished.connect(lambda: setattr(self, "_scrubbing", False))
         c.speed_selected.connect(self._set_speed)
@@ -322,6 +323,7 @@ class Viewer(QWidget):
     def show_index(self, index: int) -> None:
         if not (0 <= index < len(self.items)):
             return
+        self._at_eof = False                  # 换片后不再处于“播完停帧”状态
         self._remember_position()
         self.index = index
         item = self.items[index]
@@ -648,6 +650,7 @@ class Viewer(QWidget):
         n = len(self.items)
 
         if mode == "one":
+            self._at_eof = False
             self.video_view.seek_absolute(0)   # mpv's loop-file also covers this
             self.video_view.set_pause(False)
             return
@@ -663,6 +666,9 @@ class Viewer(QWidget):
         if settings["autoplay_next"] and self.index < n - 1:
             self.step(1)
             return
+        # 不自动切换：停在最后一帧的暂停状态，等待用户再次点播放时从头开始
+        self.video_view.set_pause(True)
+        self._at_eof = True
         self._show_bars()
 
     def _on_load_failed(self, message: str) -> None:
@@ -676,8 +682,24 @@ class Viewer(QWidget):
     # -------------------------------------------------------------- actions
 
     def _toggle_pause(self) -> None:
-        if self._current_is_video():
-            self.video_view.toggle_pause()
+        if not self._current_is_video():
+            return
+        if self._at_eof:
+            # 上一段已播完停在最后一帧：再次播放从该视频头部重新开始
+            self._at_eof = False
+            self.video_view.seek_absolute(0)
+            self.video_view.set_pause(False)
+            return
+        self.video_view.toggle_pause()
+
+    def _seek_absolute(self, seconds: float) -> None:
+        """手动定位后播放应从该处继续（退出“播完停帧”状态）。"""
+        self._at_eof = False
+        self.video_view.seek_absolute(seconds)
+
+    def _seek_relative(self, delta: float) -> None:
+        self._at_eof = False
+        self.video_view.seek_relative(delta)
 
     def _toggle_mute(self) -> None:
         self.video_view.toggle_mute()
@@ -993,14 +1015,14 @@ class Viewer(QWidget):
                 amount = SEEK_TINY if mods & Qt.ShiftModifier else (
                     SEEK_BIG if mods & Qt.ControlModifier else SEEK_SMALL
                 )
-                self.video_view.seek_relative(amount)
+                self._seek_relative(amount)
                 self._show_bars()
                 return
             if k == Qt.Key_Left:
                 amount = SEEK_TINY if mods & Qt.ShiftModifier else (
                     SEEK_BIG if mods & Qt.ControlModifier else SEEK_SMALL
                 )
-                self.video_view.seek_relative(-amount)
+                self._seek_relative(-amount)
                 self._show_bars()
                 return
             if k == Qt.Key_Up:
@@ -1010,10 +1032,10 @@ class Viewer(QWidget):
                 self._adjust_volume(-5)
                 return
             if k == Qt.Key_Home:
-                self.video_view.seek_absolute(0)
+                self._seek_absolute(0)
                 return
             if k == Qt.Key_End:
-                self.video_view.seek_absolute(max(0.0, self.video_view.duration - 3))
+                self._seek_absolute(max(0.0, self.video_view.duration - 3))
                 return
             if k == Qt.Key_M:
                 self._toggle_mute()
