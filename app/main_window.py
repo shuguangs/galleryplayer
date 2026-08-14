@@ -243,9 +243,10 @@ class MainWindow(QMainWindow):
         # No folder is opened on launch: the welcome page waits for the user. The
         # remembered folder is only used as the file dialog's starting directory.
         # A media file passed on the command line ("open with") skips the browser
-        # and goes straight to the player window.
+        # and goes straight to the player window. Deferred until the window is
+        # actually shown: password / error dialogs need a visible parent.
         if self._startup_file is not None:
-            self._startup_play()
+            QTimer.singleShot(0, self._startup_play)
         else:
             self._show_welcome()
 
