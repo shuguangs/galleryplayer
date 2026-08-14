@@ -780,6 +780,8 @@ class MainWindow(QMainWindow):
         if self.tiles is not None:
             self.tiles.set_current_row(0, scroll=False)
         self._show_browser()
+        if self.tiles is not None:
+            self.tiles.thumbs_suspended = bool(settings["archive_no_thumbs"])
         self.status_count.setText(
             t("main_window.item_count").format(
                 count=len(items),
@@ -792,6 +794,8 @@ class MainWindow(QMainWindow):
     def _leave_archive_state(self) -> None:
         """Swap the archive tree back to the real folder tree (no navigation)."""
         self._archive_mode = False
+        if self.tiles is not None:
+            self.tiles.thumbs_suspended = False
         self._archive_archive = None
         self._archive_back = None
         self._archive_entries = []

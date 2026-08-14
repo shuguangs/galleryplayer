@@ -231,6 +231,14 @@ class SettingsDialog(QDialog):
         ab.addWidget(btn_ac)
         root.addWidget(_row(t("settings.archive_path_label"), arch_box, t("settings.archive_path_hint")))
 
+        self.cb_archive_no_thumbs = QCheckBox(t("settings.archive_no_thumbs_label"))
+        self.cb_archive_no_thumbs.setChecked(bool(settings["archive_no_thumbs"]))
+        self.cb_archive_no_thumbs.toggled.connect(lambda v: self._set("archive_no_thumbs", v))
+        root.addWidget(self.cb_archive_no_thumbs)
+        no_thumbs_hint = QLabel(t("settings.archive_no_thumbs_hint"))
+        no_thumbs_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        root.addWidget(no_thumbs_hint)
+
         # ---- 文件关联
         root.addWidget(_section(t("settings.section_assoc")))
         assoc_box = QWidget()

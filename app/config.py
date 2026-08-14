@@ -47,6 +47,7 @@ DEFAULTS: dict[str, Any] = {
     "tree_sort_key": "name",           # 左侧目录树排序: name | mtime | size
     "tree_sort_desc": False,
     "archive_cache": "",               # 压缩包解压缓存目录（空=系统临时目录）
+    "archive_no_thumbs": False,        # 压缩包浏览时不加载缩略图（加快浏览）
     "filter_show_image": True,         # 筛选复选框：显示图片
     "filter_show_video": True,         # 筛选复选框：显示视频
     "filter_show_archive": True,       # 筛选复选框：显示压缩包

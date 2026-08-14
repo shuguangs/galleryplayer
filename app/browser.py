@@ -178,6 +178,7 @@ class TileView(QAbstractScrollArea):
         super().__init__(parent)
         self.model = model
         self.thumbs = thumbs
+        self.thumbs_suspended = False  # archive mode: skip thumbnail decode
         self.mode = "grid"
         self.columns = 5
         # waterfall only; grid computes its geometry on demand
@@ -390,10 +391,11 @@ class TileView(QAbstractScrollArea):
             rect = self.rect_for(i).translated(0, -off)
             self._paint_tile(p, rect, it, i)
         # keep decode work focused on what the user can actually see
-        for i in rows:
-            it = self.model.items[i]
-            if not it.is_archive:
-                self.thumbs.request(it)
+        if not self.thumbs_suspended:
+            for i in rows:
+                it = self.model.items[i]
+                if not it.is_archive:
+                    self.thumbs.request(it)
 
     def _paint_tile(self, p: QPainter, rect: QRect, it: MediaItem, row: int) -> None:
         selected = row == self._current

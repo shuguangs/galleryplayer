@@ -421,6 +421,8 @@ _TR: dict[str, dict[str, str]] = {
     "settings.archive_path_label": {"zh": "压缩包缓存到", "en": "Archive cache"},
     "settings.archive_path_placeholder": {"zh": "系统临时目录（默认）", "en": "System temp folder (default)"},
     "settings.archive_path_hint": {"zh": "压缩包内的文件播放时解压到这里，留空=系统临时目录", "en": "Members are extracted here when played; empty = system temp"},
+    "settings.archive_no_thumbs_label": {"zh": "压缩包浏览时不加载缩略图", "en": "No thumbnails while browsing archives"},
+    "settings.archive_no_thumbs_hint": {"zh": "勾选后浏览压缩包内容不生成缩略图，浏览更快", "en": "Skip thumbnail decoding while browsing archive contents for faster browsing"},
     "settings.pick_archive_dir": {"zh": "选择压缩包缓存目录", "en": "Choose archive cache folder"},
     "settings.browse_ellipsis": {"zh": "浏览…", "en": "Browse…"},
     "settings.open": {"zh": "打开", "en": "Open"},
