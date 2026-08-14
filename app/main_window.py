@@ -960,11 +960,28 @@ class MainWindow(QMainWindow):
             return
         QTimer.singleShot(0, lambda: self._sync_tree_now(folder))
 
-    def _sync_tree_now(self, folder: Path) -> None:
+    def _sync_tree_now(self, folder: Path, retries: int = 6) -> None:
         if self.tree is None or self.fs_model is None or folder != self.folder:
             return
-        idx = self.fs_model.index(str(folder))
-        if not idx.isValid():
+        # Expand every ancestor from the drive down to the folder: setCurrentIndex
+        # alone leaves the chain collapsed, and a selection on an invisible row
+        # reads as "no highlight" even though the model has it selected.
+        parts = list(folder.parts)
+        if len(parts) < 2:
+            return
+        cur = Path(folder.anchor)
+        idx = None
+        for comp in parts[1:]:
+            cur = cur / comp
+            idx = self.fs_model.index(str(cur))
+            if not idx.isValid():
+                # A network share or sleeping disk may still be resolving its
+                # listing; try again shortly instead of giving up silently.
+                if retries > 0:
+                    QTimer.singleShot(150, lambda: self._sync_tree_now(folder, retries - 1))
+                return
+            self.tree.expand(idx)
+        if idx is None:
             return
         self.tree.blockSignals(True)
         self.tree.setCurrentIndex(idx)

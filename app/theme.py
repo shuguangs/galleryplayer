@@ -109,6 +109,7 @@ QTreeView, QListView, QTableView {{
 QTreeView {{ background: {BG_PANEL}; }}
 QTreeView::item, QTableView::item {{ padding: 3px; border: none; }}
 QTreeView::item:hover, QTableView::item:hover {{ background: {BG_HOVER}; }}
+QTreeView::item:selected {{ background: {BG_SELECT}; color: {TEXT}; }}
 QTreeView::branch:hover {{ background: {BG_HOVER}; }}
 
 QHeaderView::section {{
