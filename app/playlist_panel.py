@@ -95,6 +95,7 @@ class MediaRowDelegate(QStyledItemDelegate):
         super().__init__(owner)
         self.thumbs = thumbs
         self.owner = owner
+        self.thumbs_paused = False
 
     def sizeHint(self, option, index) -> QSize:
         h = ROW_H_THUMB if self.owner.thumb_mode else ROW_H_COMPACT
@@ -161,7 +162,7 @@ class MediaRowDelegate(QStyledItemDelegate):
             f = QFont(p.font()); f.setPointSize(7); p.setFont(f)
             p.setPen(QColor(theme.TEXT_FAINT))
             p.drawText(img_rect, Qt.AlignCenter, item.suffix.lstrip(".").upper())
-            if not missing:
+            if not missing and not self.owner.thumbs_paused:
                 self.thumbs.request(item)
         p.restore()
 
@@ -223,10 +224,19 @@ class MediaListWidget(QListWidget):
     reordered = Signal()
     activate_row = Signal(int)
 
+    def set_thumbs_paused(self, paused: bool) -> None:
+        """Low-priority mode: stop requesting new thumbnails (playback first)."""
+        if self.thumbs_paused == paused:
+            return
+        self.thumbs_paused = paused
+        if not paused:
+            self.viewport().update()  # repaint visible rows -> resume requests
+
     def __init__(self, thumbs: ThumbnailCache, parent=None) -> None:
         super().__init__(parent)
         self.thumb_mode = True
         self.playing_row = -1
+        self.thumbs_paused = False  # low-priority mode: skip thumbnail requests
         self.setObjectName("PanelList")
         self.setUniformItemSizes(False)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -993,6 +1003,18 @@ class PlaylistPanel(QWidget):
         settings["panel_thumb_mode"] = on
 
     # -------------------------------------------------------------- public
+
+    def set_thumbs_paused(self, paused: bool) -> None:
+        """Low-priority mode: stop requesting new thumbnails (playback first)."""
+        if self.thumbs_paused == paused:
+            return
+        self.thumbs_paused = paused
+        if not paused:
+            self.viewport().update()  # repaint visible rows -> resume requests
+
+    def set_thumbs_paused(self, paused: bool) -> None:
+        """Low-priority mode: stop requesting new thumbnails (playback first)."""
+        self.list.set_thumbs_paused(paused)
 
     def set_playlist(self, items: list[MediaItem], current: int) -> None:
         # Inherit the browser's current ordering: the playlist opens sorted the

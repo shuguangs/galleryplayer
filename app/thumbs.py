@@ -35,12 +35,14 @@ Image.MAX_IMAGE_PIXELS = None  # we control the source; avoid decompression-bomb
 THUMB_DIR = USERDATA_DIR / "thumbs"
 GRID_THUMB_MAX = 420          # long edge of a cached grid thumbnail
 VIDEO_SEEK_FRACTION = 0.18    # grab the cover this far into the video
-IMAGE_WORKERS = 3
+IMAGE_WORKERS = 2
 # Each concurrent video grab holds a libmpv instance (~55 MB), but those are released
 # once the folder settles, so paying for a third worker while covers are being built is
 # worth the ~50% faster fill on video-heavy folders. Remote paths are serialised
 # separately by _REMOTE_GATE regardless of this number.
-VIDEO_WORKERS = 3
+# Kept at 1: video thumbnail grabs are the heaviest decode and would compete with
+# the playing video for CPU; one worker keeps browsing usable without stuttering.
+VIDEO_WORKERS = 1
 # Hard ceiling on decoded thumbnails held in RAM. At ~420x420x3 bytes each this
 # caps the cache near 100 MB; past that, re-reading the small disk JPEG is cheap,
 # so an unbounded cache would only trade a browsable folder size for memory.

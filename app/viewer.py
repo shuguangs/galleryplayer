@@ -310,6 +310,10 @@ class Viewer(QWidget):
         self._relayout()
         self.show_index(index)
         self._show_bars()
+        # Thumbnails for the (possibly huge) new playlist must not compete with
+        # playback: pause their generation for a moment, then resume.
+        self.panel.set_thumbs_paused(True)
+        QTimer.singleShot(3000, lambda: self.panel.set_thumbs_paused(False))
 
     def extend_playlist(self, items: list[MediaItem], index: int) -> None:
         """Replace the playlist with a fuller listing without restarting playback.
@@ -328,6 +332,10 @@ class Viewer(QWidget):
             index = len(self.items) - 1
         self.panel.set_playlist(self.items, self.index)
         self.controls.set_navigation(self.index > 0, self.index < len(self.items) - 1)
+        # Same low-priority treatment as open_playlist: pause thumbnail requests
+        # briefly so the scan-completion swap never stalls the playing video.
+        self.panel.set_thumbs_paused(True)
+        QTimer.singleShot(3000, lambda: self.panel.set_thumbs_paused(False))
 
     def step(self, delta: int) -> None:
         if not self.items:
