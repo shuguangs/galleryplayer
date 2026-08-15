@@ -204,6 +204,7 @@ class MainWindow(QMainWindow):
         self._scan_signals = _ScanSignals()
         self._scan_signals.batch.connect(self._on_scan_batch)
         self._pending_viewer_folder: Path | None = None
+        self._quiet_scan = False  # startup playback: browser model updates are skipped
         self._archive_mode = False
         self._archive_back: Path | None = None
         self._archive_archive: Path | None = None
@@ -1170,6 +1171,7 @@ class MainWindow(QMainWindow):
             self._save_scroll_pos()
             self._push_nav_history(self.folder)
         self.folder = folder
+        self._quiet_scan = quiet
         self.thumbs.invalidate_queue()
         self.thumbs.trim_memory(600)
         self.status_path.setText(str(folder))
@@ -1249,7 +1251,8 @@ class MainWindow(QMainWindow):
             self._stream_items = []
             self.all_items = items
             self._random_seed = random.randrange(1 << 30)
-            self._apply_view(count_suffix=t("main_window.verifying_suffix"))
+            if not self._quiet_scan:
+                self._apply_view(count_suffix=t("main_window.verifying_suffix"))
             return
 
         self._stream_items.extend(items)
@@ -1257,6 +1260,8 @@ class MainWindow(QMainWindow):
         if phase != "done":
             if not self._streaming:
                 return  # a cached list is already on screen; verify quietly
+            if self._quiet_scan:
+                return  # browser is not visible; keep the GUI thread free for playback
             # Repaint at a human pace rather than once per directory: re-sorting and
             # resetting the model costs far more than accumulating the batch.
             self.status_count.setText(self._scan_progress_text(stats))
@@ -1274,7 +1279,8 @@ class MainWindow(QMainWindow):
             suffix = t("main_window.cache_hit_suffix").format(
                 reused=stats.dirs_reused, total=stats.dirs_total
             )
-        self._apply_view(count_suffix=suffix)
+        if not self._quiet_scan:
+            self._apply_view(count_suffix=suffix)
 
         # A folder picked from the panel's browser tab keeps playback going: hand the
         # freshly scanned list straight to the open viewer.
@@ -1298,14 +1304,23 @@ class MainWindow(QMainWindow):
             startup is not None
             and self.viewer is not None
             and self.viewer.isVisible()
-            and self.model.items
         ):
+            items = self.all_items if self._quiet_scan else self.model.items
             row = next(
-                (i for i, it in enumerate(self.model.items) if it.path == startup),
+                (i for i, it in enumerate(items) if it.path == startup),
                 -1,
             )
             if row >= 0:
-                self.viewer.open_playlist(self.model.items, row)
+                # If the file that launched us is still what's playing, just swap in
+                # the fuller listing without restarting playback.
+                playing_now = (
+                    0 <= self.viewer.index < len(self.viewer.items)
+                    and self.viewer.items[self.viewer.index].path == startup
+                )
+                if playing_now:
+                    self.viewer.extend_playlist(items, row)
+                else:
+                    self.viewer.open_playlist(items, row)
 
     STREAM_MIN_INTERVAL = 220
     STREAM_MAX_INTERVAL = 1500
@@ -1318,7 +1333,7 @@ class MainWindow(QMainWindow):
         repaint actually took. Otherwise a long scan would leave the UI thread with no
         headroom to stay responsive.
         """
-        if not self._streaming:
+        if not self._streaming or self._quiet_scan:
             return
         started = time.perf_counter()
         self.all_items = list(self._stream_items)

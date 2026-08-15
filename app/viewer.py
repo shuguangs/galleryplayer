@@ -311,6 +311,24 @@ class Viewer(QWidget):
         self.show_index(index)
         self._show_bars()
 
+    def extend_playlist(self, items: list[MediaItem], index: int) -> None:
+        """Replace the playlist with a fuller listing without restarting playback.
+
+        Used when a background folder scan completes after the player launched
+        with a single file: the current playback keeps running, only the panel
+        list and navigation states are updated.
+        """
+        items = [i for i in items if not getattr(i, "is_archive", False)]
+        if not items:
+            return
+        self.items = list(items)
+        if self.index >= len(self.items):
+            self.index = len(self.items) - 1
+        if index >= len(self.items):
+            index = len(self.items) - 1
+        self.panel.set_playlist(self.items, self.index)
+        self.controls.set_navigation(self.index > 0, self.index < len(self.items) - 1)
+
     def step(self, delta: int) -> None:
         if not self.items:
             return
