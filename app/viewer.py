@@ -1067,7 +1067,8 @@ class Viewer(QWidget):
             self._start_live_poll()
             return
 
-        # 2) 启动解耦子进程（独立生命周期，关界面不杀；pythonw 无控制台绝不弹窗）
+        # 2) 启动解耦子进程（先清残留旧实例：含锁丢失的僵尸进程，保证单进程）
+        self._kill_all_live_procs()
         exe = pipe / ".venv" / "Scripts" / "pythonw.exe"
         script = pipe / "live_capture.py"
         log_path = str(self._live_log)
@@ -1115,8 +1116,13 @@ class Viewer(QWidget):
         return getattr(self, "_live_log", None)
 
     def _is_live_alive(self) -> bool:
-        """按 pid 锁 + log 新鲜度判断已有字幕进程是否存活。"""
+        """按 pid 锁 + log 新鲜度判断已有字幕进程是否存活且健康。
+
+        不健康（进程活着但 log 长期无产出 = 卡死）返回 False，由启动逻辑
+        杀掉旧进程再重建，杜绝多进程积累。
+        """
         import subprocess as _sp
+        import time as _time
 
         pid_file = getattr(self, "_live_pid", None)
         if pid_file is None or not pid_file.is_file():
@@ -1128,12 +1134,76 @@ class Viewer(QWidget):
         try:
             out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
                           capture_output=True, text=True, timeout=10,
+                          errors="replace",
                           creationflags=_sp.CREATE_NO_WINDOW).stdout
             if str(pid) not in out or "python" not in out.lower():
                 return False
         except Exception:
             return False
-        return True
+        # 健康检查：log 在 60s 内有产出 = 正常工作；log 尚无但进程启动 <30s = 加载中
+        log = self._live_log_path()
+        if log is not None and log.is_file() and log.stat().st_mtime > _time.time() - 60:
+            return True
+        try:
+            fi = _sp.run(["wmic", "process", "where", f"ProcessId={pid}",
+                          "get", "CreationDate", "/value"],
+                         capture_output=True, text=True, timeout=10,
+                         errors="replace",
+                         creationflags=_sp.CREATE_NO_WINDOW).stdout
+            born = fi.split("=")[-1].strip()
+            ts = _time.mktime(_time.strptime(born[:14], "%Y%m%d%H%M%S"))
+            if _time.time() - ts < 30:
+                return True  # 刚启动仍在加载模型
+        except Exception:
+            return True  # 拿不到时间就视为健康，避免误杀
+        print(f"[viewer] pid={pid} 字幕进程长期无产出，判定卡死")
+        return False
+
+    def _kill_live_proc(self) -> None:
+        """终止字幕进程（释放显存），并清锁；随后由启动逻辑重建。"""
+        import subprocess as _sp
+
+        pid_file = getattr(self, "_live_pid", None)
+        if pid_file is not None and pid_file.is_file():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                _sp.run(["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, timeout=10,
+                        creationflags=_sp.CREATE_NO_WINDOW)
+                pid_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+        if getattr(self, "_live_proc", None) is not None:
+            try:
+                self._live_proc.kill()
+            except Exception:
+                pass
+        self._live_proc = None
+
+    def _kill_all_live_procs(self) -> None:
+        """按命令行匹配杀掉所有 live_capture 进程（含锁丢失的孤儿），保证单进程。"""
+        import subprocess as _sp
+
+        try:
+            out = _sp.run(
+                ["wmic", "process", "where",
+                 "name like '%pythonw%.exe' and commandline like '%live_capture%'",
+                 "get", "ProcessId", "/value"],
+                capture_output=True, text=True, timeout=15,
+                errors="replace",
+                creationflags=_sp.CREATE_NO_WINDOW).stdout
+            ids = [int(line.split("=")[-1]) for line in out.splitlines()
+                   if "ProcessId=" in line]
+            for pid in ids:
+                _sp.run(["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, timeout=10,
+                        creationflags=_sp.CREATE_NO_WINDOW)
+        except Exception:
+            pass
+        pid_file = getattr(self, "_live_pid", None)
+        if pid_file is not None:
+            pid_file.unlink(missing_ok=True)
+        self._live_proc = None
 
     def _start_live_poll(self) -> None:
         if getattr(self, "_live_poll", None) is None:
@@ -1214,27 +1284,6 @@ class Viewer(QWidget):
         else:
             self._kill_live_proc()
             self._show_toast(t("viewer.live_caption_stopped"))
-
-    def _kill_live_proc(self) -> None:
-        """终止字幕进程（释放显存），并清锁。"""
-        import subprocess as _sp
-
-        pid_file = getattr(self, "_live_pid", None)
-        if pid_file is not None and pid_file.is_file():
-            try:
-                pid = int(pid_file.read_text(encoding="utf-8").strip())
-                _sp.run(["taskkill", "/PID", str(pid), "/F"],
-                        capture_output=True, timeout=10,
-                        creationflags=_sp.CREATE_NO_WINDOW)
-                pid_file.unlink(missing_ok=True)
-            except Exception:
-                pass
-        if getattr(self, "_live_proc", None) is not None:
-            try:
-                self._live_proc.kill()
-            except Exception:
-                pass
-        self._live_proc = None
 
     def _save_live_srt(self) -> None:
         from .config import settings as _settings
