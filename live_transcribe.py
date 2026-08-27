@@ -124,27 +124,34 @@ def main() -> None:
     if args.log:
         threading.Thread(target=_heartbeat, daemon=True).start()
 
+    def status(msg: str) -> None:
+        """状态行写入 log（# 前缀）+ 终端，供诊断实时字幕卡点。"""
+        if log_fp is not None:
+            log_fp.write("# " + msg + "\n")
+            log_fp.flush()
+        print(msg, flush=True)
+
     media = Path(args.media)
     if not media.is_file():
-        print("✗ 媒体文件不存在: %s" % media)
+        status("✗ 媒体文件不存在: %s" % media)
         sys.exit(1)
 
     translator = Translator(args.ollama, args.ollama_model) if args.translate else None
     if translator:
-        print(f"翻译启用: {args.ollama_model} → zh", flush=True)
+        status(f"翻译启用: {args.ollama_model} → zh")
         try:
             urllib.request.urlopen(f"{args.ollama}/api/tags", timeout=5)
         except Exception:
-            print("✗ Ollama 服务不可用——仅出原文字幕", flush=True)
+            status("✗ Ollama 服务不可用——仅出原文字幕")
 
-    print(f"音轨模式：转写 {media.name} ...", flush=True)
+    status(f"音轨模式：转写 {media.name} ...")
     t0 = time.perf_counter()
     from faster_whisper import WhisperModel
 
     compute = "int8"  # GPU/CPU 通用、占用低（缓解转写期掉帧）；精度足够字幕用途
     model_name_or_dir = args.model_dir or args.model
     model = WhisperModel(model_name_or_dir, device=args.device, compute_type=compute)
-    print(f"模型就绪 {time.perf_counter() - t0:.0f}s", flush=True)
+    status(f"模型就绪 {time.perf_counter() - t0:.0f}s")
 
     # 音频：seek 偏移则读全量后切片（decode_audio 快），并给时间戳加偏移
     from faster_whisper import decode_audio
@@ -162,7 +169,7 @@ def main() -> None:
             str(media), language=args.lang or None, beam_size=1, vad_filter=False,
         )
         offset = 0.0
-    print(f"语言 {info.language} (p={info.language_probability:.2f})", flush=True)
+    status(f"语言 {info.language} (p={info.language_probability:.2f})，转写中 ...")
 
     for seg in seg_iter:
         text = (seg.text or "").strip()

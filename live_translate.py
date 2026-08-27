@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -148,32 +149,74 @@ def main() -> None:
     print(f"      转写完成 {time.perf_counter() - t1:.0f}s，"
           f"语言 {info.language} (p={info.language_probability:.2f})，{len(segs)} 句\n")
 
-    # 合并成翻译块
-    tr = cfg["translate"]
-    chunk_n = int(tr["chunk_sentences"]) if translator else 1
-    blocks = [segs[i: i + chunk_n] for i in range(0, len(segs), chunk_n)]
+    # 超长段按标点二次断句——先过滤碎片、合并相邻短句、压缩静音跨度
+    def clean_rows(rows) -> list[tuple[float, float, str]]:
+        import re as _re
 
-    out_lines: list[str] = []
+        def has_words(t: str) -> bool:
+            return bool(_re.search(r"[A-Za-z\u4e00-\u9fff0-9]", t))
+
+        # 1) 过滤纯标点碎片 + 合并相邻短句
+        merged: list[tuple[float, float, str]] = []
+        for start, end, text in rows:
+            text = text.strip()
+            if not has_words(text):
+                continue
+            if merged and start - merged[-1][1] <= 1.5 \
+                    and len(merged[-1][2]) + len(text) <= 120:
+                s0, _e0, t0 = merged[-1]
+                merged[-1] = (s0, max(_e0, end), (t0 + " " + text).strip())
+            else:
+                merged.append((start, end, text))
+
+        out: list[tuple[float, float, str]] = []
+        for start, end, text in merged:
+            # 2) 压缩静音跨度：显示时长 = 文本 × 0.5s/字，上限 10s（字幕阅读速度）
+            span = end - start
+            target = min(max(6.0, len(text) * 0.5), 10.0)
+            if span > target:
+                end = start + target
+                span = target
+            # 3) 长文本按标点切（时间按字数比例）
+            if span > 6.0 or len(text) > 60:
+                pieces = _re.split(r"(?<=[。！？.!?，,；;])", text)
+                pieces = [p.strip() for p in pieces if p.strip() and has_words(p)]
+                if not pieces:
+                    pieces = [text]
+                total_chars = max(1, sum(len(p) for p in pieces))
+                t = start
+                for p in pieces:
+                    seg_span = span * len(p) / total_chars
+                    out.append((t, min(end, t + seg_span), p))
+                    t += seg_span
+            else:
+                out.append((start, end, text))
+        return out
+
+    lines: list[tuple[float, float, str]] = []
+    for s in segs:
+        lines.extend(clean_rows([(s.start, s.end, s.text or "")]))
+    print(f"      断句后 {len(lines)} 条\n")
+
+    out_lines: list[tuple[float, float, str, str]] = []
     zhtext = ""
-    for bi, block in enumerate(blocks, 1):
-        orig = " ".join(s.text.strip() for s in block)
+    for i, (start, end, orig) in enumerate(lines, 1):
         zh = ""
         if translator:
             try:
-                print(f"  翻译块 {bi}/{len(blocks)} ...", end=" ", flush=True)
+                print(f"  翻译 {i}/{len(lines)} ...", end=" ", flush=True)
                 zh = translator(orig)
                 print("✓")
             except Exception as exc:  # noqa: BLE001
                 print(f"✗ {exc}")
                 zh = ""
         zhtext += zh + ("\n" if zh else "")
-        for s in block:
-            line = f"[{s.start:7.1f} → {s.end:7.1f}] {s.text.strip()}"
-            if cfg["output"]["show_original"]:
-                line += f"\n           ↳ {zh}" if zh else ""
-            print(line)
-            if cfg["output"]["srt"]:
-                out_lines.append((s.start, s.end, s.text.strip(), zh))
+        line = f"[{start:7.1f} → {end:7.1f}] {orig}"
+        if cfg["output"]["show_original"]:
+            line += f"\n           ↳ {zh}" if zh else ""
+        print(line)
+        if cfg["output"]["srt"]:
+            out_lines.append((start, end, orig, zh))
 
     if cfg["output"]["srt"] and out_lines:
         if args.out_dir:
