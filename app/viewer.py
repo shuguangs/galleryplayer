@@ -423,6 +423,26 @@ class Viewer(QWidget):
     def _on_position(self, pos: float) -> None:
         if not self._scrubbing:
             self.controls.set_position(pos, self.video_view.duration)
+        self._maybe_restart_live_for_position(pos)
+
+    def _maybe_restart_live_for_position(self, pos: float) -> None:
+        """A large backward seek invalidates the current transcription range."""
+        if not getattr(self, "_live_on", False):
+            self._live_last_position = pos
+            return
+        if str(settings["live_caption_source"]) != "audio":
+            self._live_last_position = pos
+            return
+
+        prev = getattr(self, "_live_last_position", None)
+        self._live_last_position = pos
+        if prev is None or prev - pos < 5:
+            return
+        if abs(pos - getattr(self, "_live_last_restart_pos", -10_000.0)) < 5:
+            return
+
+        self._live_last_restart_pos = pos
+        self._restart_live_for_seek(int(pos))
 
     def _on_duration(self, dur: float) -> None:
         self.controls.set_duration(dur)
@@ -1137,6 +1157,7 @@ class Viewer(QWidget):
         else:
             self._live_log_pos = 0
         self._live_paused = False
+        self._live_last_position = None
         self._live_label.clear()
         self._live_label.hide()
         self._live_on = bool(item.is_video)
@@ -1174,6 +1195,7 @@ class Viewer(QWidget):
         self._live_rows = []
         self._live_log_pos = self._live_log.stat().st_size if self._live_log.is_file() else 0
         self._live_started_at = _time.time()
+        self._live_last_position = seek
         self._live_alive_cache = None
         self._live_label.setText(t("viewer.live_caption_running"))
         self._live_label.hide()
@@ -1253,12 +1275,19 @@ class Viewer(QWidget):
             self._live_paused = False
             self._live_on = True
             self._live_rows = []
-            self._live_label.setText(t("viewer.live_caption_running"))
-            self._live_label.show()
-            self._live_label.raise_()
-            self._relayout()
+            if source == "audio":
+                try:
+                    pos = float(self.video_view.position or 0.0)
+                except Exception:
+                    pos = 0.0
+                self._switch_live_media(current_media, pos)
+            else:
+                self._live_label.setText(t("viewer.live_caption_running"))
+                self._live_label.show()
+                self._live_label.raise_()
+                self._relayout()
+                self._start_live_poll()
             self._show_toast(t("viewer.live_caption_resumed"))
-            self._start_live_poll()
             return
 
         # 2) 启动解耦子进程（先清残留旧实例：含锁丢失的僵尸进程，保证单进程）
@@ -1315,6 +1344,7 @@ class Viewer(QWidget):
         try:
             self._live_proc = subprocess.Popen(
                 [str(exe), *args], env=env,
+                cwd=str(pipe),
                 stdout=subprocess.DEVNULL, stderr=self._live_err_fh,
                 creationflags=flags, startupinfo=si,
             )
@@ -1556,7 +1586,7 @@ class Viewer(QWidget):
                 self._update_live_caption_for_position(pos)
                 # 播放位置远超已转写末尾（seek 跳转/转写未追上）→ 自动重转
                 rows = sorted(self._live_rows, key=lambda r: r[0])
-                if pos > rows[-1][0] + 30 and hasattr(self, "_live_args_base"):
+                if pos > rows[-1][0] + 30:
                     self._show_toast(t("viewer.live_caption_catching"))
                     self._restart_live_for_seek(int(pos))
             else:
@@ -1627,8 +1657,7 @@ class Viewer(QWidget):
 
     def _restart_live_for_seek(self, pos: int) -> None:
         """播放位置超出已转写范围 → 以 --seek pos 重启转写进程（追进度）。"""
-        base = getattr(self, "_live_args_base", None)
-        if not base:
+        if not getattr(self, "_live_on", False):
             return
         media = self.items[self.index].path if 0 <= self.index < len(self.items) else None
         if media is None:
