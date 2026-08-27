@@ -7,7 +7,7 @@
 用法（由播放器调用）：
     pythonw live_transcribe.py <媒体> --log <log文件> [--model medium]
                        [--lang en] [--translate] [--ollama-model qwen2.5:7b]
-    JSON: {"t": 秒(绝对), "text": 原语, "zh": 译文}
+    JSON: {"t": 秒(绝对), "end": 秒(绝对), "text": 原语, "zh": 译文}
 """
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+
+from ollama_service import ensure_ollama
 
 # GBK 控制台安全输出
 for _s in (sys.stdout, sys.stderr):
@@ -77,7 +79,7 @@ class Translator:
         }).encode("utf-8")
         req = urllib.request.Request(f"{self.endpoint}/api/chat", data=body,
                                      headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with urllib.request.urlopen(req, timeout=60) as resp:
             out = json.loads(resp.read().decode("utf-8"))["message"]["content"]
         for mark in ("<|END_OF_TURN_TOKEN|>", "<|end_of_turn|>", "<|im_end|>", "<|endoftext|>"):
             out = out.replace(mark, "")
@@ -111,6 +113,10 @@ def main() -> None:
     import threading
 
     _stop_hb = threading.Event()
+    control_path = Path(str(args.log) + ".control") if args.log else None
+    pending_job: dict | None = None
+    pending_lock = threading.Lock()
+    cancel_current = threading.Event()
 
     def _heartbeat() -> None:
         while not _stop_hb.is_set():
@@ -124,6 +130,30 @@ def main() -> None:
     if args.log:
         threading.Thread(target=_heartbeat, daemon=True).start()
 
+    def _watch_control() -> None:
+        """Receive media switches without unloading/reloading Whisper."""
+        nonlocal pending_job
+        last_generation = 0
+        while not _stop_hb.is_set():
+            if control_path is not None:
+                try:
+                    job = json.loads(control_path.read_text(encoding="utf-8"))
+                    generation = int(job.get("generation", 0))
+                    if generation > last_generation:
+                        last_generation = generation
+                        with pending_lock:
+                            pending_job = {
+                                "media": Path(str(job.get("media", ""))),
+                                "seek": max(0.0, float(job.get("seek", 0.0))),
+                                "generation": generation,
+                            }
+                        cancel_current.set()
+                except Exception:
+                    pass
+            _stop_hb.wait(0.25)
+
+    threading.Thread(target=_watch_control, daemon=True).start()
+
     def status(msg: str) -> None:
         """状态行写入 log（# 前缀）+ 终端，供诊断实时字幕卡点。"""
         if log_fp is not None:
@@ -131,20 +161,21 @@ def main() -> None:
             log_fp.flush()
         print(msg, flush=True)
 
-    media = Path(args.media)
-    if not media.is_file():
-        status("✗ 媒体文件不存在: %s" % media)
+    initial_media = Path(args.media)
+    if not initial_media.is_file():
+        status("✗ 媒体文件不存在: %s" % initial_media)
         sys.exit(1)
 
     translator = Translator(args.ollama, args.ollama_model) if args.translate else None
     if translator:
         status(f"翻译启用: {args.ollama_model} → zh")
-        try:
-            urllib.request.urlopen(f"{args.ollama}/api/tags", timeout=5)
-        except Exception:
-            status("✗ Ollama 服务不可用——仅出原文字幕")
+        ready, error = ensure_ollama(args.ollama, args.ollama_model, status)
+        if ready:
+            status(f"TRANSLATE_READY {args.ollama_model}")
+        else:
+            status(f"TRANSLATE_ERROR {error}")
+            translator = None
 
-    status(f"音轨模式：转写 {media.name} ...")
     t0 = time.perf_counter()
     from faster_whisper import WhisperModel
 
@@ -153,47 +184,68 @@ def main() -> None:
     model = WhisperModel(model_name_or_dir, device=args.device, compute_type=compute)
     status(f"模型就绪 {time.perf_counter() - t0:.0f}s")
 
-    # 音频：seek 偏移则读全量后切片（decode_audio 快），并给时间戳加偏移
     from faster_whisper import decode_audio
 
-    seek = max(0.0, args.seek)
-    if seek > 0:
-        audio = decode_audio(str(media), sampling_rate=16000)
-        audio = audio[int(seek * 16000):]
-        seg_iter, info = model.transcribe(
-            audio, language=args.lang or None, beam_size=1, vad_filter=False,
-        )
-        offset = seek
-    else:
-        seg_iter, info = model.transcribe(
-            str(media), language=args.lang or None, beam_size=1, vad_filter=False,
-        )
-        offset = 0.0
-    status(f"语言 {info.language} (p={info.language_probability:.2f})，转写中 ...")
+    def _transcribe(media: Path, seek: float, generation: int = 0) -> None:
+        cancel_current.clear()
+        if generation > 0 and log_fp is not None:
+            log_fp.seek(0)
+            log_fp.truncate()
+        if not media.is_file():
+            status("✗ 媒体文件不存在: %s" % media)
+            return
+        status(f"音轨模式：转写 {media.name} ...")
 
-    for seg in seg_iter:
-        text = (seg.text or "").strip()
-        if not text:
-            continue
-        zh = ""
-        if translator:
-            try:
-                zh = translator(text)
-            except Exception as exc:  # noqa: BLE001
-                zh = ""
-                print(f"✗ 翻译失败（Ollama）: {exc}", flush=True)
-        line = json.dumps({"t": round(offset + seg.start, 2), "text": text, "zh": zh},
-                          ensure_ascii=False)
-        if log_fp is not None:
-            log_fp.write(line + "\n")
-            log_fp.flush()
-        print(line, flush=True)
+        # seek 偏移则读全量后切片（decode_audio 快），并给时间戳加偏移
+        if seek > 0:
+            audio = decode_audio(str(media), sampling_rate=16000)
+            audio = audio[int(seek * 16000):]
+            seg_iter, info = model.transcribe(
+                audio, language=args.lang or None, beam_size=1, vad_filter=False,
+            )
+            offset = seek
+        else:
+            seg_iter, info = model.transcribe(
+                str(media), language=args.lang or None, beam_size=1, vad_filter=False,
+            )
+            offset = 0.0
+        status(f"语言 {info.language} (p={info.language_probability:.2f})，转写中 ...")
 
-    print("=== 转写完成 ===", flush=True)
-    # 转写完成后进程保持存活（心跳继续）：播放器据此认为字幕引擎仍在，
-    # 不会"回退到开启"；seek 跳转由播放器 kill 后用 --seek 重启
+        for seg in seg_iter:
+            if cancel_current.is_set():
+                status("切换媒体，中断当前转写 ...")
+                return
+            text = (seg.text or "").strip()
+            if not text:
+                continue
+            zh = ""
+            if translator:
+                try:
+                    zh = translator(text)
+                except Exception as exc:  # noqa: BLE001
+                    zh = ""
+                    status(f"✗ 翻译失败（Ollama）: {exc}")
+            line = json.dumps({
+                "t": round(offset + seg.start, 2),
+                "end": round(offset + seg.end, 2),
+                "text": text,
+                "zh": zh,
+            }, ensure_ascii=False)
+            if log_fp is not None:
+                log_fp.write(line + "\n")
+                log_fp.flush()
+            print(line, flush=True)
+
+    _transcribe(Path(args.media), max(0.0, args.seek))
+
     while True:
-        _stop_hb.wait(3600)
+        if pending_job is not None:
+            with pending_lock:
+                job = pending_job
+                pending_job = None
+            _transcribe(job["media"], job["seek"], job["generation"])
+        else:
+            _stop_hb.wait(0.25)
 
 
 if __name__ == "__main__":
