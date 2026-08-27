@@ -16,7 +16,7 @@ EXAMPLE = Path(__file__).resolve().parent / "config.example.yaml"
 MODELS = ["tiny", "base", "small", "medium", "large-v3"]
 DEVICES = ["cuda", "cpu"]
 LANGS = ["en", "ja", "ko", "fr", "de", "es", "it", "ru", "auto"]
-OLLAMA_MODELS = ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:1.5b", "llama3.1:8b"]
+OLLAMA_MODELS = ["qwen2.5:7b", "qwen2.5:3b", "qwen2.5:1.5b", "aya-expanse:8b", "llama3.1:8b"]
 
 
 class SettingsApp:

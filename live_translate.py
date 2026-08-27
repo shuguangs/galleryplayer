@@ -60,7 +60,11 @@ def translate_text(text: str, endpoint: str, model: str, target: str) -> str:
     )
     with urllib.request.urlopen(req, timeout=600) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    return data.get("message", {}).get("content", "").strip()
+    out = data.get("message", {}).get("content", "").strip()
+    # Some models (e.g. aya-expanse) leak special tokens / turn markers.
+    out = out.replace("<|END_OF_TURN_TOKEN|>", "").replace("<|end_of_turn|>", "")
+    out = out.replace("<|im_end|>", "").replace("<|endoftext|>", "").strip()
+    return out
 
 
 def make_translator(cfg: dict):
