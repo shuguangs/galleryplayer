@@ -32,6 +32,28 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+
+class _SafeOut:
+    """print 到已断开的管道（父进程销毁）时不崩溃，进程继续保活。"""
+
+    def __init__(self, real):
+        self._real = real
+
+    def write(self, s):
+        try:
+            self._real.write(s)
+        except (BrokenPipeError, OSError):
+            pass
+
+    def flush(self):
+        try:
+            self._real.flush()
+        except (BrokenPipeError, OSError):
+            pass
+
+
+sys.stdout = _SafeOut(sys.stdout)
+
 # 自包含环境：venv 自带 nvidia CUDA 库 + 引擎目录模型缓存，无需调用方注入
 _BASE = Path(__file__).resolve().parent
 _NV = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
@@ -195,7 +217,17 @@ def main() -> None:
                     help="srt 保存目录（默认与 --srt 路径相同）")
     ap.add_argument("--json", action="store_true",
                     help="每行输出 JSON（供播放器实时解析）：{\"t\":秒, \"text\":\"原语\", \"zh\":\"译文\"}")
+    ap.add_argument("--log", default=None,
+                    help="JSON 行同时追加写入该文件（播放器解耦监视用）；进程可脱离父进程存活")
     args = ap.parse_args()
+
+    # 播放器解耦监视：pid 锁 + log 文件（最先初始化，进程一启动即可被检测/复用）
+    log_fp = None
+    if args.log:
+        Path(args.log).parent.mkdir(parents=True, exist_ok=True)
+        log_fp = open(args.log, "a", encoding="utf-8")
+        Path(args.log + ".pid").write_text(str(os.getpid()), encoding="utf-8")
+        print(f"log 输出: {args.log}", flush=True)
 
     print(f"加载 whisper {args.model} ({args.device}) ...", flush=True)
     t0 = time.perf_counter()
@@ -236,9 +268,14 @@ def main() -> None:
             t0, text, zh = item
             if not text:
                 continue
-            if args.json:
-                print(json.dumps({"t": round(t0, 1), "text": text, "zh": zh},
-                                 ensure_ascii=False), flush=True)
+            if args.json or args.log:
+                line = json.dumps({"t": round(t0, 1), "text": text, "zh": zh},
+                                  ensure_ascii=False)
+                if args.log:
+                    log_fp.write(line + "\n")
+                    log_fp.flush()
+                if args.json:
+                    print(line, flush=True)
             else:
                 line = f"[{t0:6.1f}s] {text}"
                 if zh:
