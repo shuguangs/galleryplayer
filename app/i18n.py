@@ -529,6 +529,7 @@ _TR: dict[str, dict[str, str]] = {
     "viewer.live_caption_no_media": {"zh": "音轨模式需要先播放视频（读取音轨），请先播放再开启", "en": "Audio-track mode needs a playing video first"},
     "viewer.live_caption_resident": {"zh": "实时字幕已暂停（模型保留，随时可恢复）", "en": "Live caption paused (model kept, ready to resume)"},
     "viewer.live_caption_resumed": {"zh": "已连接常驻识别模型，实时字幕恢复", "en": "Reconnected to resident model, captions resumed"},
+    "viewer.live_caption_catching": {"zh": "字幕加速追赶中…（已跳转/转写未及）", "en": "Catching up on subtitles… (seek / behind)"},
     "viewer.live_caption_error": {"zh": "实时字幕异常：{err}", "en": "Live caption error: {err}"},
     "viewer.live_caption_exited": {"zh": "实时字幕进程意外退出", "en": "Live caption process exited unexpectedly"},
     "viewer.live_caption_quit_title": {"zh": "实时字幕模型仍在运行", "en": "Live caption model is still running"},

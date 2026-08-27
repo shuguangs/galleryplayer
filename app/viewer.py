@@ -1126,6 +1126,11 @@ class Viewer(QWidget):
         except Exception as exc:  # noqa: BLE001
             self._show_toast(t("viewer.live_caption_error").format(err=str(exc)[:120]))
             return
+        # 保存启动参数，供 seek 越界自动重转复用
+        self._live_args_base = [str(exe), *args]
+        self._live_env = env
+        self._live_flags = flags
+        self._live_si = si
 
         import time as _time
 
@@ -1304,6 +1309,10 @@ class Viewer(QWidget):
                     self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
                     self._live_label.show()
                     self._live_label.raise_()
+                # 播放位置远超已转写末尾（seek 跳转/转写未追上）→ 自动重转
+                if pos > rows[-1][0] + 30 and hasattr(self, "_live_args_base"):
+                    self._show_toast(t("viewer.live_caption_catching"))
+                    self._restart_live_for_seek(int(pos))
             else:
                 _t0, _t1, seg, zh = self._live_rows[-1]
                 self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
@@ -1351,6 +1360,28 @@ class Viewer(QWidget):
         srt = out_dir / f"{name}.live.srt"
         _write_srt_file(srt, fixed)
         self._show_toast(t("viewer.live_caption_saved").format(path=srt.name))
+
+    def _restart_live_for_seek(self, pos: int) -> None:
+        """播放位置超出已转写范围 → 以 --seek pos 重启转写进程（追进度）。"""
+        import time as _time
+
+        base = getattr(self, "_live_args_base", None)
+        if not base:
+            return
+        self._kill_all_live_procs()
+        self._live_rows = []
+        self._live_log_pos = 0
+        args = list(base) + ["--seek", str(pos)]
+        try:
+            self._live_proc = subprocess.Popen(
+                args, env=self._live_env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=self._live_flags, startupinfo=self._live_si,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._show_toast(t("viewer.live_caption_error").format(err=str(exc)[:120]))
+            return
+        self._live_started_at = _time.time()
 
     def _copy_current_image(self, item: MediaItem) -> None:
         ok = fileops.copy_image_to_clipboard(item.path)
