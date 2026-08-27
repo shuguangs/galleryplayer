@@ -89,11 +89,16 @@ def main() -> int:
     target = DIST / NAME
     live_userdata = target / "userdata"
     stash = ROOT / ".userdata-stash"
-    shutil.rmtree(stash, ignore_errors=True)
     if live_userdata.is_dir():
+        if stash.is_dir():
+            raise RuntimeError(
+                f"发现旧的 userdata 暂存目录 {stash}，请先恢复它再重新打包"
+            )
         size = sum(f.stat().st_size for f in live_userdata.rglob("*") if f.is_file())
         print(f"暂存已有的 userdata（{size / 1024 / 1024:.0f} MB）…")
         shutil.move(str(live_userdata), str(stash))
+    elif stash.is_dir():
+        print("继续使用上次打包失败后暂存的 userdata …")
 
     for path in (DIST, BUILD):
         shutil.rmtree(path, ignore_errors=True)
