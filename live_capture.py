@@ -54,7 +54,8 @@ class _SafeOut:
 
 sys.stdout = _SafeOut(sys.stdout)
 
-# 自包含环境：venv 自带 nvidia CUDA 库 + 引擎目录模型缓存，无需调用方注入
+# 自包含环境：venv 自带 nvidia CUDA 库 + 引擎目录模型缓存（强制覆盖调用方
+# 的 HF 缓存变量，防止指向空间不足的盘导致模型下载失败崩溃）
 _BASE = Path(__file__).resolve().parent
 _NV = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
 if _NV.is_dir():
@@ -62,7 +63,7 @@ if _NV.is_dir():
     os.environ["PATH"] = _add[0] + os.pathsep + os.environ.get("PATH", "")
 _cache = _BASE / "models" / "hf" / "hub"
 if _cache.is_dir():
-    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_cache))
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(_cache)
 
 WINDOW_SECS = 5.0      # 滑动窗长度（每窗转写一次）
 OVERLAP_SECS = 1.0     # 窗口重叠（保证语句不切断）
@@ -212,6 +213,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="实时环路录音 + whisper 滑动窗字幕")
     ap.add_argument("--input", default=None, help="wav 测试模式（模拟实时流）")
     ap.add_argument("--model", default="medium")
+    ap.add_argument("--model-dir", default=None, help="本地模型目录（WhisperModel 直接加载）")
     ap.add_argument("--lang", default="en")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--loopback", default="扬声器", help="环路设备名关键词")
@@ -238,7 +240,8 @@ def main() -> None:
     print(f"加载 whisper {args.model} ({args.device}) ...", flush=True)
     t0 = time.perf_counter()
     compute = "float16" if args.device == "cuda" else "int8"
-    model = WhisperModel(args.model, device=args.device, compute_type=compute)
+    model = WhisperModel(args.model_dir or args.model, device=args.device,
+                         compute_type=compute)
     print(f"模型就绪 {time.perf_counter() - t0:.0f}s", flush=True)
 
     translator = Translator(args.ollama, args.ollama_model) if args.translate else None

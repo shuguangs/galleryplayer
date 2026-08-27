@@ -47,7 +47,8 @@ class _SafeOut:
 
 sys.stdout = _SafeOut(sys.stdout)
 
-# 自包含环境：venv nvidia 库 + 引擎目录模型缓存
+# 自包含环境：venv nvidia 库 + 引擎目录模型缓存（强制覆盖，防止调用方
+# 环境里的 HF 缓存变量指向空间不足的盘导致模型下载失败）
 _BASE = Path(__file__).resolve().parent
 _NV = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
 if _NV.is_dir():
@@ -56,7 +57,7 @@ if _NV.is_dir():
                           + os.pathsep + os.environ.get("PATH", ""))
 _cache = _BASE / "models" / "hf" / "hub"
 if _cache.is_dir():
-    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_cache))
+    os.environ["HUGGINGFACE_HUB_CACHE"] = str(_cache)
 
 
 class Translator:
@@ -93,6 +94,9 @@ def main() -> None:
     ap.add_argument("--translate", action="store_true")
     ap.add_argument("--ollama", default="http://127.0.0.1:11434")
     ap.add_argument("--ollama-model", default="qwen2.5:7b")
+    ap.add_argument("--model-dir", default=None, help="本地模型目录（WhisperModel 直接加载）")
+    ap.add_argument("--seek", type=float, default=0.0,
+                    help="从第 N 秒开始转写（音轨模式追播放进度）")
     args = ap.parse_args()
 
     # pid 锁 + log（最先初始化，进程一启动即可被检测）
@@ -120,13 +124,26 @@ def main() -> None:
     from faster_whisper import WhisperModel
 
     compute = "float16" if args.device == "cuda" else "int8"
-    model = WhisperModel(args.model, device=args.device, compute_type=compute)
+    model_name_or_dir = args.model_dir or args.model
+    model = WhisperModel(model_name_or_dir, device=args.device, compute_type=compute)
     print(f"模型就绪 {time.perf_counter() - t0:.0f}s", flush=True)
 
-    seg_iter, info = model.transcribe(
-        str(media), language=args.lang or None,
-        beam_size=1, vad_filter=True,
-    )
+    # 音频：seek 偏移则读全量后切片（decode_audio 快），并给时间戳加偏移
+    from faster_whisper import decode_audio
+
+    seek = max(0.0, args.seek)
+    if seek > 0:
+        audio = decode_audio(str(media), sampling_rate=16000)
+        audio = audio[int(seek * 16000):]
+        seg_iter, info = model.transcribe(
+            audio, language=args.lang or None, beam_size=1, vad_filter=False,
+        )
+        offset = seek
+    else:
+        seg_iter, info = model.transcribe(
+            str(media), language=args.lang or None, beam_size=1, vad_filter=False,
+        )
+        offset = 0.0
     print(f"语言 {info.language} (p={info.language_probability:.2f})", flush=True)
 
     for seg in seg_iter:
@@ -140,7 +157,7 @@ def main() -> None:
             except Exception as exc:  # noqa: BLE001
                 zh = ""
                 print(f"✗ 翻译失败（Ollama）: {exc}", flush=True)
-        line = json.dumps({"t": round(seg.start, 2), "text": text, "zh": zh},
+        line = json.dumps({"t": round(offset + seg.start, 2), "text": text, "zh": zh},
                           ensure_ascii=False)
         if log_fp is not None:
             log_fp.write(line + "\n")
