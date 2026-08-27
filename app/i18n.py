@@ -463,6 +463,7 @@ _TR: dict[str, dict[str, str]] = {
     "settings.install_translate_label": {"zh": "翻译模型", "en": "Translate model"},
     "settings.install_mirror_label": {"zh": "下载源", "en": "Mirror"},
     "settings.install_start": {"zh": "开始一键安装", "en": "One-click install"},
+    "settings.install_group": {"zh": "一键安装（下载模型 + 装环境）", "en": "One-click install (models + environment)"},
     "settings.install_running": {"zh": "安装中…（可看到下方日志进度）", "en": "Installing… (see log below)"},
     "settings.install_done": {"zh": "安装完成 ✓ 现在可以右键视频生成字幕了", "en": "Install done ✓ generate subtitles from the right-click menu now"},
     "settings.install_failed": {"zh": "安装失败（看日志；可换镜像源或重试）", "en": "Install failed (see log; try another mirror)"},

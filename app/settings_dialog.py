@@ -240,104 +240,41 @@ class SettingsDialog(QDialog):
         no_thumbs_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         root.addWidget(no_thumbs_hint)
 
-        # ---- 字幕引擎（live-subtitle）
-        root.addWidget(_section(t("settings.section_subtitles")))
-        sub_engine_box = QWidget()
-        se = QHBoxLayout(sub_engine_box)
-        se.setContentsMargins(0, 0, 0, 0)
-        se.setSpacing(6)
+        # ---- 字幕引擎 + 实时字幕（分组网格）
+        from PySide6.QtWidgets import QGridLayout, QGroupBox
+
+        grp = QGroupBox(t("settings.section_subtitles"))
+        grp.setStyleSheet(
+            f"QGroupBox {{ border:1px solid {theme.BORDER}; border-radius:6px;"
+            f" margin-top:8px; padding-top:4px; }}"
+            f"QGroupBox::title {{ subcontrol-origin:margin; left:10px;"
+            f" padding:0 4px; color:{theme.TEXT_DIM}; }}"
+        )
+        gg = QGridLayout(grp)
+        gg.setSpacing(6)
+
+        # 引擎目录
         self.edit_subtitle_dir = QLineEdit()
         self.edit_subtitle_dir.setReadOnly(True)
         self.edit_subtitle_dir.setPlaceholderText(t("settings.subtitle_dir_placeholder"))
-        self.edit_subtitle_dir.setStyleSheet(
-            f"QLineEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
-            f" border:1px solid {theme.BORDER}; border-radius:4px; padding:3px 6px; }}"
-        )
-        custom_dir = str(settings["subtitle_pipeline_dir"] or "").strip()
-        self.edit_subtitle_dir.setText(custom_dir)
-        se.addWidget(self.edit_subtitle_dir, 1)
+        self.edit_subtitle_dir.setToolTip(t("settings.subtitle_dir_hint"))
+        self.edit_subtitle_dir.setText(str(settings["subtitle_pipeline_dir"] or "").strip())
         btn_sb = QPushButton(t("settings.browse_ellipsis"))
         btn_sb.setFocusPolicy(Qt.NoFocus)
         btn_sb.clicked.connect(self._browse_subtitle_dir)
-        se.addWidget(btn_sb)
         btn_sc = QPushButton(t("settings.detect"))
         btn_sc.setFocusPolicy(Qt.NoFocus)
         btn_sc.clicked.connect(self._detect_subtitle_dir)
-        se.addWidget(btn_sc)
-        root.addWidget(_row(t("settings.subtitle_dir_label"), sub_engine_box))
-        sub_status_hint = QLabel(t("settings.subtitle_dir_hint"))
-        sub_status_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        sub_status_hint.setWordWrap(True)
-        root.addWidget(sub_status_hint)
+        gg.addWidget(QLabel(t("settings.subtitle_dir_label")), 0, 0)
+        gg.addWidget(self.edit_subtitle_dir, 0, 1, 1, 2)
+        gg.addWidget(btn_sb, 0, 3)
+        gg.addWidget(btn_sc, 0, 4)
         self.sub_status = QLabel("")
         self.sub_status.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        root.addWidget(self.sub_status)
+        gg.addWidget(self.sub_status, 1, 0, 1, 5)
         self._refresh_subtitle_status()
 
-        save_box = QWidget()
-        sb = QHBoxLayout(save_box)
-        sb.setContentsMargins(0, 4, 0, 0)
-        sb.setSpacing(6)
-        sb.addWidget(QLabel(t("settings.subtitle_save_label")))
-        self.cb_subtitle_save = QComboBox()
-        self.cb_subtitle_save.addItem(t("settings.subtitle_save_media"), "media")
-        self.cb_subtitle_save.addItem(t("settings.subtitle_save_player"), "player")
-        idx = self.cb_subtitle_save.findData(settings["subtitle_save_dir"])
-        self.cb_subtitle_save.setCurrentIndex(max(0, idx))
-        self.cb_subtitle_save.currentIndexChanged.connect(
-            lambda _i: self._set("subtitle_save_dir", self.cb_subtitle_save.currentData()))
-        sb.addWidget(self.cb_subtitle_save)
-        sb.addStretch(1)
-        root.addWidget(save_box)
-        save_hint = QLabel(t("settings.subtitle_save_hint"))
-        save_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        save_hint.setWordWrap(True)
-        root.addWidget(save_hint)
-
-        self.cb_live_resident = QCheckBox(t("settings.live_resident_label"))
-        self.cb_live_resident.setChecked(bool(settings["live_caption_resident"]))
-        self.cb_live_resident.toggled.connect(lambda v: self._set("live_caption_resident", v))
-        root.addWidget(self.cb_live_resident)
-        resident_hint = QLabel(t("settings.live_resident_hint"))
-        resident_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        resident_hint.setWordWrap(True)
-        root.addWidget(resident_hint)
-
-        src_box = QWidget()
-        sl = QHBoxLayout(src_box)
-        sl.setContentsMargins(0, 0, 0, 0)
-        sl.setSpacing(6)
-        sl.addWidget(QLabel(t("settings.live_source_label")))
-        self.cb_live_source = QComboBox()
-        self.cb_live_source.addItem(t("settings.live_source_audio"), "audio")
-        self.cb_live_source.addItem(t("settings.live_source_loopback"), "loopback")
-        idx = self.cb_live_source.findData(settings["live_caption_source"])
-        self.cb_live_source.setCurrentIndex(max(0, idx))
-        self.cb_live_source.currentIndexChanged.connect(
-            lambda _i: self._set("live_caption_source", self.cb_live_source.currentData()))
-        sl.addWidget(self.cb_live_source)
-        sl.addSpacing(12)
-        sl.addWidget(QLabel(t("settings.live_lang_label")))
-        self.cb_live_lang = QComboBox()
-        for lang in ("en", "ja", "ko", "fr", "de", "es", "auto"):
-            self.cb_live_lang.addItem(lang, lang)
-        idx = self.cb_live_lang.findData(settings["live_caption_lang"])
-        self.cb_live_lang.setCurrentIndex(max(0, idx))
-        self.cb_live_lang.currentIndexChanged.connect(
-            lambda _i: self._set("live_caption_lang", self.cb_live_lang.currentData()))
-        sl.addWidget(self.cb_live_lang)
-        sl.addStretch(1)
-        root.addWidget(src_box)
-        source_hint = QLabel(t("settings.live_source_hint"))
-        source_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        source_hint.setWordWrap(True)
-        root.addWidget(source_hint)
-
-        asr_box = QWidget()
-        al = QHBoxLayout(asr_box)
-        al.setContentsMargins(0, 0, 0, 0)
-        al.setSpacing(6)
-        al.addWidget(QLabel(t("settings.live_asr_label")))
+        # 模型档位（下拉）
         self.cb_live_asr = QComboBox()
         for m in ("tiny", "base", "small", "medium", "large-v3"):
             self.cb_live_asr.addItem(m, m)
@@ -345,8 +282,6 @@ class SettingsDialog(QDialog):
         self.cb_live_asr.setCurrentIndex(max(0, idx))
         self.cb_live_asr.currentIndexChanged.connect(
             lambda _i: self._set("live_asr_model", self.cb_live_asr.currentData()))
-        al.addWidget(self.cb_live_asr)
-        al.addWidget(QLabel(t("settings.live_translate_label")))
         self.cb_live_translate = QComboBox()
         for m in ("none", "qwen2.5:3b", "qwen2.5:7b", "aya-expanse:8b"):
             self.cb_live_translate.addItem("无（仅原语）" if m == "none" else m, m)
@@ -354,82 +289,114 @@ class SettingsDialog(QDialog):
         self.cb_live_translate.setCurrentIndex(max(0, idx))
         self.cb_live_translate.currentIndexChanged.connect(
             lambda _i: self._set("live_ollama_model", self.cb_live_translate.currentData()))
-        al.addWidget(self.cb_live_translate)
-        al.addWidget(QLabel(t("settings.live_asr_dir_label")))
+        self.cb_live_lang = QComboBox()
+        for lang in ("en", "ja", "ko", "fr", "de", "es", "auto"):
+            self.cb_live_lang.addItem(lang, lang)
+        idx = self.cb_live_lang.findData(settings["live_caption_lang"])
+        self.cb_live_lang.setCurrentIndex(max(0, idx))
+        self.cb_live_lang.currentIndexChanged.connect(
+            lambda _i: self._set("live_caption_lang", self.cb_live_lang.currentData()))
+        gg.addWidget(QLabel(t("settings.live_asr_label")), 2, 0)
+        gg.addWidget(self.cb_live_asr, 2, 1)
+        gg.addWidget(QLabel(t("settings.live_translate_label")), 2, 2)
+        gg.addWidget(self.cb_live_translate, 2, 3, 1, 2)
+
+        # 模型目录（读取本地模型文件夹）
         self.edit_asr_dir = QLineEdit()
         self.edit_asr_dir.setReadOnly(True)
         self.edit_asr_dir.setPlaceholderText(t("settings.live_asr_dir_hint"))
         self.edit_asr_dir.setToolTip(t("settings.live_asr_dir_hint"))
         self.edit_asr_dir.setText(str(settings["live_asr_dir"] or ""))
-        al.addWidget(self.edit_asr_dir, 1)
         btn_ad = QPushButton(t("settings.browse_ellipsis"))
         btn_ad.setFocusPolicy(Qt.NoFocus)
         btn_ad.clicked.connect(self._browse_asr_dir)
-        al.addWidget(btn_ad)
         btn_ac = QPushButton(t("settings.clear"))
         btn_ac.setFocusPolicy(Qt.NoFocus)
         btn_ac.clicked.connect(lambda: (self.edit_asr_dir.clear(),
                                         self._set("live_asr_dir", "")))
-        al.addWidget(btn_ac)
-        root.addWidget(asr_box)
+        gg.addWidget(QLabel(t("settings.live_asr_dir_label")), 3, 0)
+        gg.addWidget(self.edit_asr_dir, 3, 1, 1, 2)
+        gg.addWidget(btn_ad, 3, 3)
+        gg.addWidget(btn_ac, 3, 4)
 
-        # ---- 一键安装子区
-        inst_box = QWidget()
-        il = QVBoxLayout(inst_box)
-        il.setContentsMargins(0, 4, 0, 0)
-        il.setSpacing(4)
-        row1 = QHBoxLayout()
-        row1.setSpacing(6)
-        row1.addWidget(QLabel(t("settings.install_model_label")))
+        # 来源 + 保存位置（下拉）
+        self.cb_live_source = QComboBox()
+        self.cb_live_source.addItem(t("settings.live_source_audio"), "audio")
+        self.cb_live_source.addItem(t("settings.live_source_loopback"), "loopback")
+        self.cb_live_source.setToolTip(t("settings.live_source_hint"))
+        idx = self.cb_live_source.findData(settings["live_caption_source"])
+        self.cb_live_source.setCurrentIndex(max(0, idx))
+        self.cb_live_source.currentIndexChanged.connect(
+            lambda _i: self._set("live_caption_source", self.cb_live_source.currentData()))
+        self.cb_subtitle_save = QComboBox()
+        self.cb_subtitle_save.addItem(t("settings.subtitle_save_media"), "media")
+        self.cb_subtitle_save.addItem(t("settings.subtitle_save_player"), "player")
+        self.cb_subtitle_save.setToolTip(t("settings.subtitle_save_hint"))
+        idx = self.cb_subtitle_save.findData(settings["subtitle_save_dir"])
+        self.cb_subtitle_save.setCurrentIndex(max(0, idx))
+        self.cb_subtitle_save.currentIndexChanged.connect(
+            lambda _i: self._set("subtitle_save_dir", self.cb_subtitle_save.currentData()))
+        gg.addWidget(QLabel(t("settings.live_source_label")), 4, 0)
+        gg.addWidget(self.cb_live_source, 4, 1)
+        gg.addWidget(QLabel(t("settings.subtitle_save_label")), 4, 2)
+        gg.addWidget(self.cb_subtitle_save, 4, 3, 1, 2)
+
+        self.cb_live_resident = QCheckBox(t("settings.live_resident_label"))
+        self.cb_live_resident.setToolTip(t("settings.live_resident_hint"))
+        self.cb_live_resident.setChecked(bool(settings["live_caption_resident"]))
+        self.cb_live_resident.toggled.connect(lambda v: self._set("live_caption_resident", v))
+        gg.addWidget(self.cb_live_resident, 5, 0, 1, 5)
+        root.addWidget(grp)
+
+        # ---- 一键安装（分组）
+        inst_grp = QGroupBox(t("settings.install_group"))
+        inst_grp.setStyleSheet(grp.styleSheet())
+        ig = QGridLayout(inst_grp)
+        ig.setSpacing(6)
         self.install_model = QComboBox()
         for m in ("small", "medium", "large-v3"):
             self.install_model.addItem(m)
         self.install_model.setCurrentText("medium")
         self.install_model.currentTextChanged.connect(self._update_install_hint)
-        row1.addWidget(self.install_model)
-        row1.addWidget(QLabel(t("settings.install_translate_label")))
         self.install_translate = QComboBox()
         for m in ("none", "qwen2.5:3b", "qwen2.5:7b", "aya-expanse:8b"):
             self.install_translate.addItem(m, m)
         self.install_translate.setCurrentIndex(2)  # 默认 qwen2.5:7b
         self.install_translate.currentTextChanged.connect(self._update_install_hint)
-        row1.addWidget(self.install_translate)
-        row1.addWidget(QLabel(t("settings.install_mirror_label")))
         self.install_mirror = QComboBox()
         self.install_mirror.addItem("huggingface.co", "huggingface")
         self.install_mirror.addItem("hf-mirror.com（国内快）", "hf-mirror")
-        row1.addWidget(self.install_mirror)
-        row1.addStretch(1)
-        il.addLayout(row1)
+        ig.addWidget(QLabel(t("settings.install_model_label")), 0, 0)
+        ig.addWidget(self.install_model, 0, 1)
+        ig.addWidget(QLabel(t("settings.install_translate_label")), 0, 2)
+        ig.addWidget(self.install_translate, 0, 3)
+        ig.addWidget(QLabel(t("settings.install_mirror_label")), 0, 4)
+        ig.addWidget(self.install_mirror, 0, 5)
 
         self.install_hint = QLabel("")
         self.install_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         self.install_hint.setWordWrap(True)
-        il.addWidget(self.install_hint)
+        ig.addWidget(self.install_hint, 1, 0, 1, 6)
 
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
         self.btn_install = QPushButton(t("settings.install_start"))
         self.btn_install.setFocusPolicy(Qt.NoFocus)
         self.btn_install.clicked.connect(self._start_install)
-        row2.addWidget(self.btn_install)
         self.install_status = QLabel("")
         self.install_status.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        row2.addWidget(self.install_status, 1)
-        il.addLayout(row2)
+        ig.addWidget(self.btn_install, 2, 0)
+        ig.addWidget(self.install_status, 2, 1, 1, 5)
 
         self.install_log = QPlainTextEdit()
         self.install_log.setReadOnly(True)
-        self.install_log.setMaximumHeight(140)
+        self.install_log.setMaximumHeight(130)
         self.install_log.setStyleSheet(
             f"QPlainTextEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
             f" border:1px solid {theme.BORDER}; border-radius:4px;"
             f" font-family:Consolas; font-size:11px; }}"
         )
-        il.addWidget(self.install_log)
-        root.addWidget(inst_box)
+        ig.addWidget(self.install_log, 3, 0, 1, 6)
+        root.addWidget(inst_grp)
         self._update_install_hint()
-
         # ---- 文件关联
         root.addWidget(_section(t("settings.section_assoc")))
         assoc_box = QWidget()
