@@ -106,6 +106,24 @@ def main() -> None:
         log_fp = open(args.log, "a", encoding="utf-8")
         Path(args.log + ".pid").write_text(str(os.getpid()), encoding="utf-8")
 
+    # 心跳：加载/转写期间每 10s touch log，播放器健康检查凭 mtime 判定存活，
+    # 避免首次 cuDNN 自动调优（1-2 分钟无输出）被误判"卡死"杀掉导致死循环
+    import threading
+
+    _stop_hb = threading.Event()
+
+    def _heartbeat() -> None:
+        while not _stop_hb.is_set():
+            try:
+                if args.log:
+                    Path(args.log).touch()
+            except Exception:
+                pass
+            _stop_hb.wait(10)
+
+    if args.log:
+        threading.Thread(target=_heartbeat, daemon=True).start()
+
     media = Path(args.media)
     if not media.is_file():
         print("✗ 媒体文件不存在: %s" % media)

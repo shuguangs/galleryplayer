@@ -237,6 +237,24 @@ def main() -> None:
         Path(args.log + ".pid").write_text(str(os.getpid()), encoding="utf-8")
         print(f"log 输出: {args.log}", flush=True)
 
+    # 心跳：加载/录音期间每 10s touch log，播放器健康检查凭 mtime 判定存活，
+    # 避免首次 cuDNN 自动调优（1-2 分钟无输出）被误判"卡死"杀掉导致死循环
+    import threading
+
+    _stop_hb = threading.Event()
+
+    def _heartbeat() -> None:
+        while not _stop_hb.is_set():
+            try:
+                if args.log:
+                    Path(args.log).touch()
+            except Exception:
+                pass
+            _stop_hb.wait(10)
+
+    if args.log:
+        threading.Thread(target=_heartbeat, daemon=True).start()
+
     print(f"加载 whisper {args.model} ({args.device}) ...", flush=True)
     t0 = time.perf_counter()
     compute = "float16" if args.device == "cuda" else "int8"
