@@ -1,0 +1,15 @@
+# 虚拟环境
+.venv/
+
+# 模型文件（大文件不入库，用脚本拉取）
+models/
+*.bin
+*.onnx
+*.ct2
+
+# 测试音频/临时产物
+samples/
+*.wav
+*.mp3
+__pycache__/
+*.pyc
