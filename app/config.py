@@ -50,6 +50,9 @@ DEFAULTS: dict[str, Any] = {
     "subtitle_pipeline_dir": "",       # live-subtitle 字幕引擎目录（空=自动探测 G:\播放器\live-subtitle）
     "subtitle_save_dir": "media",      # 字幕保存位置: media=视频所在文件夹 / player=播放器所在文件夹
     "live_ollama_model": "qwen2.5:7b",  # 实时字幕翻译模型（Ollama）
+    "live_caption_font_size": 32,       # 实时字幕覆盖层字号（px）
+    "live_caption_width": 84,           # 实时字幕水平覆盖范围（%）
+    "live_caption_height": 16,          # 实时字幕垂直覆盖范围（%）
     "live_caption_resident": True,     # 实时字幕常驻：停止时保留模型进程（重开秒出）
     "live_caption_source": "audio",    # 字幕来源: audio=文件音轨（本地播放，推荐）/ loopback=系统声音
     "live_caption_lang": "en",         # 字幕识别语言: en/ja/ko/fr/de/es/auto

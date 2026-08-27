@@ -6,6 +6,9 @@ volume on a video. Bars fade out while the mouse is still.
 from __future__ import annotations
 
 import os
+import json
+import subprocess
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QProcess, QProcessEnvironment, QTimer, Qt, Signal
@@ -108,6 +111,7 @@ class Viewer(QWidget):
         self._live_label.setAlignment(Qt.AlignCenter)
         self._live_label.setWordWrap(True)
         self._live_label.hide()
+        self._apply_live_caption_style(relayout=False)
 
         self.error_label = QLabel("", self)
         self.error_label.setObjectName("OverlayError")
@@ -868,10 +872,13 @@ class Viewer(QWidget):
         self.controls.setGeometry(0, self.height() - ch, video_w, ch)
         self.error_label.setGeometry(0, 0, video_w, self.height())
         if self._live_label.isVisible():
-            h = max(60, int(self.height() * 0.16))
+            width_pct = self._live_caption_display_value("width")
+            height_pct = self._live_caption_display_value("height")
+            w = max(240, int(video_w * width_pct / 100))
+            h = max(48, int(self.height() * height_pct / 100))
             self._live_label.setGeometry(
-                int(video_w * 0.08), max(0, self.height() - h - ch - 40),
-                int(video_w * 0.84), h,
+                (video_w - w) // 2, max(0, self.height() - h - ch - 24),
+                w, h,
             )
             self._live_label.raise_()
         self._layout_stage_buttons(video_w, ch)
@@ -998,6 +1005,23 @@ class Viewer(QWidget):
                 t("viewer.live_caption_off") if self._live_on else t("viewer.live_caption_on")
             )
             a.triggered.connect(lambda _=False: self._toggle_live_caption())
+            display = sub.addMenu(t("viewer.live_caption_display_menu"))
+            a = display.addAction(t("viewer.live_caption_font_bigger"))
+            a.triggered.connect(lambda _=False: self._step_live_caption_display("font", 2))
+            a = display.addAction(t("viewer.live_caption_font_smaller"))
+            a.triggered.connect(lambda _=False: self._step_live_caption_display("font", -2))
+            display.addSeparator()
+            a = display.addAction(t("viewer.live_caption_width_wider"))
+            a.triggered.connect(lambda _=False: self._step_live_caption_display("width", 4))
+            a = display.addAction(t("viewer.live_caption_width_narrower"))
+            a.triggered.connect(lambda _=False: self._step_live_caption_display("width", -4))
+            a = display.addAction(t("viewer.live_caption_height_taller"))
+            a.triggered.connect(lambda _=False: self._step_live_caption_display("height", 2))
+            a = display.addAction(t("viewer.live_caption_height_shorter"))
+            a.triggered.connect(lambda _=False: self._step_live_caption_display("height", -2))
+            display.addSeparator()
+            a = display.addAction(t("viewer.live_caption_display_reset"))
+            a.triggered.connect(lambda _=False: self._reset_live_caption_display())
             menu.addSeparator()
 
         if not item.is_video:
@@ -1029,6 +1053,61 @@ class Viewer(QWidget):
         else:
             self._start_live_caption()
 
+    def _live_caption_display_value(self, key: str) -> int:
+        ranges = {
+            "font": (12, 96),
+            "width": (40, 100),
+            "height": (8, 40),
+        }
+        lo, hi = ranges[key]
+        return max(lo, min(hi, int(settings[f"live_caption_{key}"])))
+
+    def _apply_live_caption_style(self, relayout: bool = True) -> None:
+        """Apply the user-editable live-caption font and readable backdrop."""
+        size = self._live_caption_display_value("font")
+        self._live_label.setStyleSheet(
+            "QLabel#LiveCaption {"
+            "background: rgba(0, 0, 0, 150);"
+            "color: #ffffff;"
+            "border-radius: 6px;"
+            "padding: 8px 12px;"
+            f"font-size: {size}px;"
+            "font-weight: 600;"
+            "}"
+        )
+        if relayout:
+            self._relayout()
+
+    def _step_live_caption_display(self, key: str, delta: int) -> None:
+        setting = f"live_caption_{key}"
+        value = max(12 if key == "font" else 8 if key == "height" else 40,
+                    min(96 if key == "font" else 40 if key == "height" else 100,
+                        self._live_caption_display_value(key) + delta))
+        settings[setting] = value
+        if key == "font":
+            self._apply_live_caption_style()
+        else:
+            self._relayout()
+        message = {
+            "font": t("viewer.live_caption_font_toast").format(size=value),
+            "width": t("viewer.live_caption_width_toast").format(width=value),
+            "height": t("viewer.live_caption_height_toast").format(height=value),
+        }[key]
+        self._show_toast(message)
+        from .config import flush
+
+        flush()
+
+    def _reset_live_caption_display(self) -> None:
+        settings["live_caption_font_size"] = 32
+        settings["live_caption_width"] = 84
+        settings["live_caption_height"] = 16
+        self._apply_live_caption_style()
+        self._show_toast(t("viewer.live_caption_display_reset"))
+        from .config import flush
+
+        flush()
+
     def _find_pipeline(self):
         from .config import find_subtitle_pipeline_dir
 
@@ -1054,8 +1133,31 @@ class Viewer(QWidget):
         self._live_log = pipe / "live-caption.log"
         self._live_pid = pipe / "live-caption.log.pid"
 
-        # 1) 常驻/复用：已有活跃进程 → 直接开始监视，秒出
-        if self._is_live_alive():
+        source = str(_settings["live_caption_source"])
+        self._live_source = source
+        current_media = None
+        if source == "audio":
+            # 音轨模式：直接读当前播放的视频音轨（无录音设备、不受系统声音干扰）
+            if not self.items or not (0 <= self.index < len(self.items)):
+                self._show_toast(t("viewer.live_caption_no_media"))
+                return
+            current_media = self.items[self.index].path
+        tr_model = str(_settings["live_ollama_model"])
+        state_file = pipe / "live-caption.state"
+        wanted_state = {"source": source, "media": str(current_media or ""),
+                        "translate": tr_model}
+
+        def _state_matches() -> bool:
+            try:
+                import json as _json
+
+                state = _json.loads(state_file.read_text(encoding="utf-8"))
+                return state == wanted_state
+            except Exception:
+                return False
+
+        # 1) 常驻/复用：相同来源/媒体/翻译模型的活跃进程 → 直接开始监视，秒出
+        if self._check_live_alive() and _state_matches():
             self._live_paused = False
             self._live_on = True
             self._live_rows = []
@@ -1069,27 +1171,18 @@ class Viewer(QWidget):
 
         # 2) 启动解耦子进程（先清残留旧实例：含锁丢失的僵尸进程，保证单进程）
         self._kill_all_live_procs()
-        from .config import settings as _c
-
-        source = str(_c["live_caption_source"])
-        self._live_source = source
         exe = pipe / ".venv" / "Scripts" / "pythonw.exe"
         log_path = str(self._live_log)
         log_path = str(_Path(log_path))
-        lang = str(_c["live_caption_lang"])
-        asr_model = str(_c["live_asr_model"]) or "medium"
-        asr_dir = str(_c["live_asr_dir"] or "").strip()
-        tr_model = str(_c["live_ollama_model"])
+        lang = str(_settings["live_caption_lang"])
+        asr_model = str(_settings["live_asr_model"]) or "medium"
+        asr_dir = str(_settings["live_asr_dir"] or "").strip()
         translate_on = tr_model != "none"
         common = ["--log", log_path, "--lang", lang, "--model", asr_model,
                   "--ollama-model", tr_model]
         if asr_dir:
             common += ["--model-dir", asr_dir]
         if source == "audio":
-            # 音轨模式：直接读当前播放的视频音轨（无录音设备、不受系统声音干扰）
-            if not self.items or not (0 <= self.index < len(self.items)):
-                self._show_toast(t("viewer.live_caption_no_media"))
-                return
             media = self.items[self.index].path
             script = pipe / "live_transcribe.py"
             args = [str(script), str(media)] + common + (["--translate"] if translate_on else [])
@@ -1117,10 +1210,19 @@ class Viewer(QWidget):
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         si.wShowWindow = 0  # SW_HIDE：双保险，绝不弹 .venv 命令行窗口
+        # stderr 落盘：崩溃 Traceback（CUDA OOM/模型加载失败）不再被 DEVNULL 吞掉
+        self._live_log.unlink(missing_ok=True)
+        self._live_pid.unlink(missing_ok=True)
+        state_file.write_text(json.dumps(wanted_state, ensure_ascii=False), encoding="utf-8")
+        err_path = pipe / "live-caption.err"
+        try:
+            self._live_err_fh = open(err_path, "w", encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            self._live_err_fh = subprocess.DEVNULL
         try:
             self._live_proc = subprocess.Popen(
                 [str(exe), *args], env=env,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=self._live_err_fh,
                 creationflags=flags, startupinfo=si,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1131,6 +1233,8 @@ class Viewer(QWidget):
         self._live_env = env
         self._live_flags = flags
         self._live_si = si
+        # 新进程刚起，作废旧的健康缓存
+        self._live_alive_cache = None
 
         import time as _time
 
@@ -1151,7 +1255,34 @@ class Viewer(QWidget):
         return getattr(self, "_live_log", None)
 
     def _is_live_alive(self) -> bool:
-        """按 pid 锁 + log 新鲜度判断已有字幕进程是否存活且健康。
+        """非阻塞存活判定：读缓存（<2s 新鲜直接用），过期则触发后台检查。
+
+        tasklist/wmic 在 UI 线程同步执行会阻塞数百毫秒（每 600ms 轮询一次
+        就是持续掉帧），因此实际命令一律放到后台线程，UI 线程只读缓存。
+        """
+        import time as _time
+
+        cache = getattr(self, "_live_alive_cache", None)
+        now = _time.time()
+        if cache is not None and now - cache[1] < 2.0:
+            return cache[0]
+        if not getattr(self, "_live_checking", False):
+            self._live_checking = True
+
+            def _job():
+                try:
+                    result = self._check_live_alive()
+                except Exception:  # noqa: BLE001
+                    result = True
+                self._live_alive_cache = (result, _time.time())
+                self._live_checking = False
+
+            threading.Thread(target=_job, daemon=True).start()
+        # 无缓存时乐观返回 True，避免误判导致刚启动的进程被复位
+        return True if cache is None else cache[0]
+
+    def _check_live_alive(self) -> bool:
+        """按 pid 锁 + log 新鲜度判断已有字幕进程是否存活且健康（阻塞，勿在 UI 线程直接调用）。
 
         不健康（进程活着但 log 长期无产出 = 卡死）返回 False，由启动逻辑
         杀掉旧进程再重建，杜绝多进程积累。
@@ -1216,29 +1347,47 @@ class Viewer(QWidget):
         self._live_proc = None
 
     def _kill_all_live_procs(self) -> None:
-        """按命令行匹配杀掉所有 live_capture 进程（含锁丢失的孤儿），保证单进程。"""
-        import subprocess as _sp
+        """按命令行匹配杀掉所有实时字幕进程（含锁丢失的孤儿），保证单进程。
 
-        try:
-            out = _sp.run(
-                ["wmic", "process", "where",
-                 "name like '%pythonw%.exe' and commandline like '%live_capture%'",
-                 "get", "ProcessId", "/value"],
-                capture_output=True, text=True, timeout=15,
-                errors="replace",
-                creationflags=_sp.CREATE_NO_WINDOW).stdout
-            ids = [int(line.split("=")[-1]) for line in out.splitlines()
-                   if "ProcessId=" in line]
-            for pid in ids:
-                _sp.run(["taskkill", "/PID", str(pid), "/F"],
-                        capture_output=True, timeout=10,
-                        creationflags=_sp.CREATE_NO_WINDOW)
-        except Exception:
-            pass
+        同时匹配 live_capture 与 live_transcribe（音轨模式残留此前清不掉）；
+        wmic 在新 Win11 已移除，失败时回退 PowerShell CIM 查询。
+        """
+        ids: list[int] = []
+        for cmd in (
+            ["wmic", "process", "where",
+             "name like '%pythonw%.exe' and (commandline like '%live_capture%' "
+             "or commandline like '%live_transcribe%')",
+             "get", "ProcessId", "/value"],
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name like 'pythonw%.exe'\" | "
+             "Where-Object { $_.CommandLine -match 'live_(capture|transcribe)' } | "
+             "ForEach-Object { 'ProcessId=' + $_.ProcessId }"],
+        ):
+            try:
+                done = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=15,
+                    errors="replace",
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                out = done.stdout
+                ids = [int(line.split("=")[-1]) for line in out.splitlines()
+                       if "ProcessId=" in line and line.split("=")[-1].strip().isdigit()]
+                if done.returncode == 0 or ids:
+                    break
+            except Exception:
+                continue
+        for pid in ids:
+            try:
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                               capture_output=True, timeout=10,
+                               creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception:
+                pass
         pid_file = getattr(self, "_live_pid", None)
         if pid_file is not None:
             pid_file.unlink(missing_ok=True)
         self._live_proc = None
+        self._live_alive_cache = None
 
     def _start_live_poll(self) -> None:
         if getattr(self, "_live_poll", None) is None:
@@ -1258,14 +1407,14 @@ class Viewer(QWidget):
         import json as _json
         import time as _time
 
-        # 启动宽限期：子进程冷启动（模型加载）可能 10-20s，期间不判死
+        # 启动宽限期：模型加载（GPU 竞争时 medium 实测 40s+）期间不判死，
+        # 但日志仍然实时读取，让翻译状态尽早可见。
         started = getattr(self, "_live_started_at", None)
-        if started is not None and _time.time() - started < 15:
-            return
+        in_grace = started is not None and _time.time() - started < 90
 
         log = self._live_log_path()
         if log is None or not log.is_file():
-            if not self._is_live_alive() and self._live_on:
+            if not in_grace and not self._is_live_alive() and self._live_on:
                 self._live_on = False
                 self._live_label.hide()
                 self._show_toast(t("viewer.live_caption_exited"))
@@ -1292,6 +1441,12 @@ class Viewer(QWidget):
                 if not seg or self._live_paused or not self._live_on:
                     continue
                 self._live_rows.append((t0, t0, seg, zh))
+            elif line.startswith("# TRANSLATE_READY "):
+                model = line.split(" ", 2)[2].strip()
+                self._show_toast(t("viewer.live_caption_translation_ready").format(model=model))
+            elif line.startswith("# TRANSLATE_ERROR "):
+                error = line.split(" ", 2)[2].strip()
+                self._show_toast(t("viewer.live_caption_translation_error").format(error=error))
             else:
                 if any(k in line for k in ("Traceback", "Error", "✗", "RuntimeError")):
                     self._show_toast(t("viewer.live_caption_error").format(err=line[:120]))
@@ -1318,10 +1473,28 @@ class Viewer(QWidget):
                 self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
                 self._live_label.show()
                 self._live_label.raise_()
-        # 进程死掉（非用户主动停止）
-        if self._live_on and not self._is_live_alive():
+        # 进程死掉（非用户主动停止）——显式提示，不再静默复位
+        if self._live_on and not in_grace and not self._is_live_alive():
             self._live_on = False
             self._live_label.hide()
+            tail = self._live_err_tail()
+            msg = t("viewer.live_caption_exited")
+            if tail:
+                msg += f"\n{tail}"
+            self._show_toast(msg)
+
+    def _live_err_tail(self, limit: int = 3) -> str:
+        """读 live-caption.err 最后几行（子进程崩溃原因），供退出提示展示。"""
+        err_file = getattr(self, "_live_log", None)
+        if err_file is None:
+            return ""
+        err_path = err_file.parent / "live-caption.err"
+        try:
+            lines = [ln for ln in err_path.read_text(
+                encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+            return "\n".join(lines[-limit:])[:200]
+        except Exception:
+            return ""
 
     def _stop_live_caption(self) -> None:
         """停止显示并保存会话。常驻模式进程保活（模型保留，重开秒出）。"""
@@ -1368,20 +1541,39 @@ class Viewer(QWidget):
         base = getattr(self, "_live_args_base", None)
         if not base:
             return
-        self._kill_all_live_procs()
+        # 轮询线程内：只做 pid 快杀（不走 wmic 全量匹配，避免 UI 长阻塞）
+        self._kill_live_proc()
         self._live_rows = []
         self._live_log_pos = 0
-        args = list(base) + ["--seek", str(pos)]
+        self._live_log.unlink(missing_ok=True)
+        # 剔除旧的 --seek 值再追加最新位置，避免参数重复
+        args = []
+        skip = False
+        for a in base:
+            if a == "--seek":
+                skip = True
+                continue
+            if skip:
+                skip = False
+                continue
+            args.append(a)
+        args += ["--seek", str(pos)]
+        err_path = self._live_log.parent / "live-caption.err"
+        try:
+            self._live_err_fh = open(err_path, "w", encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            self._live_err_fh = subprocess.DEVNULL
         try:
             self._live_proc = subprocess.Popen(
                 args, env=self._live_env,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=self._live_err_fh,
                 creationflags=self._live_flags, startupinfo=self._live_si,
             )
         except Exception as exc:  # noqa: BLE001
             self._show_toast(t("viewer.live_caption_error").format(err=str(exc)[:120]))
             return
         self._live_started_at = _time.time()
+        self._live_alive_cache = None
 
     def _copy_current_image(self, item: MediaItem) -> None:
         ok = fileops.copy_image_to_clipboard(item.path)

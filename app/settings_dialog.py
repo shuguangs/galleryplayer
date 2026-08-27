@@ -19,8 +19,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -44,7 +46,7 @@ def _section(title: str) -> QLabel:
     lab.setObjectName("SettingsSection")
     lab.setStyleSheet(
         f"color:{theme.ACCENT}; font-size:14px; font-weight:bold;"
-        f" border-bottom:1px solid {theme.BORDER}; padding:10px 0 4px 0; margin-top:6px;"
+        f" border-bottom:1px solid {theme.BORDER}; padding:6px 0 2px 0; margin-top:4px;"
     )
     return lab
 
@@ -52,8 +54,8 @@ def _section(title: str) -> QLabel:
 def _row(label: str, widget: QWidget, hint: str = "") -> QWidget:
     wrap = QWidget()
     lay = QHBoxLayout(wrap)
-    lay.setContentsMargins(0, 3, 0, 3)
-    lay.setSpacing(10)
+    lay.setContentsMargins(0, 2, 0, 2)
+    lay.setSpacing(8)
     cap = QLabel(label)
     cap.setMinimumWidth(150)
     lay.addWidget(cap)
@@ -74,14 +76,37 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(t("settings.title"))
         self.setMinimumWidth(520)
+        self.resize(640, 480)
         self.setStyleSheet(
             f"QDialog {{ background:{theme.BG_BASE}; }}"
             f"QLabel {{ color:{theme.TEXT}; }}"
             f"QCheckBox {{ color:{theme.TEXT}; }}"
         )
-        root = QVBoxLayout(self)
-        root.setContentsMargins(20, 16, 20, 16)
-        root.setSpacing(2)
+        root_outer = QVBoxLayout(self)
+        root_outer.setContentsMargins(14, 10, 14, 10)
+        root_outer.setSpacing(7)
+
+        # All option groups live in this viewport; the Done button stays visible.
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollArea { background: transparent; }"
+            f"QScrollBar:vertical {{ background: {theme.BG_BASE}; width: 10px; margin: 0; }}"
+            f"QScrollBar::handle:vertical {{ background: {theme.BG_HOVER};"
+            f" border-radius: 5px; min-height: 30px; }}"
+            f"QScrollBar::handle:vertical:hover {{ background: {theme.ACCENT_DIM}; }}"
+            f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}"
+            f"QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}"
+        )
+        content = QWidget()
+        content.setStyleSheet("QWidget { background: transparent; }")
+        root_outer.addWidget(scroll, 1)
+
+        root = QVBoxLayout(content)
+        root.setContentsMargins(6, 2, 8, 2)
+        root.setSpacing(1)
 
         # ---- 界面语言
         root.addWidget(_section(t("settings.section_lang")))
@@ -246,12 +271,13 @@ class SettingsDialog(QDialog):
         grp = QGroupBox(t("settings.section_subtitles"))
         grp.setStyleSheet(
             f"QGroupBox {{ border:1px solid {theme.BORDER}; border-radius:6px;"
-            f" margin-top:8px; padding-top:4px; }}"
+            f" margin-top:6px; padding-top:2px; }}"
             f"QGroupBox::title {{ subcontrol-origin:margin; left:10px;"
             f" padding:0 4px; color:{theme.TEXT_DIM}; }}"
         )
         gg = QGridLayout(grp)
-        gg.setSpacing(6)
+        gg.setContentsMargins(8, 6, 8, 6)
+        gg.setSpacing(4)
 
         # 引擎目录
         self.edit_subtitle_dir = QLineEdit()
@@ -296,6 +322,32 @@ class SettingsDialog(QDialog):
         self.cb_live_lang.setCurrentIndex(max(0, idx))
         self.cb_live_lang.currentIndexChanged.connect(
             lambda _i: self._set("live_caption_lang", self.cb_live_lang.currentData()))
+
+        # 实时字幕覆盖层：字号 + 覆盖范围（按播放区域百分比）
+        self.spin_live_font = QSpinBox()
+        self.spin_live_font.setRange(12, 96)
+        self.spin_live_font.setValue(int(settings["live_caption_font_size"]))
+        self.spin_live_font.valueChanged.connect(
+            lambda v: self._set("live_caption_font_size", int(v)))
+        self.spin_live_width = QSpinBox()
+        self.spin_live_width.setRange(40, 100)
+        self.spin_live_width.setSuffix("%")
+        self.spin_live_width.setValue(int(settings["live_caption_width"]))
+        self.spin_live_width.valueChanged.connect(
+            lambda v: self._set("live_caption_width", int(v)))
+        self.spin_live_height = QSpinBox()
+        self.spin_live_height.setRange(8, 40)
+        self.spin_live_height.setSuffix("%")
+        self.spin_live_height.setValue(int(settings["live_caption_height"]))
+        self.spin_live_height.valueChanged.connect(
+            lambda v: self._set("live_caption_height", int(v)))
+        for widget, key in (
+            (self.spin_live_font, "live_caption_font_size"),
+            (self.spin_live_width, "live_caption_width"),
+            (self.spin_live_height, "live_caption_height"),
+        ):
+            widget.setToolTip(t("settings.live_caption_display_hint"))
+
         gg.addWidget(QLabel(t("settings.live_asr_label")), 2, 0)
         gg.addWidget(self.cb_live_asr, 2, 1)
         gg.addWidget(QLabel(t("settings.live_translate_label")), 2, 2)
@@ -346,13 +398,24 @@ class SettingsDialog(QDialog):
         self.cb_live_resident.setChecked(bool(settings["live_caption_resident"]))
         self.cb_live_resident.toggled.connect(lambda v: self._set("live_caption_resident", v))
         gg.addWidget(self.cb_live_resident, 5, 0, 1, 5)
+        gg.addWidget(QLabel(t("settings.live_caption_display_label")), 6, 0)
+        gg.addWidget(self.spin_live_font, 6, 1)
+        gg.addWidget(QLabel(t("settings.live_caption_width_label")), 6, 2)
+        gg.addWidget(self.spin_live_width, 6, 3)
+        gg.addWidget(QLabel(t("settings.live_caption_height_label")), 7, 2)
+        gg.addWidget(self.spin_live_height, 7, 3)
+        display_hint = QLabel(t("settings.live_caption_display_hint"))
+        display_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        display_hint.setWordWrap(True)
+        gg.addWidget(display_hint, 7, 0, 1, 2)
         root.addWidget(grp)
 
         # ---- 一键安装（分组）
         inst_grp = QGroupBox(t("settings.install_group"))
         inst_grp.setStyleSheet(grp.styleSheet())
         ig = QGridLayout(inst_grp)
-        ig.setSpacing(6)
+        ig.setContentsMargins(8, 6, 8, 6)
+        ig.setSpacing(4)
         self.install_model = QComboBox()
         for m in ("small", "medium", "large-v3"):
             self.install_model.addItem(m)
@@ -388,7 +451,7 @@ class SettingsDialog(QDialog):
 
         self.install_log = QPlainTextEdit()
         self.install_log.setReadOnly(True)
-        self.install_log.setMaximumHeight(130)
+        self.install_log.setMaximumHeight(96)
         self.install_log.setStyleSheet(
             f"QPlainTextEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
             f" border:1px solid {theme.BORDER}; border-radius:4px;"
@@ -427,12 +490,21 @@ class SettingsDialog(QDialog):
         root.addWidget(note)
 
         footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 2, 0)
         footer.addStretch(1)
         btn_close = QPushButton(t("settings.done"))
         btn_close.setFocusPolicy(Qt.NoFocus)
         btn_close.clicked.connect(self.accept)
         footer.addWidget(btn_close)
-        root.addLayout(footer)
+        root.addStretch(1)
+        scroll.setWidget(content)
+        root_outer.addLayout(footer)
+
+        screen = self.screen()
+        if screen is not None:
+            max_h = screen.availableGeometry().height() - 80
+            if self.height() > max_h:
+                self.resize(self.width(), max(360, max_h))
 
     # ------------------------------------------------------------- helpers
 
