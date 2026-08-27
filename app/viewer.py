@@ -1083,15 +1083,22 @@ class Viewer(QWidget):
         env.setdefault("HUGGINGFACE_HUB_CACHE", str(pipe / "models" / "hf" / "hub"))
         flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS \
             if hasattr(subprocess, "DETACHED_PROCESS") else 0
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0  # SW_HIDE：双保险，绝不弹 .venv 命令行窗口
         try:
             self._live_proc = subprocess.Popen(
                 [str(exe), *args], env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=flags,
+                creationflags=flags, startupinfo=si,
             )
         except Exception as exc:  # noqa: BLE001
             self._show_toast(t("viewer.live_caption_error").format(err=str(exc)[:120]))
             return
+
+        import time as _time
+
+        self._live_started_at = _time.time()
 
         self._live_rows = []
         self._live_label.setText(t("viewer.live_caption_starting"))
@@ -1120,7 +1127,8 @@ class Viewer(QWidget):
             return False
         try:
             out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
-                          capture_output=True, text=True, timeout=10).stdout
+                          capture_output=True, text=True, timeout=10,
+                          creationflags=_sp.CREATE_NO_WINDOW).stdout
             if str(pid) not in out or "python" not in out.lower():
                 return False
         except Exception:
@@ -1141,8 +1149,14 @@ class Viewer(QWidget):
             tmr.stop()
 
     def _poll_live_log(self) -> None:
-        """读 log 新增行：JSON→显示；错误行→提示；进程死了→复位。"""
+        """读 log 新增行：JSON→显示；错误行→提示；启动宽限期外进程死了→复位。"""
         import json as _json
+        import time as _time
+
+        # 启动宽限期：子进程冷启动（模型加载）可能 10-20s，期间不判死
+        started = getattr(self, "_live_started_at", None)
+        if started is not None and _time.time() - started < 15:
+            return
 
         log = self._live_log_path()
         if log is None or not log.is_file():
@@ -1210,7 +1224,8 @@ class Viewer(QWidget):
             try:
                 pid = int(pid_file.read_text(encoding="utf-8").strip())
                 _sp.run(["taskkill", "/PID", str(pid), "/F"],
-                        capture_output=True, timeout=10)
+                        capture_output=True, timeout=10,
+                        creationflags=_sp.CREATE_NO_WINDOW)
                 pid_file.unlink(missing_ok=True)
             except Exception:
                 pass
