@@ -141,7 +141,7 @@ def main() -> None:
     t0 = time.perf_counter()
     from faster_whisper import WhisperModel
 
-    compute = "float16" if args.device == "cuda" else "int8"
+    compute = "int8"  # GPU/CPU 通用、占用低（缓解转写期掉帧）；精度足够字幕用途
     model_name_or_dir = args.model_dir or args.model
     model = WhisperModel(model_name_or_dir, device=args.device, compute_type=compute)
     print(f"模型就绪 {time.perf_counter() - t0:.0f}s", flush=True)
@@ -183,6 +183,10 @@ def main() -> None:
         print(line, flush=True)
 
     print("=== 转写完成 ===", flush=True)
+    # 转写完成后进程保持存活（心跳继续）：播放器据此认为字幕引擎仍在，
+    # 不会"回退到开启"；seek 跳转由播放器 kill 后用 --seek 重启
+    while True:
+        _stop_hb.wait(3600)
 
 
 if __name__ == "__main__":
