@@ -1067,8 +1067,8 @@ class Viewer(QWidget):
             self._start_live_poll()
             return
 
-        # 2) 启动解耦子进程（独立生命周期，关界面不杀）
-        exe = pipe / ".venv" / "Scripts" / "python.exe"
+        # 2) 启动解耦子进程（独立生命周期，关界面不杀；pythonw 无控制台绝不弹窗）
+        exe = pipe / ".venv" / "Scripts" / "pythonw.exe"
         script = pipe / "live_capture.py"
         log_path = str(self._live_log)
         log_path = str(_Path(log_path))
