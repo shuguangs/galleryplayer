@@ -333,6 +333,46 @@ class SettingsDialog(QDialog):
         source_hint.setWordWrap(True)
         root.addWidget(source_hint)
 
+        asr_box = QWidget()
+        al = QHBoxLayout(asr_box)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(6)
+        al.addWidget(QLabel(t("settings.live_asr_label")))
+        self.cb_live_asr = QComboBox()
+        for m in ("tiny", "base", "small", "medium", "large-v3"):
+            self.cb_live_asr.addItem(m, m)
+        idx = self.cb_live_asr.findData(settings["live_asr_model"])
+        self.cb_live_asr.setCurrentIndex(max(0, idx))
+        self.cb_live_asr.currentIndexChanged.connect(
+            lambda _i: self._set("live_asr_model", self.cb_live_asr.currentData()))
+        al.addWidget(self.cb_live_asr)
+        al.addWidget(QLabel(t("settings.live_translate_label")))
+        self.cb_live_translate = QComboBox()
+        for m in ("none", "qwen2.5:3b", "qwen2.5:7b", "aya-expanse:8b"):
+            self.cb_live_translate.addItem("无（仅原语）" if m == "none" else m, m)
+        idx = self.cb_live_translate.findData(settings["live_ollama_model"])
+        self.cb_live_translate.setCurrentIndex(max(0, idx))
+        self.cb_live_translate.currentIndexChanged.connect(
+            lambda _i: self._set("live_ollama_model", self.cb_live_translate.currentData()))
+        al.addWidget(self.cb_live_translate)
+        al.addWidget(QLabel(t("settings.live_asr_dir_label")))
+        self.edit_asr_dir = QLineEdit()
+        self.edit_asr_dir.setReadOnly(True)
+        self.edit_asr_dir.setPlaceholderText(t("settings.live_asr_dir_hint"))
+        self.edit_asr_dir.setToolTip(t("settings.live_asr_dir_hint"))
+        self.edit_asr_dir.setText(str(settings["live_asr_dir"] or ""))
+        al.addWidget(self.edit_asr_dir, 1)
+        btn_ad = QPushButton(t("settings.browse_ellipsis"))
+        btn_ad.setFocusPolicy(Qt.NoFocus)
+        btn_ad.clicked.connect(self._browse_asr_dir)
+        al.addWidget(btn_ad)
+        btn_ac = QPushButton(t("settings.clear"))
+        btn_ac.setFocusPolicy(Qt.NoFocus)
+        btn_ac.clicked.connect(lambda: (self.edit_asr_dir.clear(),
+                                        self._set("live_asr_dir", "")))
+        al.addWidget(btn_ac)
+        root.addWidget(asr_box)
+
         # ---- 一键安装子区
         inst_box = QWidget()
         il = QVBoxLayout(inst_box)
@@ -475,6 +515,15 @@ class SettingsDialog(QDialog):
             self.edit_shot_path.setText(d)
             self._set("capture_path", d)
 
+    def _browse_asr_dir(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        start = self.edit_asr_dir.text() or str(APP_DIR)
+        d = QFileDialog.getExistingDirectory(self, t("settings.pick_subtitle_dir"), start)
+        if d:
+            self.edit_asr_dir.setText(d)
+            self._set("live_asr_dir", d)
+
     def _browse_subtitle_dir(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
@@ -578,16 +627,6 @@ class SettingsDialog(QDialog):
                 "--mirror", self.install_mirror.currentData() or "huggingface",
                 "--translate", self.install_translate.currentText()]
         proc.start(exe, args)
-
-    def _browse_subtitle_dir(self) -> None:
-        from PySide6.QtWidgets import QFileDialog
-
-        start = self.edit_subtitle_dir.text() or str(APP_DIR)
-        d = QFileDialog.getExistingDirectory(self, t("settings.pick_subtitle_dir"), start)
-        if d:
-            self.edit_subtitle_dir.setText(d)
-            self._set("subtitle_pipeline_dir", d)
-            self._refresh_subtitle_status()
 
     def _browse_archive_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog

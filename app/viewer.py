@@ -1077,8 +1077,14 @@ class Viewer(QWidget):
         log_path = str(self._live_log)
         log_path = str(_Path(log_path))
         lang = str(_c["live_caption_lang"])
-        common = ["--log", log_path, "--lang", lang,
-                  "--ollama-model", str(_c["live_ollama_model"])]
+        asr_model = str(_c["live_asr_model"]) or "medium"
+        asr_dir = str(_c["live_asr_dir"] or "").strip()
+        tr_model = str(_c["live_ollama_model"])
+        translate_on = tr_model != "none"
+        common = ["--log", log_path, "--lang", lang, "--model", asr_model,
+                  "--ollama-model", tr_model]
+        if asr_dir:
+            common += ["--model-dir", asr_dir]
         if source == "audio":
             # 音轨模式：直接读当前播放的视频音轨（无录音设备、不受系统声音干扰）
             if not self.items or not (0 <= self.index < len(self.items)):
@@ -1086,18 +1092,26 @@ class Viewer(QWidget):
                 return
             media = self.items[self.index].path
             script = pipe / "live_transcribe.py"
-            args = [str(script), str(media)] + common + (["--translate"] if _c["live_ollama_model"] else [])
+            args = [str(script), str(media)] + common + (["--translate"] if translate_on else [])
+            # 从当前播放位置追赶（seek 跳转后同样用最新位置）
+            try:
+                pos = float(self.video_view.position or 0.0)
+            except Exception:
+                pos = 0.0
+            if pos > 10:
+                args += ["--seek", str(int(pos))]
         else:
             # 系统声音（环路录音）模式
             script = pipe / "live_capture.py"
-            args = [str(script), "--json"] + common + (["--translate"] if _c["live_ollama_model"] else [])
+            args = [str(script), "--json"] + common + (["--translate"] if translate_on else [])
         env = {k: v for k, v in os.environ.items()}
         nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
         for d in ("cublas", "cudnn", "cuda_nvrtc"):
             p = str(nv / d / "bin")
             if p not in env.get("PATH", ""):
                 env["PATH"] = p + os.pathsep + env.get("PATH", "")
-        env.setdefault("HUGGINGFACE_HUB_CACHE", str(pipe / "models" / "hf" / "hub"))
+        # 强制 HF 缓存到引擎目录（覆盖用户环境的 E 盘变量，防止模型下载失败崩溃）
+        env["HUGGINGFACE_HUB_CACHE"] = str(pipe / "models" / "hf" / "hub")
         flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS \
             if hasattr(subprocess, "DETACHED_PROCESS") else 0
         si = subprocess.STARTUPINFO()
