@@ -952,17 +952,52 @@ class Viewer(QWidget):
         super().leaveEvent(e)
 
     def contextMenuEvent(self, e) -> None:
-        """Right-click on the playing media: copy the image itself / the file."""
+        """Right-click on the playing media: subtitle controls + copy actions."""
         if not self.items or not (0 <= self.index < len(self.items)):
             return
         item = self.items[self.index]
         menu = QMenu(self)
+
+        if item.is_video:
+            sub = menu.addMenu(t("viewer.sub_menu"))
+            a = sub.addAction(t("viewer.sub_font_bigger"))
+            a.triggered.connect(lambda _=False: self._step_sub_font(2))
+            a = sub.addAction(t("viewer.sub_font_smaller"))
+            a.triggered.connect(lambda _=False: self._step_sub_font(-2))
+            a = sub.addAction(t("viewer.sub_font_reset"))
+            a.triggered.connect(lambda _=False: self._reset_sub_font())
+            sub.addSeparator()
+            a = sub.addAction(
+                t("viewer.sub_hide") if self.video_view.sub_visible else t("viewer.sub_show")
+            )
+            a.triggered.connect(lambda _=False: self._toggle_sub_visible())
+            sub.addSeparator()
+            a = sub.addAction(t("viewer.sub_load_file"))
+            a.triggered.connect(lambda _=False: self._pick_subtitle_file())
+            menu.addSeparator()
+
         if not item.is_video:
             act = menu.addAction(t("menu.copy_image"))
             act.triggered.connect(lambda _=False, it=item: self._copy_current_image(it))
         act = menu.addAction(t("menu.copy_file"))
         act.triggered.connect(lambda _=False, it=item: self._copy_current_file(it))
         menu.exec(e.globalPos())
+
+    def _reset_sub_font(self) -> None:
+        self.video_view.set_sub_font_size(int(settings["sub_font_size"]))
+        self._show_toast(t("viewer.sub_font_toast").format(size=self.video_view.sub_font_size))
+
+    def _pick_subtitle_file(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        start = str(self.items[self.index].path.parent) if self.items else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("viewer.sub_load_file"), start,
+            t("viewer.sub_file_filter"),
+        )
+        if path:
+            self.video_view.add_subtitle_file(path)
+            self._show_toast(t("viewer.sub_loaded"))
 
     def _copy_current_image(self, item: MediaItem) -> None:
         ok = fileops.copy_image_to_clipboard(item.path)

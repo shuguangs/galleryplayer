@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -273,6 +274,63 @@ class SettingsDialog(QDialog):
         root.addWidget(self.sub_status)
         self._refresh_subtitle_status()
 
+        # ---- 一键安装子区
+        inst_box = QWidget()
+        il = QVBoxLayout(inst_box)
+        il.setContentsMargins(0, 4, 0, 0)
+        il.setSpacing(4)
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+        row1.addWidget(QLabel(t("settings.install_model_label")))
+        self.install_model = QComboBox()
+        for m in ("small", "medium", "large-v3"):
+            self.install_model.addItem(m)
+        self.install_model.setCurrentText("medium")
+        self.install_model.currentTextChanged.connect(self._update_install_hint)
+        row1.addWidget(self.install_model)
+        row1.addWidget(QLabel(t("settings.install_translate_label")))
+        self.install_translate = QComboBox()
+        for m in ("none", "qwen2.5:3b", "qwen2.5:7b", "aya-expanse:8b"):
+            self.install_translate.addItem(m, m)
+        self.install_translate.setCurrentIndex(2)  # 默认 qwen2.5:7b
+        self.install_translate.currentTextChanged.connect(self._update_install_hint)
+        row1.addWidget(self.install_translate)
+        row1.addWidget(QLabel(t("settings.install_mirror_label")))
+        self.install_mirror = QComboBox()
+        self.install_mirror.addItem("huggingface.co", "huggingface")
+        self.install_mirror.addItem("hf-mirror.com（国内快）", "hf-mirror")
+        row1.addWidget(self.install_mirror)
+        row1.addStretch(1)
+        il.addLayout(row1)
+
+        self.install_hint = QLabel("")
+        self.install_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        self.install_hint.setWordWrap(True)
+        il.addWidget(self.install_hint)
+
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        self.btn_install = QPushButton(t("settings.install_start"))
+        self.btn_install.setFocusPolicy(Qt.NoFocus)
+        self.btn_install.clicked.connect(self._start_install)
+        row2.addWidget(self.btn_install)
+        self.install_status = QLabel("")
+        self.install_status.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        row2.addWidget(self.install_status, 1)
+        il.addLayout(row2)
+
+        self.install_log = QPlainTextEdit()
+        self.install_log.setReadOnly(True)
+        self.install_log.setMaximumHeight(140)
+        self.install_log.setStyleSheet(
+            f"QPlainTextEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
+            f" border:1px solid {theme.BORDER}; border-radius:4px;"
+            f" font-family:Consolas; font-size:11px; }}"
+        )
+        il.addWidget(self.install_log)
+        root.addWidget(inst_box)
+        self._update_install_hint()
+
         # ---- 文件关联
         root.addWidget(_section(t("settings.section_assoc")))
         assoc_box = QWidget()
@@ -387,6 +445,90 @@ class SettingsDialog(QDialog):
         else:
             self.sub_status.setText(t("settings.subtitle_dir_missing"))
             self.sub_status.setStyleSheet("color:#e0653f;")
+
+    _INSTALL_MODEL_HINTS = {
+        "small": "轻量款：识别模型约 500MB，2GB 以上内存即可跑（无独显也能用）；"
+                 "识别较粗，个别词会错。适合低配机器或只想要个大概。",
+        "medium": "推荐款：识别模型约 1.5GB，8GB 内存或任意独显；识别准确、速度约 8 倍实时，"
+                  "综合性价比最高。",
+        "large-v3": "最准款：识别模型约 3GB，建议 16GB 内存或 6GB 以上显存；"
+                    "医学术语等专业内容最稳，加载稍慢（约 40 秒）。",
+    }
+    _INSTALL_TRANSLATE_HINTS = {
+        "none": "不安装翻译模型：只出原文字幕，最省空间和时间。",
+        "qwen2.5:3b": "翻译模型 2.1GB：日常对话足够，速度快；专业术语一般。",
+        "qwen2.5:7b": "翻译模型 3.8GB（推荐）：多语言→中文质量最好，医疗/专业术语准确。",
+        "aya-expanse:8b": "翻译模型 5.1GB（Cohere）：多语言功底好；长句较慢且输出需清理。",
+    }
+
+    def _update_install_hint(self) -> None:
+        m = self.install_model.currentText()
+        tm = self.install_translate.currentText()
+        parts = [self._INSTALL_MODEL_HINTS.get(m, ""), self._INSTALL_TRANSLATE_HINTS.get(tm, "")]
+        self.install_hint.setText(" · ".join(p for p in parts if p))
+
+    def _start_install(self) -> None:
+        from PySide6.QtCore import QProcess
+
+        from .config import find_subtitle_pipeline_dir
+
+        if getattr(self, "_install_proc", None) is not None \
+                and self._install_proc.state() != QProcess.NotRunning:
+            return
+        # engine dir: existing engine (if any) else default next to the player
+        pipe = find_subtitle_pipeline_dir()
+        if pipe is None:
+            pipe = Path(__file__).resolve().parent.parent / "live-subtitle"
+        script = pipe / "install_engine.py"
+        if not script.is_file():
+            self.install_status.setText(t("settings.install_no_script"))
+            return
+
+        proc = QProcess(self)
+        self._install_proc = proc
+        self.install_log.clear()
+        self.btn_install.setEnabled(False)
+        self.install_status.setText(t("settings.install_running"))
+
+        def on_stdout() -> None:
+            self.install_log.appendPlainText(
+                bytes(proc.readAllStandardOutput()).decode("utf-8", "replace").strip()
+            )
+
+        def on_stderr() -> None:
+            self.install_log.appendPlainText(
+                bytes(proc.readAllStandardError()).decode("utf-8", "replace").strip()
+            )
+
+        def on_finished(code: int, _s) -> None:
+            self.btn_install.setEnabled(True)
+            ok = code == 0
+            self.install_status.setText(
+                t("settings.install_done") if ok else t("settings.install_failed")
+            )
+            self.install_status.setStyleSheet("color:#5dc0f0;" if ok else "color:#e0653f;")
+            self._refresh_subtitle_status()
+
+        proc.readyReadStandardOutput.connect(on_stdout)
+        proc.readyReadStandardError.connect(on_stderr)
+        proc.finished.connect(on_finished)
+
+        exe = sys.executable  # system python builds the venv
+        args = [str(script), "--dir", str(pipe),
+                "--model", self.install_model.currentText(),
+                "--mirror", self.install_mirror.currentData() or "huggingface",
+                "--translate", self.install_translate.currentText()]
+        proc.start(exe, args)
+
+    def _browse_subtitle_dir(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        start = self.edit_subtitle_dir.text() or str(APP_DIR)
+        d = QFileDialog.getExistingDirectory(self, t("settings.pick_subtitle_dir"), start)
+        if d:
+            self.edit_subtitle_dir.setText(d)
+            self._set("subtitle_pipeline_dir", d)
+            self._refresh_subtitle_status()
 
     def _browse_archive_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog
