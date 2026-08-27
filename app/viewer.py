@@ -1170,6 +1170,9 @@ class Viewer(QWidget):
 
         generation = getattr(self, "_live_media_generation", 0) + 1
         self._live_media_generation = generation
+        old_log_size = self._live_log.stat().st_size if self._live_log.is_file() else 0
+        self._live_rows = []
+        self._live_log_pos = old_log_size
         payload = {
             "media": str(media),
             "seek": max(0.0, float(seek)),
@@ -1192,13 +1195,13 @@ class Viewer(QWidget):
 
         import time as _time
 
-        self._live_rows = []
-        self._live_log_pos = self._live_log.stat().st_size if self._live_log.is_file() else 0
         self._live_started_at = _time.time()
         self._live_last_position = seek
         self._live_alive_cache = None
-        self._live_label.setText(t("viewer.live_caption_running"))
-        self._live_label.hide()
+        self._live_label.setText(t("viewer.live_caption_starting"))
+        self._live_label.show()
+        self._live_label.raise_()
+        self._relayout()
         self._start_live_poll()
 
     def _update_live_caption_for_position(self, pos: float) -> None:
