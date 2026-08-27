@@ -81,6 +81,14 @@ class SettingsDialog(QDialog):
             f"QDialog {{ background:{theme.BG_BASE}; }}"
             f"QLabel {{ color:{theme.TEXT}; }}"
             f"QCheckBox {{ color:{theme.TEXT}; }}"
+            f"QComboBox {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
+            f" border:1px solid {theme.BORDER}; border-radius:6px;"
+            f" padding:4px 26px 4px 9px; }}"
+            f"QComboBox:hover {{ background:{theme.BG_HOVER}; }}"
+            f"QComboBox QAbstractItemView {{ background:{theme.BG_PANEL};"
+            f" color:{theme.TEXT}; border:1px solid {theme.BORDER};"
+            f" selection-background-color:{theme.BG_SELECT};"
+            f" selection-color:{theme.TEXT}; outline:0; }}"
         )
         root_outer = QVBoxLayout(self)
         root_outer.setContentsMargins(14, 10, 14, 10)
@@ -101,7 +109,8 @@ class SettingsDialog(QDialog):
             f"QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}"
         )
         content = QWidget()
-        content.setStyleSheet("QWidget { background: transparent; }")
+        content.setObjectName("SettingsContent")
+        content.setStyleSheet("QWidget#SettingsContent { background: transparent; }")
         root_outer.addWidget(scroll, 1)
 
         root = QVBoxLayout(content)

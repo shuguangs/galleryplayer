@@ -367,6 +367,7 @@ class Viewer(QWidget):
             return
         self._at_eof = False                  # 换片后不再处于“播完停帧”状态
         self._remember_position()
+        restart_live = self._reset_live_for_media(self.items[index])
         self.index = index
         item = self.items[index]
         self.error_label.setVisible(False)
@@ -392,6 +393,8 @@ class Viewer(QWidget):
             self.video_view.set_speed(float(settings["speed"]))
             if start:
                 self._show_toast(t("viewer.resume_playback").format(pos=format_duration(start)))
+            if restart_live:
+                self._switch_live_media(item.path, start or 0.0)
         else:
             self.video_view.stop()
             self.previewer.set_media(None)
@@ -1073,10 +1076,10 @@ class Viewer(QWidget):
         size = self._live_caption_display_value("font")
         self._live_label.setStyleSheet(
             "QLabel#LiveCaption {"
-            "background: rgba(0, 0, 0, 150);"
+            "background: transparent;"
             "color: #ffffff;"
-            "border-radius: 6px;"
-            "padding: 8px 12px;"
+            "border: none;"
+            "padding: 0;"
             f"font-size: {size}px;"
             "font-weight: 600;"
             "}"
@@ -1113,6 +1116,89 @@ class Viewer(QWidget):
         from .config import flush
 
         flush()
+
+    def _reset_live_for_media(self, item: MediaItem) -> bool:
+        """Switch audio-mode captions to a new media file.
+
+        The resident engine keeps its loaded Whisper model; only its transcribed
+        rows and display state are reset here. The media switch is sent later,
+        once the new playback position (resume point) is known.
+        """
+        if not getattr(self, "_live_on", False):
+            return False
+        if str(settings["live_caption_source"]) != "audio":
+            return False
+
+        self._save_live_srt()
+        self._stop_live_poll()
+        self._live_rows = []
+        if getattr(self, "_live_log", None) is not None and self._live_log.is_file():
+            self._live_log_pos = self._live_log.stat().st_size
+        else:
+            self._live_log_pos = 0
+        self._live_paused = False
+        self._live_label.clear()
+        self._live_label.hide()
+        self._live_on = bool(item.is_video)
+        return self._live_on
+
+    def _switch_live_media(self, media: Path, seek: float = 0.0) -> None:
+        """Tell the resident engine to transcribe another file without reloading."""
+        if not getattr(self, "_live_on", False) or getattr(self, "_live_log", None) is None:
+            return
+
+        generation = getattr(self, "_live_media_generation", 0) + 1
+        self._live_media_generation = generation
+        payload = {
+            "media": str(media),
+            "seek": max(0.0, float(seek)),
+            "generation": generation,
+        }
+        control = Path(str(self._live_log) + ".control")
+        tmp = control.with_suffix(control.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(control)
+
+        state = {
+            "source": "audio",
+            "media": str(media),
+            "translate": str(settings["live_ollama_model"]),
+            "engine": 2,
+        }
+        (self._live_log.parent / "live-caption.state").write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8"
+        )
+
+        import time as _time
+
+        self._live_rows = []
+        self._live_log_pos = self._live_log.stat().st_size if self._live_log.is_file() else 0
+        self._live_started_at = _time.time()
+        self._live_alive_cache = None
+        self._live_label.setText(t("viewer.live_caption_running"))
+        self._live_label.hide()
+        self._start_live_poll()
+
+    def _update_live_caption_for_position(self, pos: float) -> None:
+        rows = sorted(self._live_rows, key=lambda r: r[0])
+        cur = [r for r in rows if r[0] <= pos]
+        if not cur:
+            self._live_label.hide()
+            return
+
+        i = rows.index(cur[-1])
+        t0, end, seg, zh = cur[-1]
+        # Older engine logs had no end field; use the next segment start as the
+        # display deadline in that case.
+        if end <= t0:
+            end = rows[i + 1][0] if i + 1 < len(rows) else t0 + 8.0
+        if pos > end + 0.3:
+            self._live_label.hide()
+            return
+
+        self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
+        self._live_label.show()
+        self._live_label.raise_()
 
     def _find_pipeline(self):
         from .config import find_subtitle_pipeline_dir
@@ -1151,7 +1237,7 @@ class Viewer(QWidget):
         tr_model = str(_settings["live_ollama_model"])
         state_file = pipe / "live-caption.state"
         wanted_state = {"source": source, "media": str(current_media or ""),
-                        "translate": tr_model}
+                        "translate": tr_model, "engine": 2}
 
         def _state_matches() -> bool:
             try:
@@ -1219,6 +1305,7 @@ class Viewer(QWidget):
         # stderr 落盘：崩溃 Traceback（CUDA OOM/模型加载失败）不再被 DEVNULL 吞掉
         self._live_log.unlink(missing_ok=True)
         self._live_pid.unlink(missing_ok=True)
+        Path(str(self._live_log) + ".control").unlink(missing_ok=True)
         state_file.write_text(json.dumps(wanted_state, ensure_ascii=False), encoding="utf-8")
         err_path = pipe / "live-caption.err"
         try:
@@ -1427,6 +1514,8 @@ class Viewer(QWidget):
             return
         try:
             with open(log, "r", encoding="utf-8") as f:
+                if log.stat().st_size < getattr(self, "_live_log_pos", 0):
+                    self._live_log_pos = 0
                 f.seek(getattr(self, "_live_log_pos", 0))
                 new = f.read()
                 self._live_log_pos = f.tell()
@@ -1442,11 +1531,12 @@ class Viewer(QWidget):
                 except Exception:
                     continue
                 t0 = float(obj.get("t", 0))
+                t1 = float(obj.get("end", t0))
                 seg = obj.get("text", "").strip()
                 zh = obj.get("zh", "").strip()
                 if not seg or self._live_paused or not self._live_on:
                     continue
-                self._live_rows.append((t0, t0, seg, zh))
+                self._live_rows.append((t0, max(t0, t1), seg, zh))
             elif line.startswith("# TRANSLATE_READY "):
                 model = line.split(" ", 2)[2].strip()
                 self._show_toast(t("viewer.live_caption_translation_ready").format(model=model))
@@ -1463,14 +1553,9 @@ class Viewer(QWidget):
                     pos = float(self.video_view.position or 0.0)
                 except Exception:
                     pos = 0.0
-                rows = sorted(self._live_rows, key=lambda r: r[0])
-                cur = [r for r in rows if r[0] <= pos]
-                if cur:
-                    _t0, _t1, seg, zh = cur[-1]
-                    self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
-                    self._live_label.show()
-                    self._live_label.raise_()
+                self._update_live_caption_for_position(pos)
                 # 播放位置远超已转写末尾（seek 跳转/转写未追上）→ 自动重转
+                rows = sorted(self._live_rows, key=lambda r: r[0])
                 if pos > rows[-1][0] + 30 and hasattr(self, "_live_args_base"):
                     self._show_toast(t("viewer.live_caption_catching"))
                     self._restart_live_for_seek(int(pos))
@@ -1542,44 +1627,13 @@ class Viewer(QWidget):
 
     def _restart_live_for_seek(self, pos: int) -> None:
         """播放位置超出已转写范围 → 以 --seek pos 重启转写进程（追进度）。"""
-        import time as _time
-
         base = getattr(self, "_live_args_base", None)
         if not base:
             return
-        # 轮询线程内：只做 pid 快杀（不走 wmic 全量匹配，避免 UI 长阻塞）
-        self._kill_live_proc()
-        self._live_rows = []
-        self._live_log_pos = 0
-        self._live_log.unlink(missing_ok=True)
-        # 剔除旧的 --seek 值再追加最新位置，避免参数重复
-        args = []
-        skip = False
-        for a in base:
-            if a == "--seek":
-                skip = True
-                continue
-            if skip:
-                skip = False
-                continue
-            args.append(a)
-        args += ["--seek", str(pos)]
-        err_path = self._live_log.parent / "live-caption.err"
-        try:
-            self._live_err_fh = open(err_path, "w", encoding="utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
-            self._live_err_fh = subprocess.DEVNULL
-        try:
-            self._live_proc = subprocess.Popen(
-                args, env=self._live_env,
-                stdout=subprocess.DEVNULL, stderr=self._live_err_fh,
-                creationflags=self._live_flags, startupinfo=self._live_si,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._show_toast(t("viewer.live_caption_error").format(err=str(exc)[:120]))
+        media = self.items[self.index].path if 0 <= self.index < len(self.items) else None
+        if media is None:
             return
-        self._live_started_at = _time.time()
-        self._live_alive_cache = None
+        self._switch_live_media(media, pos)
 
     def _copy_current_image(self, item: MediaItem) -> None:
         ok = fileops.copy_image_to_clipboard(item.path)
