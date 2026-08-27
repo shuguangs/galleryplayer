@@ -239,6 +239,40 @@ class SettingsDialog(QDialog):
         no_thumbs_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         root.addWidget(no_thumbs_hint)
 
+        # ---- 字幕引擎（live-subtitle）
+        root.addWidget(_section(t("settings.section_subtitles")))
+        sub_engine_box = QWidget()
+        se = QHBoxLayout(sub_engine_box)
+        se.setContentsMargins(0, 0, 0, 0)
+        se.setSpacing(6)
+        self.edit_subtitle_dir = QLineEdit()
+        self.edit_subtitle_dir.setReadOnly(True)
+        self.edit_subtitle_dir.setPlaceholderText(t("settings.subtitle_dir_placeholder"))
+        self.edit_subtitle_dir.setStyleSheet(
+            f"QLineEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
+            f" border:1px solid {theme.BORDER}; border-radius:4px; padding:3px 6px; }}"
+        )
+        custom_dir = str(settings["subtitle_pipeline_dir"] or "").strip()
+        self.edit_subtitle_dir.setText(custom_dir)
+        se.addWidget(self.edit_subtitle_dir, 1)
+        btn_sb = QPushButton(t("settings.browse_ellipsis"))
+        btn_sb.setFocusPolicy(Qt.NoFocus)
+        btn_sb.clicked.connect(self._browse_subtitle_dir)
+        se.addWidget(btn_sb)
+        btn_sc = QPushButton(t("settings.detect"))
+        btn_sc.setFocusPolicy(Qt.NoFocus)
+        btn_sc.clicked.connect(self._detect_subtitle_dir)
+        se.addWidget(btn_sc)
+        root.addWidget(_row(t("settings.subtitle_dir_label"), sub_engine_box))
+        sub_status_hint = QLabel(t("settings.subtitle_dir_hint"))
+        sub_status_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        sub_status_hint.setWordWrap(True)
+        root.addWidget(sub_status_hint)
+        self.sub_status = QLabel("")
+        self.sub_status.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        root.addWidget(self.sub_status)
+        self._refresh_subtitle_status()
+
         # ---- 文件关联
         root.addWidget(_section(t("settings.section_assoc")))
         assoc_box = QWidget()
@@ -323,6 +357,36 @@ class SettingsDialog(QDialog):
         if d:
             self.edit_shot_path.setText(d)
             self._set("capture_path", d)
+
+    def _browse_subtitle_dir(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        start = self.edit_subtitle_dir.text() or str(APP_DIR)
+        d = QFileDialog.getExistingDirectory(self, t("settings.pick_subtitle_dir"), start)
+        if d:
+            self.edit_subtitle_dir.setText(d)
+            self._set("subtitle_pipeline_dir", d)
+            self._refresh_subtitle_status()
+
+    def _detect_subtitle_dir(self) -> None:
+        from .config import find_subtitle_pipeline_dir
+
+        found = find_subtitle_pipeline_dir()
+        if found is not None:
+            self.edit_subtitle_dir.setText(str(found))
+            self._set("subtitle_pipeline_dir", str(found))
+        self._refresh_subtitle_status()
+
+    def _refresh_subtitle_status(self) -> None:
+        from .config import find_subtitle_pipeline_dir
+
+        found = find_subtitle_pipeline_dir()
+        if found is not None:
+            self.sub_status.setText(t("settings.subtitle_dir_ready").format(dir=str(found)))
+            self.sub_status.setStyleSheet("color:#5dc0f0;")
+        else:
+            self.sub_status.setText(t("settings.subtitle_dir_missing"))
+            self.sub_status.setStyleSheet("color:#e0653f;")
 
     def _browse_archive_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog

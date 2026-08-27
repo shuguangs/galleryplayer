@@ -830,21 +830,18 @@ class MainWindow(QMainWindow):
         """
         from PySide6.QtWidgets import QMessageBox
 
-        from .config import settings
+        from .config import find_subtitle_pipeline_dir
 
         if getattr(self, "_srt_proc", None) is not None and self._srt_proc.state() != QProcess.NotRunning:
             QMessageBox.information(self, t("main_window.gen_srt"), t("main_window.gen_srt_busy"))
             return
 
-        pipe = Path(str(settings["subtitle_pipeline_dir"]) or "").expanduser()
-        if not pipe.is_dir() or not (pipe / ".venv" / "Scripts" / "python.exe").is_file():
-            # fall back to the conventional location next to this project
-            pipe = Path(__file__).resolve().parent.parent / "live-subtitle"
-            if not (pipe / ".venv" / "Scripts" / "python.exe").is_file():
-                QMessageBox.warning(
-                    self, t("main_window.gen_srt"), t("main_window.gen_srt_no_pipeline")
-                )
-                return
+        pipe = find_subtitle_pipeline_dir()
+        if pipe is None:
+            QMessageBox.warning(
+                self, t("main_window.gen_srt"), t("main_window.gen_srt_no_pipeline")
+            )
+            return
 
         self.status_count.setText(t("main_window.gen_srt_running"))
 

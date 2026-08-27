@@ -152,3 +152,27 @@ resume = ResumeStore()
 def flush() -> None:
     settings.save()
     resume.save()
+
+
+def find_subtitle_pipeline_dir() -> Path | None:
+    """Locate the live-subtitle engine dir (venv with faster-whisper).
+
+    Search order: user-configured path → project folder (source build) →
+    G:\\播放器\\live-subtitle (conventional dev location) → %LIVE_SUBTITLE_DIR%.
+    Returns None when not found.
+    """
+    candidates: list[Path] = []
+    custom = str(settings["subtitle_pipeline_dir"] or "").strip()
+    if custom:
+        candidates.append(Path(custom).expanduser())
+    # source tree: <project>/live-subtitle (this file lives in <project>/app/)
+    candidates.append(Path(__file__).resolve().parent.parent / "live-subtitle")
+    # conventional dev location on the user's machine
+    candidates.append(Path(r"G:\播放器\live-subtitle"))
+    env_dir = os.environ.get("LIVE_SUBTITLE_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    for c in candidates:
+        if c.is_dir() and (c / ".venv" / "Scripts" / "python.exe").is_file():
+            return c
+    return None
