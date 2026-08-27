@@ -116,7 +116,7 @@ def main() -> None:
     control_path = Path(str(args.log) + ".control") if args.log else None
     pending_job: dict | None = None
     pending_lock = threading.Lock()
-    cancel_current = threading.Event()
+    cancel_generation = 0
 
     def _heartbeat() -> None:
         while not _stop_hb.is_set():
@@ -132,7 +132,7 @@ def main() -> None:
 
     def _watch_control() -> None:
         """Receive media switches without unloading/reloading Whisper."""
-        nonlocal pending_job
+        nonlocal pending_job, cancel_generation
         last_generation = 0
         while not _stop_hb.is_set():
             if control_path is not None:
@@ -147,7 +147,7 @@ def main() -> None:
                                 "seek": max(0.0, float(job.get("seek", 0.0))),
                                 "generation": generation,
                             }
-                        cancel_current.set()
+                        cancel_generation = generation
                 except Exception:
                     pass
             _stop_hb.wait(0.25)
@@ -187,7 +187,9 @@ def main() -> None:
     from faster_whisper import decode_audio
 
     def _transcribe(media: Path, seek: float, generation: int = 0) -> None:
-        cancel_current.clear()
+        if cancel_generation > generation:
+            status("模型加载期间收到切换，跳过旧转写任务 ...")
+            return
         if generation > 0 and log_fp is not None:
             log_fp.seek(0)
             log_fp.truncate()
@@ -212,7 +214,7 @@ def main() -> None:
         status(f"语言 {info.language} (p={info.language_probability:.2f})，转写中 ...")
 
         for seg in seg_iter:
-            if cancel_current.is_set():
+            if cancel_generation > generation:
                 status("切换媒体，中断当前转写 ...")
                 return
             text = (seg.text or "").strip()
