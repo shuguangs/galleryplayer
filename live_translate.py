@@ -11,10 +11,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
 from pathlib import Path
+
+# 子进程（播放器 QProcess）以 GBK 控制台运行时，print 中文/✓✗ 会 UnicodeEncodeError
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# 自包含环境：venv 自带 nvidia CUDA 库 + 引擎目录模型缓存，无需调用方注入
+_BASE = Path(__file__).resolve().parent
+_NV = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
+if _NV.is_dir():
+    _add = [os.pathsep.join(str(_NV / d / "bin") for d in ("cublas", "cudnn", "cuda_nvrtc"))]
+    # 防止极旧 FFI 库路径污染用 setdefault 而非覆盖
+    os.environ["PATH"] = _add[0] + os.pathsep + os.environ.get("PATH", "")
+_cache = _BASE / "models" / "hf" / "hub"
+if _cache.is_dir():
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_cache))
 
 import yaml
 
@@ -87,6 +106,8 @@ def main() -> None:
     ap.add_argument("--lang", default=None, help="原声语言，覆盖配置")
     ap.add_argument("--model", default=None)
     ap.add_argument("--no-translate", action="store_true", dest="no_translate")
+    ap.add_argument("--out-dir", default=None,
+                    help="srt 保存目录（默认与媒体同目录）")
     args = ap.parse_args()
 
     cfg = load_cfg(Path(args.cfg))
@@ -155,7 +176,11 @@ def main() -> None:
                 out_lines.append((s.start, s.end, s.text.strip(), zh))
 
     if cfg["output"]["srt"] and out_lines:
-        srt_path = media.with_suffix(".zh.srt")
+        if args.out_dir:
+            srt_path = Path(args.out_dir) / (media.stem + ".zh.srt")
+            srt_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            srt_path = media.with_suffix(".zh.srt")
         _write_srt(srt_path, out_lines)
         print(f"\n已导出：{srt_path}")
 

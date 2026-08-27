@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import array
 import json
+import os
 import queue
+import sys
 import threading
 import time
 import urllib.request
@@ -22,6 +24,23 @@ from pathlib import Path
 
 import numpy as np
 from faster_whisper import WhisperModel
+
+# 子进程（播放器 QProcess）以 GBK 控制台运行时，print 中文/✓✗ 会 UnicodeEncodeError
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# 自包含环境：venv 自带 nvidia CUDA 库 + 引擎目录模型缓存，无需调用方注入
+_BASE = Path(__file__).resolve().parent
+_NV = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
+if _NV.is_dir():
+    _add = [os.pathsep.join(str(_NV / d / "bin") for d in ("cublas", "cudnn", "cuda_nvrtc"))]
+    os.environ["PATH"] = _add[0] + os.pathsep + os.environ.get("PATH", "")
+_cache = _BASE / "models" / "hf" / "hub"
+if _cache.is_dir():
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_cache))
 
 WINDOW_SECS = 5.0      # 滑动窗长度（每窗转写一次）
 OVERLAP_SECS = 1.0     # 窗口重叠（保证语句不切断）
@@ -62,6 +81,7 @@ def transcribe_worker(model: WhisperModel, jobs: queue.Queue, out: queue.Queue,
     while True:
         item = jobs.get()
         if item is None:
+            out.put(None)  # EOF：通知主循环结束（wav 模拟模式）
             return
         t0, samples = item
         segments, info = model.transcribe(
@@ -130,6 +150,7 @@ def record_from_wav(path: str, jobs: queue.Queue) -> None:
     if buf:
         jobs.put((time.perf_counter() - t_start,
                   np.asarray(buf, dtype=np.float32) / 32768.0))
+    jobs.put(None)  # EOF：wav 模拟模式输入结束
 
 
 # ---------------------------------------------------------------------- main
@@ -145,6 +166,10 @@ def main() -> None:
     ap.add_argument("--ollama", default="http://127.0.0.1:11434")
     ap.add_argument("--ollama-model", default="qwen2.5:7b")
     ap.add_argument("--srt", default=None, help="同时写入 srt 文件")
+    ap.add_argument("--out-dir", default=None,
+                    help="srt 保存目录（默认与 --srt 路径相同）")
+    ap.add_argument("--json", action="store_true",
+                    help="每行输出 JSON（供播放器实时解析）：{\"t\":秒, \"text\":\"原语\", \"zh\":\"译文\"}")
     args = ap.parse_args()
 
     print(f"加载 whisper {args.model} ({args.device}) ...", flush=True)
@@ -175,21 +200,32 @@ def main() -> None:
     print("开始监听（Ctrl+C 停止）...\n", flush=True)
     try:
         while True:
-            t0, text, zh = out.get()
+            item = out.get()
+            if item is None:
+                break
+            t0, text, zh = item
             if not text:
                 continue
-            line = f"[{t0:6.1f}s] {text}"
-            if zh:
-                line += f"\n          ↳ {zh}"
-            print(line, flush=True)
+            if args.json:
+                print(json.dumps({"t": round(t0, 1), "text": text, "zh": zh},
+                                 ensure_ascii=False), flush=True)
+            else:
+                line = f"[{t0:6.1f}s] {text}"
+                if zh:
+                    line += f"\n          ↳ {zh}"
+                print(line, flush=True)
             if args.srt:
                 srt_rows.append((max(0.0, t0 - WINDOW_SECS), t0, text, zh))
     except KeyboardInterrupt:
         pass
     finally:
         if args.srt and srt_rows:
-            _write_srt(args.srt, srt_rows)
-            print(f"已写入 {args.srt}")
+            srt_path = Path(args.srt)
+            if args.out_dir:
+                srt_path = Path(args.out_dir) / srt_path.name
+                srt_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_srt(srt_path, srt_rows)
+            print(f"已写入 {srt_path}")
 
 
 def _write_srt(path: str, rows) -> None:
