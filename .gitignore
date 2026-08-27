@@ -49,3 +49,6 @@ env/
 Thumbs.db
 .DS_Store
 desktop.ini
+
+# 实时字幕原型（独立仓库）
+live-subtitle/

@@ -11,6 +11,8 @@ from PySide6.QtCore import (
     QDir,
     QModelIndex,
     QObject,
+    QProcess,
+    QProcessEnvironment,
     QRunnable,
     QThreadPool,
     QTimer,
@@ -205,6 +207,7 @@ class MainWindow(QMainWindow):
         self._scan_signals.batch.connect(self._on_scan_batch)
         self._pending_viewer_folder: Path | None = None
         self._quiet_scan = False  # startup playback: browser model updates are skipped
+        self._srt_proc: QProcess | None = None  # background SRT generation job
         self._archive_mode = False
         self._archive_back: Path | None = None
         self._archive_archive: Path | None = None
@@ -819,6 +822,75 @@ class MainWindow(QMainWindow):
         self._leave_archive_state()
         self.set_folder(back)
 
+    def _gen_srt_for(self, path: Path) -> None:
+        """后台生成 SRT 字幕（识别 + 翻译）：调 live-subtitle 管道，不打开播放器。
+
+        用 QProcess 子进程跑 live-subtitle 的 live_translate.py，完成后提示，
+        可一键打开字幕所在文件夹。
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        from .config import settings
+
+        if getattr(self, "_srt_proc", None) is not None and self._srt_proc.state() != QProcess.NotRunning:
+            QMessageBox.information(self, t("main_window.gen_srt"), t("main_window.gen_srt_busy"))
+            return
+
+        pipe = Path(str(settings["subtitle_pipeline_dir"]) or "").expanduser()
+        if not pipe.is_dir() or not (pipe / ".venv" / "Scripts" / "python.exe").is_file():
+            # fall back to the conventional location next to this project
+            pipe = Path(__file__).resolve().parent.parent / "live-subtitle"
+            if not (pipe / ".venv" / "Scripts" / "python.exe").is_file():
+                QMessageBox.warning(
+                    self, t("main_window.gen_srt"), t("main_window.gen_srt_no_pipeline")
+                )
+                return
+
+        self.status_count.setText(t("main_window.gen_srt_running"))
+
+        proc = QProcess(self)
+        self._srt_proc = proc
+        env = QProcessEnvironment.systemEnvironment()
+        # CUDA libs for ctranslate2 + HF model cache
+        nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
+        env.insert("PATH", f"{nv / 'cublas' / 'bin'};{nv / 'cudnn' / 'bin'};{nv / 'cuda_nvrtc' / 'bin'};" + env.value("PATH"))
+        env.insert("HUGGINGFACE_HUB_CACHE", str(pipe / "models" / "hf" / "hub"))
+        proc.setProcessEnvironment(env)
+
+        script = pipe / "live_translate.py"
+        exe = pipe / ".venv" / "Scripts" / "python.exe"
+        proc.finished.connect(lambda code, _s: self._on_srt_done(code, path, proc))
+        proc.start(str(exe), [str(script), str(path)])
+
+    def _on_srt_done(self, code: int, source: Path, proc: QProcess) -> None:
+        from PySide6.QtWidgets import QMessageBox
+
+        from .fileops import reveal
+
+        # live_translate.py writes <name>.zh.srt (replacing the original suffix)
+        srt = source.with_suffix(".zh.srt")
+        if code == 0 and srt.is_file():
+            box = QMessageBox(self)
+            box.setWindowTitle(t("main_window.gen_srt"))
+            box.setText(t("main_window.gen_srt_done").format(path=srt.name))
+            box.setIcon(QMessageBox.Information)
+            open_btn = box.addButton(t("main_window.gen_srt_open_folder"), QMessageBox.AcceptRole)
+            box.addButton(QMessageBox.Close)
+            box.exec()
+            if box.clickedButton() is open_btn:
+                reveal(srt)
+        else:
+            try:
+                err = bytes(proc.readAllStandardError()).decode("utf-8", "replace").strip()
+            except RuntimeError:
+                # window closed before the job finished; the QProcess is gone
+                err = ""
+            QMessageBox.warning(
+                self, t("main_window.gen_srt"),
+                t("main_window.gen_srt_fail").format(error=(err or f"exit {code}")[:300]),
+            )
+        self.status_count.setText("")
+
     def _go_up(self) -> None:
         if self.folder and self.folder.parent != self.folder:
             self._save_scroll_pos()
@@ -1043,6 +1115,11 @@ class MainWindow(QMainWindow):
                 lambda _=False, p=item.path: fileops.copy_to_clipboard(p.name)
             )
             menu.addSeparator()
+            if item.is_video:
+                menu.addAction(t("main_window.gen_srt")).triggered.connect(
+                    lambda _=False, p=item.path: self._gen_srt_for(p)
+                )
+                menu.addSeparator()
             if not item.is_video and not item.is_archive:
                 menu.addAction(t("menu.copy_image")).triggered.connect(
                     lambda _=False, p=item.path: fileops.copy_image_to_clipboard(p)
