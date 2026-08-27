@@ -303,6 +303,36 @@ class SettingsDialog(QDialog):
         resident_hint.setWordWrap(True)
         root.addWidget(resident_hint)
 
+        src_box = QWidget()
+        sl = QHBoxLayout(src_box)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(6)
+        sl.addWidget(QLabel(t("settings.live_source_label")))
+        self.cb_live_source = QComboBox()
+        self.cb_live_source.addItem(t("settings.live_source_audio"), "audio")
+        self.cb_live_source.addItem(t("settings.live_source_loopback"), "loopback")
+        idx = self.cb_live_source.findData(settings["live_caption_source"])
+        self.cb_live_source.setCurrentIndex(max(0, idx))
+        self.cb_live_source.currentIndexChanged.connect(
+            lambda _i: self._set("live_caption_source", self.cb_live_source.currentData()))
+        sl.addWidget(self.cb_live_source)
+        sl.addSpacing(12)
+        sl.addWidget(QLabel(t("settings.live_lang_label")))
+        self.cb_live_lang = QComboBox()
+        for lang in ("en", "ja", "ko", "fr", "de", "es", "auto"):
+            self.cb_live_lang.addItem(lang, lang)
+        idx = self.cb_live_lang.findData(settings["live_caption_lang"])
+        self.cb_live_lang.setCurrentIndex(max(0, idx))
+        self.cb_live_lang.currentIndexChanged.connect(
+            lambda _i: self._set("live_caption_lang", self.cb_live_lang.currentData()))
+        sl.addWidget(self.cb_live_lang)
+        sl.addStretch(1)
+        root.addWidget(src_box)
+        source_hint = QLabel(t("settings.live_source_hint"))
+        source_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        source_hint.setWordWrap(True)
+        root.addWidget(source_hint)
+
         # ---- 一键安装子区
         inst_box = QWidget()
         il = QVBoxLayout(inst_box)

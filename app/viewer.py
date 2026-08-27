@@ -1069,12 +1069,28 @@ class Viewer(QWidget):
 
         # 2) 启动解耦子进程（先清残留旧实例：含锁丢失的僵尸进程，保证单进程）
         self._kill_all_live_procs()
+        from .config import settings as _c
+
+        source = str(_c["live_caption_source"])
+        self._live_source = source
         exe = pipe / ".venv" / "Scripts" / "pythonw.exe"
-        script = pipe / "live_capture.py"
         log_path = str(self._live_log)
         log_path = str(_Path(log_path))
-        args = [str(script), "--json", "--translate", "--log", log_path,
-                "--ollama-model", str(_settings["live_ollama_model"])]
+        lang = str(_c["live_caption_lang"])
+        common = ["--log", log_path, "--lang", lang,
+                  "--ollama-model", str(_c["live_ollama_model"])]
+        if source == "audio":
+            # 音轨模式：直接读当前播放的视频音轨（无录音设备、不受系统声音干扰）
+            if not self.items or not (0 <= self.index < len(self.items)):
+                self._show_toast(t("viewer.live_caption_no_media"))
+                return
+            media = self.items[self.index].path
+            script = pipe / "live_transcribe.py"
+            args = [str(script), str(media)] + common + (["--translate"] if _c["live_ollama_model"] else [])
+        else:
+            # 系统声音（环路录音）模式
+            script = pipe / "live_capture.py"
+            args = [str(script), "--json"] + common + (["--translate"] if _c["live_ollama_model"] else [])
         env = {k: v for k, v in os.environ.items()}
         nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
         for d in ("cublas", "cudnn", "cuda_nvrtc"):
@@ -1140,7 +1156,7 @@ class Viewer(QWidget):
                 return False
         except Exception:
             return False
-        # 健康检查：log 在 60s 内有产出 = 正常工作；log 尚无但进程启动 <30s = 加载中
+        # 健康检查：log 在 60s 内有产出 = 正常工作；log 尚无但进程启动 <90s = 加载中
         log = self._live_log_path()
         if log is not None and log.is_file() and log.stat().st_mtime > _time.time() - 60:
             return True
@@ -1152,11 +1168,11 @@ class Viewer(QWidget):
                          creationflags=_sp.CREATE_NO_WINDOW).stdout
             born = fi.split("=")[-1].strip()
             ts = _time.mktime(_time.strptime(born[:14], "%Y%m%d%H%M%S"))
-            if _time.time() - ts < 30:
-                return True  # 刚启动仍在加载模型
+            if _time.time() - ts < 90:
+                return True  # 刚启动仍在加载模型（GPU 竞争时 medium 可到 40s+）
         except Exception:
             return True  # 拿不到时间就视为健康，避免误杀
-        print(f"[viewer] pid={pid} 字幕进程长期无产出，判定卡死")
+        print(f"[viewer] pid={pid} 字幕进程 90s 无产出，判定卡死")
         return False
 
     def _kill_live_proc(self) -> None:
@@ -1256,13 +1272,29 @@ class Viewer(QWidget):
                 zh = obj.get("zh", "").strip()
                 if not seg or self._live_paused or not self._live_on:
                     continue
-                self._live_rows.append((max(0.0, t0 - 5.0), t0, seg, zh))
-                self._live_label.setText((seg + "\n" + zh).strip())
-                self._live_label.show()
-                self._live_label.raise_()
+                self._live_rows.append((t0, t0, seg, zh))
             else:
                 if any(k in line for k in ("Traceback", "Error", "✗", "RuntimeError")):
                     self._show_toast(t("viewer.live_caption_error").format(err=line[:120]))
+        # 显示：音轨模式按播放位置选行；环路模式显示最新行
+        if self._live_on and not self._live_paused and self._live_rows:
+            if getattr(self, "_live_source", "audio") == "audio":
+                try:
+                    pos = float(self.video_view.position or 0.0)
+                except Exception:
+                    pos = 0.0
+                rows = sorted(self._live_rows, key=lambda r: r[0])
+                cur = [r for r in rows if r[0] <= pos]
+                if cur:
+                    _t0, _t1, seg, zh = cur[-1]
+                    self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
+                    self._live_label.show()
+                    self._live_label.raise_()
+            else:
+                _t0, _t1, seg, zh = self._live_rows[-1]
+                self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
+                self._live_label.show()
+                self._live_label.raise_()
         # 进程死掉（非用户主动停止）
         if self._live_on and not self._is_live_alive():
             self._live_on = False
@@ -1290,6 +1322,12 @@ class Viewer(QWidget):
 
         if not self._live_rows:
             return
+        # 音轨模式：end 占位（end<=start）用下一句开始时间补全
+        rows = sorted(self._live_rows, key=lambda r: r[0])
+        fixed = []
+        for i, (st, en, seg, zh) in enumerate(rows):
+            end = en if en > st else (rows[i + 1][0] if i + 1 < len(rows) else st + 8.0)
+            fixed.append((st, end, seg, zh))
         if _settings["subtitle_save_dir"] == "player":
             out_dir = APP_DIR
         else:
@@ -1297,7 +1335,7 @@ class Viewer(QWidget):
         out_dir.mkdir(parents=True, exist_ok=True)
         name = self.items[self.index].path.stem if self.items else "live"
         srt = out_dir / f"{name}.live.srt"
-        _write_srt_file(srt, self._live_rows)
+        _write_srt_file(srt, fixed)
         self._show_toast(t("viewer.live_caption_saved").format(path=srt.name))
 
     def _copy_current_image(self, item: MediaItem) -> None:
