@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QPoint, QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QProcess, QProcessEnvironment, QTimer, Qt, Signal
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QLabel, QMenu, QStackedLayout, QWidget
 
@@ -96,6 +96,16 @@ class Viewer(QWidget):
         self.video_view.setMouseTracking(True)
         self.stack.addWidget(self.image_view)
         self.stack.addWidget(self.video_view)
+
+        # 实时听译字幕 overlay（环路录音 → whisper → Ollama 翻译）
+        self._live_proc: QProcess | None = None
+        self._live_on = False
+        self._live_rows: list[tuple[float, float, str, str]] = []
+        self._live_label = QLabel("", self.stage)
+        self._live_label.setObjectName("LiveCaption")
+        self._live_label.setAlignment(Qt.AlignCenter)
+        self._live_label.setWordWrap(True)
+        self._live_label.hide()
 
         self.error_label = QLabel("", self)
         self.error_label.setObjectName("OverlayError")
@@ -855,6 +865,13 @@ class Viewer(QWidget):
         ch = self.controls.sizeHint().height()
         self.controls.setGeometry(0, self.height() - ch, video_w, ch)
         self.error_label.setGeometry(0, 0, video_w, self.height())
+        if self._live_label.isVisible():
+            h = max(60, int(self.height() * 0.16))
+            self._live_label.setGeometry(
+                int(video_w * 0.08), max(0, self.height() - h - ch - 40),
+                int(video_w * 0.84), h,
+            )
+            self._live_label.raise_()
         self._layout_stage_buttons(video_w, ch)
         self.top_bar.raise_()
         self.controls.raise_()
@@ -974,6 +991,11 @@ class Viewer(QWidget):
             sub.addSeparator()
             a = sub.addAction(t("viewer.sub_load_file"))
             a.triggered.connect(lambda _=False: self._pick_subtitle_file())
+            sub.addSeparator()
+            a = sub.addAction(
+                t("viewer.live_caption_off") if self._live_on else t("viewer.live_caption_on")
+            )
+            a.triggered.connect(lambda _=False: self._toggle_live_caption())
             menu.addSeparator()
 
         if not item.is_video:
@@ -998,6 +1020,115 @@ class Viewer(QWidget):
         if path:
             self.video_view.add_subtitle_file(path)
             self._show_toast(t("viewer.sub_loaded"))
+
+    def _toggle_live_caption(self) -> None:
+        if self._live_on:
+            self._stop_live_caption()
+        else:
+            self._start_live_caption()
+
+    def _find_pipeline(self):
+        from .config import find_subtitle_pipeline_dir
+
+        return find_subtitle_pipeline_dir()
+
+    def _start_live_caption(self) -> None:
+        """启动环路录音实时听译：QProcess 跑 live_capture.py --json --translate。
+
+        音频来源为系统输出（loopback），所以播放任意视频时都能实时出字幕；
+        识别/翻译结果显示在画面底部 overlay，停止时保存 srt 到配置位置。
+        """
+        import json as _json
+
+        from .config import settings as _settings
+
+        pipe = self._find_pipeline()
+        if pipe is None:
+            self._show_toast(t("viewer.live_caption_no_engine"))
+            return
+
+        self._live_rows = []
+        self._live_label.setText(t("viewer.live_caption_starting"))
+        self._live_label.show()
+        self._live_label.raise_()
+        self._relayout()
+
+        proc = QProcess(self)
+        self._live_proc = proc
+
+        env = QProcessEnvironment.systemEnvironment()
+        nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
+        env.insert("PATH", f"{nv / 'cublas' / 'bin'};{nv / 'cudnn' / 'bin'};{nv / 'cuda_nvrtc' / 'bin'};" + env.value("PATH"))
+        env.insert("HUGGINGFACE_HUB_CACHE", str(pipe / "models" / "hf" / "hub"))
+        proc.setProcessEnvironment(env)
+
+        script = pipe / "live_capture.py"
+        exe = pipe / ".venv" / "Scripts" / "python.exe"
+        args = [str(script), "--json", "--translate",
+                "--ollama-model", str(_settings["live_ollama_model"])]
+        proc.readyReadStandardOutput.connect(self._on_live_stdout)
+        proc.readyReadStandardError.connect(self._on_live_stdout)
+        proc.finished.connect(self._on_live_finished)
+        proc.start(str(exe), args)
+        self._live_on = True
+        self._show_toast(t("viewer.live_caption_running"))
+
+    def _on_live_stdout(self) -> None:
+        import json as _json
+
+        proc = self._live_proc
+        if proc is None or not self._live_on:
+            return
+        data = bytes(proc.readAllStandardOutput())
+        if not data:
+            return
+        for line in data.decode("utf-8", "replace").splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = _json.loads(line)
+            except Exception:
+                continue
+            t0 = float(obj.get("t", 0))
+            text = obj.get("text", "").strip()
+            zh = obj.get("zh", "").strip()
+            if not text:
+                continue
+            self._live_rows.append((max(0.0, t0 - 5.0), t0, text, zh))
+            self._live_label.setText((text + "\n" + zh).strip())
+            self._live_label.show()
+            self._live_label.raise_()
+
+    def _stop_live_caption(self) -> None:
+        if self._live_proc is not None and self._live_proc.state() != QProcess.NotRunning:
+            self._live_proc.terminate()
+            if not self._live_proc.waitForFinished(3000):
+                self._live_proc.kill()
+        self._live_on = False
+        self._live_label.hide()
+        self._save_live_srt()
+        self._show_toast(t("viewer.live_caption_stopped"))
+
+    def _on_live_finished(self) -> None:
+        self._live_on = False
+        self._live_label.hide()
+        self._save_live_srt()
+
+    def _save_live_srt(self) -> None:
+        from .config import settings as _settings
+
+        if not self._live_rows:
+            return
+        if _settings["subtitle_save_dir"] == "player":
+            out_dir = APP_DIR
+        else:
+            out_dir = self.items[self.index].path.parent if self.items else APP_DIR
+        out_dir.mkdir(parents=True, exist_ok=True)
+        name = self.items[self.index].path.stem if self.items else "live"
+        srt = out_dir / f"{name}.live.srt"
+        _write_srt_file(srt, self._live_rows)
+        self._show_toast(t("viewer.live_caption_saved").format(path=srt.name))
 
     def _copy_current_image(self, item: MediaItem) -> None:
         ok = fileops.copy_image_to_clipboard(item.path)
@@ -1186,6 +1317,8 @@ class Viewer(QWidget):
         super().changeEvent(e)
 
     def closeEvent(self, e):
+        if self._live_on:
+            self._stop_live_caption()
         self._remember_position()
         from .config import flush
 
@@ -1201,9 +1334,29 @@ class Viewer(QWidget):
         if self._shutdown:
             return
         self._shutdown = True
+        if self._live_on:
+            self._stop_live_caption()
         self._gif_timer.stop()
         self._gif_recording = False
         self._remember_position()
         self.previewer.stop()
         self.video_view.shutdown()
         self.close()
+
+
+def _write_srt_file(path: Path, rows) -> None:
+    """rows: [(start_s, end_s, orig, zh)] → 双语 SRT。"""
+
+    def ts(x: float) -> str:
+        h, r = divmod(int(x * 1000), 3600000)
+        m, r = divmod(r, 60000)
+        s, ms = divmod(r, 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+    parts = []
+    for i, (st, en, orig, zh) in enumerate(rows, 1):
+        parts.append(f"{i}\n{ts(st)} --> {ts(en)}\n{orig}")
+        if zh:
+            parts.append(zh)
+        parts.append("")
+    path.write_text("\n".join(parts), encoding="utf-8")

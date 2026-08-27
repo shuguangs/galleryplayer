@@ -825,12 +825,12 @@ class MainWindow(QMainWindow):
     def _gen_srt_for(self, path: Path) -> None:
         """后台生成 SRT 字幕（识别 + 翻译）：调 live-subtitle 管道，不打开播放器。
 
-        用 QProcess 子进程跑 live-subtitle 的 live_translate.py，完成后提示，
-        可一键打开字幕所在文件夹。
+        弹出进度窗口实时显示识别/翻译日志；完成后可一键打开字幕文件夹。
         """
-        from PySide6.QtWidgets import QMessageBox
+        from PySide6.QtWidgets import QDialog, QMessageBox, QPlainTextEdit, QVBoxLayout
 
-        from .config import find_subtitle_pipeline_dir
+        from .config import find_subtitle_pipeline_dir, settings
+        from .runtime import APP_DIR
 
         if getattr(self, "_srt_proc", None) is not None and self._srt_proc.state() != QProcess.NotRunning:
             QMessageBox.information(self, t("main_window.gen_srt"), t("main_window.gen_srt_busy"))
@@ -843,12 +843,36 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self.status_count.setText(t("main_window.gen_srt_running"))
+        # 保存位置：视频所在文件夹 / 播放器所在文件夹
+        if settings["subtitle_save_dir"] == "player":
+            out_dir = str(APP_DIR)
+        else:
+            out_dir = str(path.parent)
+
+        # ---- 进度窗口 ----
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("main_window.gen_srt"))
+        dlg.resize(560, 360)
+        lay = QVBoxLayout(dlg)
+        self._srt_log = QPlainTextEdit(dlg)
+        self._srt_log.setReadOnly(True)
+        from . import theme
+
+        self._srt_log.setStyleSheet(
+            f"QPlainTextEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
+            f" border:1px solid {theme.BORDER}; border-radius:4px;"
+            f" font-family:Consolas; font-size:11px; }}"
+        )
+        lay.addWidget(self._srt_log)
+        self._srt_status = QLabel(t("main_window.gen_srt_running"), dlg)
+        lay.addWidget(self._srt_status)
+        dlg.setModal(False)
+        dlg.show()
+        self._srt_dialog = dlg
 
         proc = QProcess(self)
         self._srt_proc = proc
         env = QProcessEnvironment.systemEnvironment()
-        # CUDA libs for ctranslate2 + HF model cache
         nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
         env.insert("PATH", f"{nv / 'cublas' / 'bin'};{nv / 'cudnn' / 'bin'};{nv / 'cuda_nvrtc' / 'bin'};" + env.value("PATH"))
         env.insert("HUGGINGFACE_HUB_CACHE", str(pipe / "models" / "hf" / "hub"))
@@ -856,37 +880,54 @@ class MainWindow(QMainWindow):
 
         script = pipe / "live_translate.py"
         exe = pipe / ".venv" / "Scripts" / "python.exe"
-        proc.finished.connect(lambda code, _s: self._on_srt_done(code, path, proc))
-        proc.start(str(exe), [str(script), str(path)])
+        proc.readyReadStandardOutput.connect(self._on_srt_stdout)
+        proc.readyReadStandardError.connect(self._on_srt_stdout)
+        proc.finished.connect(lambda code, _s: self._on_srt_done(code, path, proc, out_dir))
+        proc.start(str(exe), [str(script), str(path), "--out-dir", out_dir])
 
-    def _on_srt_done(self, code: int, source: Path, proc: QProcess) -> None:
-        from PySide6.QtWidgets import QMessageBox
+    def _on_srt_stdout(self) -> None:
+        proc = self._srt_proc
+        if proc is None or not hasattr(self, "_srt_log"):
+            return
+        data = bytes(proc.readAllStandardOutput()) + bytes(proc.readAllStandardError())
+        if data:
+            self._srt_log.appendPlainText(data.decode("utf-8", "replace").strip())
+
+    def _on_srt_done(self, code: int, source: Path, proc: QProcess, out_dir: str) -> None:
+        from PySide6.QtWidgets import QDialogButtonBox, QPushButton
 
         from .fileops import reveal
 
-        # live_translate.py writes <name>.zh.srt (replacing the original suffix)
-        srt = source.with_suffix(".zh.srt")
-        if code == 0 and srt.is_file():
-            box = QMessageBox(self)
-            box.setWindowTitle(t("main_window.gen_srt"))
-            box.setText(t("main_window.gen_srt_done").format(path=srt.name))
-            box.setIcon(QMessageBox.Information)
-            open_btn = box.addButton(t("main_window.gen_srt_open_folder"), QMessageBox.AcceptRole)
-            box.addButton(QMessageBox.Close)
-            box.exec()
-            if box.clickedButton() is open_btn:
-                reveal(srt)
+        if settings["subtitle_save_dir"] == "player":
+            srt = Path(out_dir) / (source.stem + ".zh.srt")
         else:
-            try:
-                err = bytes(proc.readAllStandardError()).decode("utf-8", "replace").strip()
-            except RuntimeError:
-                # window closed before the job finished; the QProcess is gone
-                err = ""
-            QMessageBox.warning(
-                self, t("main_window.gen_srt"),
-                t("main_window.gen_srt_fail").format(error=(err or f"exit {code}")[:300]),
-            )
-        self.status_count.setText("")
+            srt = source.with_suffix(".zh.srt")
+        dlg = getattr(self, "_srt_dialog", None)
+        if dlg is not None:
+            if code == 0 and srt.is_file():
+                self._srt_status.setText(t("main_window.gen_srt_done").format(path=srt.name))
+                self._srt_status.setStyleSheet("color:#5dc0f0;")
+                bb = QDialogButtonBox(dlg)
+                open_btn = bb.addButton(t("main_window.gen_srt_open_folder"), QDialogButtonBox.ActionRole)
+                close_btn = bb.addButton(QDialogButtonBox.Close)
+                open_btn.clicked.connect(lambda: reveal(srt))
+                close_btn.clicked.connect(dlg.accept)
+                lay = dlg.layout()
+                lay.addWidget(bb)
+            else:
+                try:
+                    err = bytes(proc.readAllStandardError()).decode("utf-8", "replace").strip()
+                except RuntimeError:
+                    err = ""
+                self._srt_status.setText(
+                    t("main_window.gen_srt_fail").format(error=(err or f"exit {code}")[:300])
+                )
+                self._srt_status.setStyleSheet("color:#e0653f;")
+                bb = QDialogButtonBox(dlg)
+                bb.addButton(QDialogButtonBox.Close).clicked.connect(dlg.accept)
+                lay = dlg.layout()
+                lay.addWidget(bb)
+            dlg.adjustSize()
 
     def _go_up(self) -> None:
         if self.folder and self.folder.parent != self.folder:

@@ -274,6 +274,26 @@ class SettingsDialog(QDialog):
         root.addWidget(self.sub_status)
         self._refresh_subtitle_status()
 
+        save_box = QWidget()
+        sb = QHBoxLayout(save_box)
+        sb.setContentsMargins(0, 4, 0, 0)
+        sb.setSpacing(6)
+        sb.addWidget(QLabel(t("settings.subtitle_save_label")))
+        self.cb_subtitle_save = QComboBox()
+        self.cb_subtitle_save.addItem(t("settings.subtitle_save_media"), "media")
+        self.cb_subtitle_save.addItem(t("settings.subtitle_save_player"), "player")
+        idx = self.cb_subtitle_save.findData(settings["subtitle_save_dir"])
+        self.cb_subtitle_save.setCurrentIndex(max(0, idx))
+        self.cb_subtitle_save.currentIndexChanged.connect(
+            lambda _i: self._set("subtitle_save_dir", self.cb_subtitle_save.currentData()))
+        sb.addWidget(self.cb_subtitle_save)
+        sb.addStretch(1)
+        root.addWidget(save_box)
+        save_hint = QLabel(t("settings.subtitle_save_hint"))
+        save_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        save_hint.setWordWrap(True)
+        root.addWidget(save_hint)
+
         # ---- 一键安装子区
         inst_box = QWidget()
         il = QVBoxLayout(inst_box)

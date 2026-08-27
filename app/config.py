@@ -48,6 +48,8 @@ DEFAULTS: dict[str, Any] = {
     "tree_sort_desc": False,
     "archive_cache": "",               # 压缩包解压缓存目录（空=系统临时目录）
     "subtitle_pipeline_dir": "",       # live-subtitle 字幕引擎目录（空=自动探测 G:\播放器\live-subtitle）
+    "subtitle_save_dir": "media",      # 字幕保存位置: media=视频所在文件夹 / player=播放器所在文件夹
+    "live_ollama_model": "qwen2.5:7b",  # 实时字幕翻译模型（Ollama）
     "archive_no_thumbs": False,        # 压缩包浏览时不加载缩略图（加快浏览）
     "filter_show_image": True,         # 筛选复选框：显示图片
     "filter_show_video": True,         # 筛选复选框：显示视频
