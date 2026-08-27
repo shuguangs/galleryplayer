@@ -12,4 +12,4 @@ samples/
 *.wav
 *.mp3
 __pycache__/
-*.pyc
+*.pyclive-caption.log*
