@@ -16,7 +16,7 @@ from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QLabel, QMenu, QStackedLayout, QWidget
 
 from . import fileops, icons, theme
-from .config import resume, settings
+from .config import DEFAULTS, resume, settings
 from .controls import SPEEDS, ControlBar, StageButton, TopBar
 from .i18n import t
 from .image_view import ImageView
@@ -1060,7 +1060,13 @@ class Viewer(QWidget):
             "height": (8, 40),
         }
         lo, hi = ranges[key]
-        return max(lo, min(hi, int(settings[f"live_caption_{key}"])))
+        setting = "live_caption_font_size" if key == "font" else f"live_caption_{key}"
+        raw = settings.get(setting)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = int(DEFAULTS[setting])
+        return max(lo, min(hi, value))
 
     def _apply_live_caption_style(self, relayout: bool = True) -> None:
         """Apply the user-editable live-caption font and readable backdrop."""
@@ -1079,7 +1085,7 @@ class Viewer(QWidget):
             self._relayout()
 
     def _step_live_caption_display(self, key: str, delta: int) -> None:
-        setting = f"live_caption_{key}"
+        setting = "live_caption_font_size" if key == "font" else f"live_caption_{key}"
         value = max(12 if key == "font" else 8 if key == "height" else 40,
                     min(96 if key == "font" else 40 if key == "height" else 100,
                         self._live_caption_display_value(key) + delta))
