@@ -294,6 +294,15 @@ class SettingsDialog(QDialog):
         save_hint.setWordWrap(True)
         root.addWidget(save_hint)
 
+        self.cb_live_resident = QCheckBox(t("settings.live_resident_label"))
+        self.cb_live_resident.setChecked(bool(settings["live_caption_resident"]))
+        self.cb_live_resident.toggled.connect(lambda v: self._set("live_caption_resident", v))
+        root.addWidget(self.cb_live_resident)
+        resident_hint = QLabel(t("settings.live_resident_hint"))
+        resident_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        resident_hint.setWordWrap(True)
+        root.addWidget(resident_hint)
+
         # ---- 一键安装子区
         inst_box = QWidget()
         il = QVBoxLayout(inst_box)

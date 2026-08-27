@@ -100,6 +100,7 @@ class Viewer(QWidget):
         # 实时听译字幕 overlay（环路录音 → whisper → Ollama 翻译）
         self._live_proc: QProcess | None = None
         self._live_on = False
+        self._live_paused = False
         self._live_rows: list[tuple[float, float, str, str]] = []
         self._live_label = QLabel("", self.stage)
         self._live_label.setObjectName("LiveCaption")
@@ -1022,7 +1023,7 @@ class Viewer(QWidget):
             self._show_toast(t("viewer.sub_loaded"))
 
     def _toggle_live_caption(self) -> None:
-        if self._live_on:
+        if self._live_on or self._live_paused:
             self._stop_live_caption()
         else:
             self._start_live_caption()
@@ -1035,12 +1036,23 @@ class Viewer(QWidget):
     def _start_live_caption(self) -> None:
         """启动环路录音实时听译：QProcess 跑 live_capture.py --json --translate。
 
-        音频来源为系统输出（loopback），所以播放任意视频时都能实时出字幕；
-        识别/翻译结果显示在画面底部 overlay，停止时保存 srt 到配置位置。
+        常驻模式（默认）：停止只暂停显示，进程保活（模型常驻，重开秒出）；
+        关闭窗口时弹窗确认是否关闭模型。
         """
-        import json as _json
-
         from .config import settings as _settings
+
+        # 常驻模式下进程还活着 → 直接恢复显示，秒出
+        if self._live_paused and self._live_proc is not None \
+                and self._live_proc.state() != QProcess.NotRunning:
+            self._live_paused = False
+            self._live_on = True
+            self._live_rows = []
+            self._live_label.setText(t("viewer.live_caption_running"))
+            self._live_label.show()
+            self._live_label.raise_()
+            self._relayout()
+            self._show_toast(t("viewer.live_caption_running"))
+            return
 
         pipe = self._find_pipeline()
         if pipe is None:
@@ -1077,42 +1089,65 @@ class Viewer(QWidget):
         import json as _json
 
         proc = self._live_proc
-        if proc is None or not self._live_on:
+        if proc is None:
             return
-        data = bytes(proc.readAllStandardOutput())
+        data = bytes(proc.readAllStandardOutput()) + bytes(proc.readAllStandardError())
         if not data:
             return
-        for line in data.decode("utf-8", "replace").splitlines():
+        text = data.decode("utf-8", "replace")
+        for line in text.splitlines():
             line = line.strip()
             if not line.startswith("{"):
+                # 非 JSON（加载/状态日志）——错误时提示用户
+                if "Traceback" in line or "Error" in line or "✗" in line or "RuntimeError" in line:
+                    self._show_toast(t("viewer.live_caption_error").format(err=line[:120]))
                 continue
             try:
                 obj = _json.loads(line)
             except Exception:
                 continue
             t0 = float(obj.get("t", 0))
-            text = obj.get("text", "").strip()
+            seg = obj.get("text", "").strip()
             zh = obj.get("zh", "").strip()
-            if not text:
+            if not seg:
                 continue
-            self._live_rows.append((max(0.0, t0 - 5.0), t0, text, zh))
-            self._live_label.setText((text + "\n" + zh).strip())
+            if self._live_paused or not self._live_on:
+                continue
+            self._live_rows.append((max(0.0, t0 - 5.0), t0, seg, zh))
+            self._live_label.setText((seg + "\n" + zh).strip())
             self._live_label.show()
             self._live_label.raise_()
 
     def _stop_live_caption(self) -> None:
+        """停止显示并保存会话。常驻模式进程保活（模型保留，重开秒出）。"""
+        from .config import settings as _settings
+
+        resident = bool(_settings["live_caption_resident"])
         if self._live_proc is not None and self._live_proc.state() != QProcess.NotRunning:
-            self._live_proc.terminate()
-            if not self._live_proc.waitForFinished(3000):
-                self._live_proc.kill()
+            if resident:
+                # 常驻：进程保活，仅暂停显示/收集
+                self._live_paused = True
+                self._live_on = False
+                self._live_label.hide()
+                self._save_live_srt()
+                self._show_toast(t("viewer.live_caption_resident"))
+            else:
+                self._live_proc.terminate()
+                if not self._live_proc.waitForFinished(3000):
+                    self._live_proc.kill()
+                self._save_live_srt()
+                self._show_toast(t("viewer.live_caption_stopped"))
         self._live_on = False
         self._live_label.hide()
-        self._save_live_srt()
-        self._show_toast(t("viewer.live_caption_stopped"))
 
     def _on_live_finished(self) -> None:
+        # 进程非预期退出（用户停止时会先置 _live_paused/_live_on=False）
+        was_active = self._live_on
         self._live_on = False
+        self._live_paused = False
         self._live_label.hide()
+        if was_active:
+            self._show_toast(t("viewer.live_caption_exited"))
         self._save_live_srt()
 
     def _save_live_srt(self) -> None:
@@ -1317,8 +1352,26 @@ class Viewer(QWidget):
         super().changeEvent(e)
 
     def closeEvent(self, e):
-        if self._live_on:
-            self._stop_live_caption()
+        if self._live_proc is not None and self._live_proc.state() != QProcess.NotRunning:
+            from PySide6.QtWidgets import QMessageBox
+
+            from .config import settings as _settings
+
+            if bool(_settings["live_caption_resident"]):
+                box = QMessageBox(self)
+                box.setWindowTitle(t("viewer.live_caption_quit_title"))
+                box.setText(t("viewer.live_caption_quit_text"))
+                box.setIcon(QMessageBox.Question)
+                close_btn = box.addButton(t("viewer.live_caption_quit_close"), QMessageBox.DestructiveRole)
+                box.addButton(QMessageBox.Cancel)
+                box.setDefaultButton(box.buttons()[0])
+                box.exec()
+                if box.clickedButton() is close_btn:
+                    self._live_proc.kill()
+            else:
+                self._live_proc.kill()
+        self._live_on = False
+        self._live_label.hide()
         self._remember_position()
         from .config import flush
 

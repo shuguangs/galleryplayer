@@ -50,6 +50,7 @@ DEFAULTS: dict[str, Any] = {
     "subtitle_pipeline_dir": "",       # live-subtitle 字幕引擎目录（空=自动探测 G:\播放器\live-subtitle）
     "subtitle_save_dir": "media",      # 字幕保存位置: media=视频所在文件夹 / player=播放器所在文件夹
     "live_ollama_model": "qwen2.5:7b",  # 实时字幕翻译模型（Ollama）
+    "live_caption_resident": True,     # 实时字幕常驻：停止时保留模型进程（重开秒出）
     "archive_no_thumbs": False,        # 压缩包浏览时不加载缩略图（加快浏览）
     "filter_show_image": True,         # 筛选复选框：显示图片
     "filter_show_video": True,         # 筛选复选框：显示视频
