@@ -92,22 +92,47 @@ def transcribe_worker(model: WhisperModel, jobs: queue.Queue, out: queue.Queue,
         if text and translator is not None:
             try:
                 zh = translator(text)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 zh = ""
+                print(f"✗ 翻译失败（Ollama）: {exc}", flush=True)
         out.put((t0, text, zh))
 
 
 def record_loopback(loopback_keyword: str, jobs: queue.Queue) -> None:
-    """系统输出环路录音采集：累积缓冲，按窗口产出（带重叠）。"""
+    """系统输出环路录音采集：优先当前默认输出设备的环路口（匹配真实声音来源）。"""
     import soundcard as sc
 
+    default = None
+    try:
+        default = sc.default_speaker()
+    except Exception:
+        pass
+    if default is not None:
+        print(f"默认输出设备: {default.name}", flush=True)
+
+    mics = list(sc.all_microphones(include_loopback=True))
     mic = None
-    for m in sc.all_microphones(include_loopback=True):
-        if loopback_keyword.lower() in m.name.lower():
-            mic = m
-            break
+    # 1) 用户显式关键词（--loopback）
+    if loopback_keyword:
+        for m in mics:
+            if loopback_keyword.lower() in m.name.lower():
+                mic = m
+                break
+    # 2) 默认输出设备前缀（soundcard 环路 mic 与 speaker 同名/同前缀）
+    if mic is None and default is not None:
+        base = default.name.split(" (")[0]
+        for m in mics:
+            if m.name == default.name or m.name.startswith(base):
+                mic = m
+                break
+    # 3) 兜底：按默认设备 id 取环路
+    if mic is None and default is not None:
+        try:
+            mic = sc.get_microphone(id=str(default.name), include_loopback=True)
+        except Exception:
+            mic = None
     if mic is None:
-        mic = sc.get_microphone(id=str(sc.default_speaker().name), include_loopback=True)
+        raise RuntimeError("未找到可用的环路录音设备——请检查系统声音输出设备")
     print(f"录音设备（环路）: {mic.name}", flush=True)
 
     window = int(WINDOW_SECS * SR)
@@ -181,6 +206,11 @@ def main() -> None:
     translator = Translator(args.ollama, args.ollama_model) if args.translate else None
     if translator:
         print(f"翻译启用: {args.ollama_model} → zh", flush=True)
+        try:
+            urllib.request.urlopen(f"{args.ollama}/api/tags", timeout=5)
+        except Exception:
+            print("✗ Ollama 服务不可用（11434 未启动）——仅出原文字幕，翻译失败会提示",
+                  flush=True)
 
     jobs: queue.Queue = queue.Queue()
     out: queue.Queue = queue.Queue()
