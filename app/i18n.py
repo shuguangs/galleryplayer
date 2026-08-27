@@ -517,6 +517,7 @@ _TR: dict[str, dict[str, str]] = {
     "viewer.live_caption_saved": {"zh": "实时字幕已保存：{path}", "en": "Live caption saved: {path}"},
     "viewer.live_caption_no_engine": {"zh": "未找到字幕引擎（live-subtitle），请在设置中安装", "en": "Subtitle engine not found (live-subtitle); install it in Settings"},
     "viewer.live_caption_resident": {"zh": "实时字幕已暂停（模型保留，随时可恢复）", "en": "Live caption paused (model kept, ready to resume)"},
+    "viewer.live_caption_resumed": {"zh": "已连接常驻识别模型，实时字幕恢复", "en": "Reconnected to resident model, captions resumed"},
     "viewer.live_caption_error": {"zh": "实时字幕异常：{err}", "en": "Live caption error: {err}"},
     "viewer.live_caption_exited": {"zh": "实时字幕进程意外退出", "en": "Live caption process exited unexpectedly"},
     "viewer.live_caption_quit_title": {"zh": "实时字幕模型仍在运行", "en": "Live caption model is still running"},

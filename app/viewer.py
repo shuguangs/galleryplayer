@@ -5,6 +5,7 @@ volume on a video. Bars fade out while the mouse is still.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QProcess, QProcessEnvironment, QTimer, Qt, Signal
@@ -1034,16 +1035,27 @@ class Viewer(QWidget):
         return find_subtitle_pipeline_dir()
 
     def _start_live_caption(self) -> None:
-        """启动环路录音实时听译：QProcess 跑 live_capture.py --json --translate。
+        """启动环路录音实时听译（解耦进程 + log 文件监视）。
 
-        常驻模式（默认）：停止只暂停显示，进程保活（模型常驻，重开秒出）；
-        关闭窗口时弹窗确认是否关闭模型。
+        - 进程用 subprocess 分离启动（不随本界面销毁），JSON 行写 log 文件
+        - 已有活跃进程（上次开着/关界面未杀）→ 直接复用，秒出
+        - 常驻模式：停止只暂停显示；关闭播放界面默认不杀模型
         """
+        import subprocess
+        from pathlib import Path as _Path
+
         from .config import settings as _settings
 
-        # 常驻模式下进程还活着 → 直接恢复显示，秒出
-        if self._live_paused and self._live_proc is not None \
-                and self._live_proc.state() != QProcess.NotRunning:
+        pipe = self._find_pipeline()
+        if pipe is None:
+            self._show_toast(t("viewer.live_caption_no_engine"))
+            return
+
+        self._live_log = pipe / "live-caption.log"
+        self._live_pid = pipe / "live-caption.log.pid"
+
+        # 1) 常驻/复用：已有活跃进程 → 直接开始监视，秒出
+        if self._is_live_alive():
             self._live_paused = False
             self._live_on = True
             self._live_rows = []
@@ -1051,12 +1063,34 @@ class Viewer(QWidget):
             self._live_label.show()
             self._live_label.raise_()
             self._relayout()
-            self._show_toast(t("viewer.live_caption_running"))
+            self._show_toast(t("viewer.live_caption_resumed"))
+            self._start_live_poll()
             return
 
-        pipe = self._find_pipeline()
-        if pipe is None:
-            self._show_toast(t("viewer.live_caption_no_engine"))
+        # 2) 启动解耦子进程（独立生命周期，关界面不杀）
+        exe = pipe / ".venv" / "Scripts" / "python.exe"
+        script = pipe / "live_capture.py"
+        log_path = str(self._live_log)
+        log_path = str(_Path(log_path))
+        args = [str(script), "--json", "--translate", "--log", log_path,
+                "--ollama-model", str(_settings["live_ollama_model"])]
+        env = {k: v for k, v in os.environ.items()}
+        nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
+        for d in ("cublas", "cudnn", "cuda_nvrtc"):
+            p = str(nv / d / "bin")
+            if p not in env.get("PATH", ""):
+                env["PATH"] = p + os.pathsep + env.get("PATH", "")
+        env.setdefault("HUGGINGFACE_HUB_CACHE", str(pipe / "models" / "hf" / "hub"))
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS \
+            if hasattr(subprocess, "DETACHED_PROCESS") else 0
+        try:
+            self._live_proc = subprocess.Popen(
+                [str(exe), *args], env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._show_toast(t("viewer.live_caption_error").format(err=str(exc)[:120]))
             return
 
         self._live_rows = []
@@ -1064,91 +1098,128 @@ class Viewer(QWidget):
         self._live_label.show()
         self._live_label.raise_()
         self._relayout()
-
-        proc = QProcess(self)
-        self._live_proc = proc
-
-        env = QProcessEnvironment.systemEnvironment()
-        nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
-        env.insert("PATH", f"{nv / 'cublas' / 'bin'};{nv / 'cudnn' / 'bin'};{nv / 'cuda_nvrtc' / 'bin'};" + env.value("PATH"))
-        env.insert("HUGGINGFACE_HUB_CACHE", str(pipe / "models" / "hf" / "hub"))
-        proc.setProcessEnvironment(env)
-
-        script = pipe / "live_capture.py"
-        exe = pipe / ".venv" / "Scripts" / "python.exe"
-        args = [str(script), "--json", "--translate",
-                "--ollama-model", str(_settings["live_ollama_model"])]
-        proc.readyReadStandardOutput.connect(self._on_live_stdout)
-        proc.readyReadStandardError.connect(self._on_live_stdout)
-        proc.finished.connect(self._on_live_finished)
-        proc.start(str(exe), args)
         self._live_on = True
+        self._start_live_poll()
         self._show_toast(t("viewer.live_caption_running"))
 
-    def _on_live_stdout(self) -> None:
+    # ------------------------------------------------------------------ log watch
+
+    def _live_log_path(self):
+        return getattr(self, "_live_log", None)
+
+    def _is_live_alive(self) -> bool:
+        """按 pid 锁 + log 新鲜度判断已有字幕进程是否存活。"""
+        import subprocess as _sp
+
+        pid_file = getattr(self, "_live_pid", None)
+        if pid_file is None or not pid_file.is_file():
+            return False
+        try:
+            pid = int(pid_file.read_text(encoding="utf-8").strip())
+        except Exception:
+            return False
+        try:
+            out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
+                          capture_output=True, text=True, timeout=10).stdout
+            if str(pid) not in out or "python" not in out.lower():
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _start_live_poll(self) -> None:
+        if getattr(self, "_live_poll", None) is None:
+            self._live_poll = QTimer(self)
+            self._live_poll.setInterval(600)
+            self._live_poll.timeout.connect(self._poll_live_log)
+        self._live_poll.start()
+        self._live_log_pos = 0
+
+    def _stop_live_poll(self) -> None:
+        tmr = getattr(self, "_live_poll", None)
+        if tmr is not None:
+            tmr.stop()
+
+    def _poll_live_log(self) -> None:
+        """读 log 新增行：JSON→显示；错误行→提示；进程死了→复位。"""
         import json as _json
 
-        proc = self._live_proc
-        if proc is None:
+        log = self._live_log_path()
+        if log is None or not log.is_file():
+            if not self._is_live_alive() and self._live_on:
+                self._live_on = False
+                self._live_label.hide()
+                self._show_toast(t("viewer.live_caption_exited"))
             return
-        data = bytes(proc.readAllStandardOutput()) + bytes(proc.readAllStandardError())
-        if not data:
+        try:
+            with open(log, "r", encoding="utf-8") as f:
+                f.seek(getattr(self, "_live_log_pos", 0))
+                new = f.read()
+                self._live_log_pos = f.tell()
+        except Exception:
             return
-        text = data.decode("utf-8", "replace")
-        for line in text.splitlines():
+        for line in new.splitlines():
             line = line.strip()
-            if not line.startswith("{"):
-                # 非 JSON（加载/状态日志）——错误时提示用户
-                if "Traceback" in line or "Error" in line or "✗" in line or "RuntimeError" in line:
+            if not line:
+                continue
+            if line.startswith("{"):
+                try:
+                    obj = _json.loads(line)
+                except Exception:
+                    continue
+                t0 = float(obj.get("t", 0))
+                seg = obj.get("text", "").strip()
+                zh = obj.get("zh", "").strip()
+                if not seg or self._live_paused or not self._live_on:
+                    continue
+                self._live_rows.append((max(0.0, t0 - 5.0), t0, seg, zh))
+                self._live_label.setText((seg + "\n" + zh).strip())
+                self._live_label.show()
+                self._live_label.raise_()
+            else:
+                if any(k in line for k in ("Traceback", "Error", "✗", "RuntimeError")):
                     self._show_toast(t("viewer.live_caption_error").format(err=line[:120]))
-                continue
-            try:
-                obj = _json.loads(line)
-            except Exception:
-                continue
-            t0 = float(obj.get("t", 0))
-            seg = obj.get("text", "").strip()
-            zh = obj.get("zh", "").strip()
-            if not seg:
-                continue
-            if self._live_paused or not self._live_on:
-                continue
-            self._live_rows.append((max(0.0, t0 - 5.0), t0, seg, zh))
-            self._live_label.setText((seg + "\n" + zh).strip())
-            self._live_label.show()
-            self._live_label.raise_()
+        # 进程死掉（非用户主动停止）
+        if self._live_on and not self._is_live_alive():
+            self._live_on = False
+            self._live_label.hide()
 
     def _stop_live_caption(self) -> None:
         """停止显示并保存会话。常驻模式进程保活（模型保留，重开秒出）。"""
         from .config import settings as _settings
 
         resident = bool(_settings["live_caption_resident"])
-        if self._live_proc is not None and self._live_proc.state() != QProcess.NotRunning:
-            if resident:
-                # 常驻：进程保活，仅暂停显示/收集
-                self._live_paused = True
-                self._live_on = False
-                self._live_label.hide()
-                self._save_live_srt()
-                self._show_toast(t("viewer.live_caption_resident"))
-            else:
-                self._live_proc.terminate()
-                if not self._live_proc.waitForFinished(3000):
-                    self._live_proc.kill()
-                self._save_live_srt()
-                self._show_toast(t("viewer.live_caption_stopped"))
+        self._stop_live_poll()
         self._live_on = False
         self._live_label.hide()
-
-    def _on_live_finished(self) -> None:
-        # 进程非预期退出（用户停止时会先置 _live_paused/_live_on=False）
-        was_active = self._live_on
-        self._live_on = False
-        self._live_paused = False
-        self._live_label.hide()
-        if was_active:
-            self._show_toast(t("viewer.live_caption_exited"))
         self._save_live_srt()
+        if resident:
+            # 常驻：进程保活，仅暂停显示/收集
+            self._live_paused = True
+            self._show_toast(t("viewer.live_caption_resident"))
+        else:
+            self._kill_live_proc()
+            self._show_toast(t("viewer.live_caption_stopped"))
+
+    def _kill_live_proc(self) -> None:
+        """终止字幕进程（释放显存），并清锁。"""
+        import subprocess as _sp
+
+        pid_file = getattr(self, "_live_pid", None)
+        if pid_file is not None and pid_file.is_file():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                _sp.run(["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, timeout=10)
+                pid_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+        if getattr(self, "_live_proc", None) is not None:
+            try:
+                self._live_proc.kill()
+            except Exception:
+                pass
+        self._live_proc = None
 
     def _save_live_srt(self) -> None:
         from .config import settings as _settings
@@ -1352,7 +1423,8 @@ class Viewer(QWidget):
         super().changeEvent(e)
 
     def closeEvent(self, e):
-        if self._live_proc is not None and self._live_proc.state() != QProcess.NotRunning:
+        # 软件退出（shutdown 流程）且字幕模型在运行 → 询问是否关闭（弹窗）
+        if self._shutdown and (self._live_on or self._live_paused):
             from PySide6.QtWidgets import QMessageBox
 
             from .config import settings as _settings
@@ -1362,14 +1434,15 @@ class Viewer(QWidget):
                 box.setWindowTitle(t("viewer.live_caption_quit_title"))
                 box.setText(t("viewer.live_caption_quit_text"))
                 box.setIcon(QMessageBox.Question)
-                close_btn = box.addButton(t("viewer.live_caption_quit_close"), QMessageBox.DestructiveRole)
+                close_btn = box.addButton(
+                    t("viewer.live_caption_quit_close"), QMessageBox.DestructiveRole)
                 box.addButton(QMessageBox.Cancel)
                 box.setDefaultButton(box.buttons()[0])
                 box.exec()
                 if box.clickedButton() is close_btn:
-                    self._live_proc.kill()
-            else:
-                self._live_proc.kill()
+                    self._kill_live_proc()
+        # 仅关闭播放界面：不弹窗、默认不杀模型（进程独立保活，重开秒出）
+        self._stop_live_poll()
         self._live_on = False
         self._live_label.hide()
         self._remember_position()
