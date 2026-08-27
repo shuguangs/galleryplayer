@@ -121,7 +121,7 @@ def transcribe_worker(model: WhisperModel, jobs: queue.Queue, out: queue.Queue,
 
 
 def record_loopback(loopback_keyword: str, jobs: queue.Queue) -> None:
-    """系统输出环路录音采集：优先当前默认输出设备的环路口（匹配真实声音来源）。"""
+    """系统输出环路录音采集：优先默认输出设备的环路口（精确同名匹配）。"""
     import soundcard as sc
 
     default = None
@@ -134,20 +134,26 @@ def record_loopback(loopback_keyword: str, jobs: queue.Queue) -> None:
 
     mics = list(sc.all_microphones(include_loopback=True))
     mic = None
-    # 1) 用户显式关键词（--loopback）
-    if loopback_keyword:
+    # 1) 默认输出设备的环路（soundcard 环路 mic 与 speaker 精确同名）
+    if mic is None and default is not None:
+        for m in mics:
+            if m.name == default.name:
+                mic = m
+                break
+    # 2) 用户显式关键词（--loopback）
+    if mic is None and loopback_keyword:
         for m in mics:
             if loopback_keyword.lower() in m.name.lower():
                 mic = m
                 break
-    # 2) 默认输出设备前缀（soundcard 环路 mic 与 speaker 同名/同前缀）
+    # 3) 前缀兜底（默认设备名前缀）
     if mic is None and default is not None:
         base = default.name.split(" (")[0]
         for m in mics:
             if m.name == default.name or m.name.startswith(base):
                 mic = m
                 break
-    # 3) 兜底：按默认设备 id 取环路
+    # 4) 兜底：按默认设备 id 取环路
     if mic is None and default is not None:
         try:
             mic = sc.get_microphone(id=str(default.name), include_loopback=True)
