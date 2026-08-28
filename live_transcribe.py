@@ -23,6 +23,49 @@ from pathlib import Path
 
 from ollama_service import ensure_ollama
 
+
+def split_words_to_lines(words) -> list[tuple[float, float, str]]:
+    """Split one whisper segment at sentence boundaries and speech gaps.
+
+    A segment can contain two utterances separated by many seconds of silence;
+    using only its first/last word timestamps then produces one caption that
+    spans the gap and shows both sentences together.
+    """
+    rows: list[tuple[float, float, str]] = []
+    buf: list[str] = []
+    buf_start: float | None = None
+    buf_end = 0.0
+
+    def flush() -> None:
+        nonlocal buf, buf_start, buf_end
+        if buf and buf_start is not None:
+            rows.append((buf_start, buf_end, " ".join(buf).strip()))
+        buf = []
+        buf_start = None
+        buf_end = 0.0
+
+    for word in words or []:
+        text = str(getattr(word, "word", "")).strip()
+        if not text:
+            continue
+        start = float(getattr(word, "start", 0.0))
+        end = float(getattr(word, "end", start))
+        if buf and buf_start is not None:
+            # A real silence inside the segment is a stronger boundary than
+            # punctuation: it keeps two utterances from sharing one caption.
+            if start - buf_end > 1.0:
+                flush()
+            elif end - buf_start > 6.0 or sum(len(part) for part in buf) + len(text) > 80:
+                flush()
+        if buf_start is None:
+            buf_start = start
+        buf.append(text)
+        buf_end = max(buf_end, end)
+        if text[-1:] in ".?!。！？":
+            flush()
+    flush()
+    return rows
+
 # GBK 控制台安全输出
 for _s in (sys.stdout, sys.stderr):
     try:
@@ -373,27 +416,29 @@ def main() -> None:
             text = (seg.text or "").strip()
             if not text:
                 continue
-            zh = ""
-            if translator:
-                try:
-                    zh = translator(text)
-                except Exception as exc:  # noqa: BLE001
-                    zh = ""
-                    status(f"✗ 翻译失败（Ollama）: {exc}")
             words = list(getattr(seg, "words", None) or [])
-            seg_start = words[0].start if words else seg.start
-            seg_end = words[-1].end if words else seg.end
-            line = json.dumps({
-                "g": generation,
-                "t": round(offset + seg_start, 2),
-                "end": round(offset + seg_end, 2),
-                "text": text,
-                "zh": zh,
-            }, ensure_ascii=False)
-            if log_fp is not None:
-                log_fp.write(line + "\n")
-                log_fp.flush()
-            print(line, flush=True)
+            pieces = split_words_to_lines(words)
+            if not pieces:
+                pieces = [(float(seg.start), float(seg.end), text)]
+            for piece_start, piece_end, piece_text in pieces:
+                zh = ""
+                if translator:
+                    try:
+                        zh = translator(piece_text)
+                    except Exception as exc:  # noqa: BLE001
+                        zh = ""
+                        status(f"✗ 翻译失败（Ollama）: {exc}")
+                line = json.dumps({
+                    "g": generation,
+                    "t": round(offset + piece_start, 2),
+                    "end": round(offset + piece_end, 2),
+                    "text": piece_text,
+                    "zh": zh,
+                }, ensure_ascii=False)
+                if log_fp is not None:
+                    log_fp.write(line + "\n")
+                    log_fp.flush()
+                print(line, flush=True)
         status(f"TASK_DONE {generation}")
 
     initial_job: dict | None = None
