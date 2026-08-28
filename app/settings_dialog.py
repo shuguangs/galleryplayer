@@ -317,6 +317,17 @@ class SettingsDialog(QDialog):
         self.cb_live_asr.setCurrentIndex(max(0, idx))
         self.cb_live_asr.currentIndexChanged.connect(
             lambda _i: self._set("live_asr_model", self.cb_live_asr.currentData()))
+        self.cb_live_preset = QComboBox()
+        for value, key in (
+            ("fast", "settings.live_model_preset_fast"),
+            ("balanced", "settings.live_model_preset_balanced"),
+            ("accurate", "settings.live_model_preset_accurate"),
+        ):
+            self.cb_live_preset.addItem(t(key), value)
+        idx = self.cb_live_preset.findData(str(settings["live_model_preset"]))
+        self.cb_live_preset.setCurrentIndex(max(0, idx))
+        self.cb_live_preset.setToolTip(t("settings.live_model_preset_hint"))
+        self.cb_live_preset.currentIndexChanged.connect(self._on_live_preset_changed)
         self.cb_live_translate = QComboBox()
         for m in ("none", "qwen2.5:3b", "qwen2.5:7b", "aya-expanse:8b"):
             self.cb_live_translate.addItem("无（仅原语）" if m == "none" else m, m)
@@ -359,6 +370,15 @@ class SettingsDialog(QDialog):
 
         gg.addWidget(QLabel(t("settings.live_asr_label")), 2, 0)
         gg.addWidget(self.cb_live_asr, 2, 1)
+        gg.addWidget(QLabel(t("settings.live_model_preset_label")), 12, 0)
+        gg.addWidget(self.cb_live_preset, 12, 1)
+        self.cb_hardware_model = QCheckBox(t("settings.hardware_aware_model_label"))
+        self.cb_hardware_model.setToolTip(t("settings.hardware_aware_model_hint"))
+        self.cb_hardware_model.setChecked(bool(settings["hardware_aware_model"]))
+        self.cb_hardware_model.toggled.connect(
+            lambda value: self._set("hardware_aware_model", value)
+        )
+        gg.addWidget(self.cb_hardware_model, 12, 2, 1, 3)
         gg.addWidget(QLabel(t("settings.live_translate_label")), 2, 2)
         gg.addWidget(self.cb_live_translate, 2, 3, 1, 2)
 
@@ -427,6 +447,23 @@ class SettingsDialog(QDialog):
         display_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         display_hint.setWordWrap(True)
         gg.addWidget(display_hint, 7, 0, 1, 2)
+
+        self.slider_bilingual = QSlider(Qt.Horizontal)
+        self.slider_bilingual.setRange(0, 100)
+        self.slider_bilingual.setValue(int(float(settings["caption_bilingual_ratio"]) * 100))
+        self.slider_bilingual.setToolTip(t("settings.caption_bilingual_hint"))
+        self.slider_bilingual.valueChanged.connect(
+            lambda v: self._set("caption_bilingual_ratio", v / 100.0)
+        )
+        gg.addWidget(QLabel(t("settings.caption_bilingual_label")), 10, 0)
+        gg.addWidget(self.slider_bilingual, 10, 1, 1, 4)
+
+        self.edit_glossary = QLineEdit()
+        self.edit_glossary.setPlaceholderText(t("settings.caption_glossary_hint"))
+        self.edit_glossary.setText(self._format_glossary(settings["caption_glossary"]))
+        self.edit_glossary.editingFinished.connect(self._save_glossary)
+        gg.addWidget(QLabel(t("settings.caption_glossary_label")), 11, 0)
+        gg.addWidget(self.edit_glossary, 11, 1, 1, 4)
         root.addWidget(grp)
 
         # ---- 一键安装（分组）
@@ -479,6 +516,39 @@ class SettingsDialog(QDialog):
         ig.addWidget(self.install_log, 3, 0, 1, 6)
         root.addWidget(inst_grp)
         self._update_install_hint()
+
+        diag_grp = QGroupBox(t("settings.live_diagnostics_group"))
+        diag_grp.setStyleSheet(grp.styleSheet())
+        dg = QGridLayout(diag_grp)
+        dg.setContentsMargins(8, 6, 8, 6)
+        dg.setSpacing(4)
+        self.live_diag_status = QLabel("")
+        self.live_diag_status.setWordWrap(True)
+        self.live_diag_status.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        dg.addWidget(self.live_diag_status, 0, 0, 1, 4)
+        self.live_diag_task = QLabel("")
+        self.live_diag_task.setWordWrap(True)
+        self.live_diag_task.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        dg.addWidget(self.live_diag_task, 1, 0, 1, 4)
+        self.live_diag_log = QPlainTextEdit()
+        self.live_diag_log.setReadOnly(True)
+        self.live_diag_log.setMaximumHeight(110)
+        self.live_diag_log.setStyleSheet(
+            f"QPlainTextEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
+            f" border:1px solid {theme.BORDER}; border-radius:4px;"
+            f" font-family:Consolas; font-size:11px; }}"
+        )
+        dg.addWidget(self.live_diag_log, 2, 0, 1, 4)
+        btn_diag_refresh = QPushButton(t("settings.live_diagnostics_refresh"))
+        btn_diag_refresh.setFocusPolicy(Qt.NoFocus)
+        btn_diag_refresh.clicked.connect(self._refresh_live_diagnostics)
+        dg.addWidget(btn_diag_refresh, 3, 0)
+        btn_diag_restart = QPushButton(t("settings.live_diagnostics_restart"))
+        btn_diag_restart.setFocusPolicy(Qt.NoFocus)
+        btn_diag_restart.clicked.connect(self._restart_live_engine)
+        dg.addWidget(btn_diag_restart, 3, 1)
+        root.addWidget(diag_grp)
+        self._refresh_live_diagnostics()
         # ---- 文件关联
         root.addWidget(_section(t("settings.section_assoc")))
         assoc_box = QWidget()
@@ -529,6 +599,76 @@ class SettingsDialog(QDialog):
 
     def _set(self, key: str, value) -> None:
         settings[key] = value
+
+    @staticmethod
+    def _format_glossary(glossary: dict) -> str:
+        return "; ".join(f"{key}={value}" for key, value in glossary.items())
+
+    def _save_glossary(self) -> None:
+        glossary: dict[str, str] = {}
+        for part in self.edit_glossary.text().split(";"):
+            if "=" not in part:
+                continue
+            source, target = part.split("=", 1)
+            source, target = source.strip(), target.strip()
+            if source and target:
+                glossary[source] = target
+        self._set("caption_glossary", glossary)
+
+    def _on_live_preset_changed(self, _index: int) -> None:
+        preset = self.cb_live_preset.currentData()
+        model = {"fast": "small", "balanced": "medium", "accurate": "large-v3"}[preset]
+        self._set("live_model_preset", preset)
+        idx = self.cb_live_asr.findData(model)
+        if idx >= 0:
+            self.cb_live_asr.setCurrentIndex(idx)
+
+    def _refresh_live_diagnostics(self) -> None:
+        from . import live_engine
+
+        state = live_engine.state()
+        hardware = live_engine.hardware_snapshot()
+        running = live_engine.alive()
+        matched = live_engine.matches()
+        gpu = hardware.get("gpu") or "未检测到独立 GPU"
+        vram = hardware.get("vram_mb", 0)
+        used = hardware.get("used_mb", 0)
+        configured_model = str(settings["live_asr_model"])
+        effective_model = live_engine.effective_model()
+        recommended = live_engine.recommended_model()
+        self.live_diag_status.setText(
+            f"引擎：{'运行中' if running else '未运行'}　"
+            f"配置：{'匹配' if matched else '不匹配'}　"
+            f"运行模型：{state.get('model', '-')}　"
+            f"配置：{configured_model} / 实际：{effective_model} / 推荐：{recommended}　"
+            f"GPU：{gpu}（{vram} MB，已用 {used} MB）"
+        )
+        job = live_engine.control_job()
+        self.live_diag_task.setText(
+            f"当前任务：{job.get('mode', '-')}　"
+            f"媒体：{Path(job.get('media', '-')).name if job.get('media') else '-'}　"
+            f"起点：{job.get('seek', 0)} 秒"
+        )
+        paths = live_engine.paths()
+        if paths is None:
+            self.live_diag_log.clear()
+            return
+        try:
+            lines = [
+                line for line in paths[0].read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines() if line.strip()
+            ]
+            self.live_diag_log.setPlainText("\n".join(lines[-12:]))
+        except Exception:
+            self.live_diag_log.clear()
+
+    def _restart_live_engine(self) -> None:
+        from . import live_engine
+
+        live_engine.kill()
+        live_engine.start_preload()
+        self._refresh_live_diagnostics()
 
     def _on_lang_changed(self, _index: int) -> None:
         code = self.combo_lang.currentData()

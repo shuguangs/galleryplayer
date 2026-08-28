@@ -209,6 +209,10 @@ class MainWindow(QMainWindow):
         self._srt_timer.setInterval(500)
         self._srt_timer.timeout.connect(self._poll_srt_job)
         self._srt_active = False
+        self._batch_srt_timer = QTimer(self)
+        self._batch_srt_timer.setInterval(1000)
+        self._batch_srt_timer.timeout.connect(self._poll_batch_srt)
+        self._batch_srt_jobs: list[dict] = []
         self._archive_mode = False
         self._archive_back: Path | None = None
         self._archive_archive: Path | None = None
@@ -958,6 +962,99 @@ class MainWindow(QMainWindow):
         dlg.layout().addWidget(bb)
         dlg.adjustSize()
 
+    def _batch_generate_srt(self) -> None:
+        """Queue every video in the current folder through the resident engine."""
+        from PySide6.QtWidgets import QDialog, QMessageBox, QPlainTextEdit, QVBoxLayout
+
+        from . import live_engine
+        from .config import settings
+        from .runtime import APP_DIR
+
+        if self._batch_srt_jobs:
+            QMessageBox.information(self, t("main_window.gen_srt"), t("main_window.gen_srt_busy"))
+            return
+        videos = [item for item in self.all_items if item.is_video]
+        if not videos:
+            return
+        if live_engine.paths() is None or not live_engine.start_preload():
+            QMessageBox.warning(self, t("main_window.gen_srt"), t("main_window.gen_srt_no_pipeline"))
+            return
+
+        engine_dir = live_engine.paths()[0].parent
+        jobs: list[dict] = []
+        for index, item in enumerate(videos):
+            output = (APP_DIR if settings["subtitle_save_dir"] == "player"
+                      else item.path.parent) / f"{item.path.stem}.zh.srt"
+            job_log = engine_dir / f"srt-batch-{index}.log"
+            job_log.unlink(missing_ok=True)
+            generation = live_engine.submit({
+                "mode": "srt",
+                "media": str(item.path),
+                "output": str(output),
+                "log": str(job_log),
+                "seek": 0.0,
+            })
+            jobs.append({
+                "name": item.name,
+                "output": output,
+                "log": job_log,
+                "pos": 0,
+                "done": False,
+                "generation": generation,
+            })
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("main_window.gen_srt"))
+        dlg.resize(620, 380)
+        lay = QVBoxLayout(dlg)
+        self._batch_srt_status = QLabel(
+            t("main_window.gen_srt_batch_running").format(done=0, total=len(jobs)), dlg
+        )
+        lay.addWidget(self._batch_srt_status)
+        self._batch_srt_log = QPlainTextEdit(dlg)
+        self._batch_srt_log.setReadOnly(True)
+        from . import theme
+
+        self._batch_srt_log.setStyleSheet(
+            f"QPlainTextEdit {{ background:{theme.BG_RAISED}; color:{theme.TEXT};"
+            f" border:1px solid {theme.BORDER}; border-radius:4px;"
+            f" font-family:Consolas; font-size:11px; }}"
+        )
+        lay.addWidget(self._batch_srt_log)
+        dlg.setModal(False)
+        dlg.show()
+        self._batch_srt_dialog = dlg
+        self._batch_srt_jobs = jobs
+        self._batch_srt_timer.start()
+
+    def _poll_batch_srt(self) -> None:
+        if not self._batch_srt_jobs:
+            self._batch_srt_timer.stop()
+            return
+        for job in self._batch_srt_jobs:
+            if job["done"] or not job["log"].is_file():
+                continue
+            try:
+                with open(job["log"], "r", encoding="utf-8") as fp:
+                    fp.seek(job["pos"])
+                    new = fp.read()
+                    job["pos"] = fp.tell()
+            except Exception:
+                continue
+            if new:
+                self._batch_srt_log.appendPlainText(f"{job['name']}\n{new.strip()}")
+            text = job["log"].read_text(encoding="utf-8", errors="replace")
+            if "# SRT_READY " in text or "# SRT_ERROR " in text or "# SRT_CANCELLED" in text:
+                job["done"] = True
+
+        done = sum(1 for job in self._batch_srt_jobs if job["done"])
+        total = len(self._batch_srt_jobs)
+        self._batch_srt_status.setText(
+            t("main_window.gen_srt_batch_running").format(done=done, total=total)
+        )
+        if done == total:
+            self._batch_srt_timer.stop()
+
     def _go_up(self) -> None:
         if self.folder and self.folder.parent != self.folder:
             self._save_scroll_pos()
@@ -1185,6 +1282,9 @@ class MainWindow(QMainWindow):
             if item.is_video:
                 menu.addAction(t("main_window.gen_srt")).triggered.connect(
                     lambda _=False, p=item.path: self._gen_srt_for(p)
+                )
+                menu.addAction(t("main_window.gen_srt_batch")).triggered.connect(
+                    lambda _=False: self._batch_generate_srt()
                 )
                 menu.addSeparator()
             if not item.is_video and not item.is_archive:

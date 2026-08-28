@@ -53,12 +53,16 @@ DEFAULTS: dict[str, Any] = {
     "live_caption_font_size": 32,       # 实时字幕覆盖层字号（px）
     "live_caption_width": 84,           # 实时字幕水平覆盖范围（%）
     "live_caption_height": 16,          # 实时字幕垂直覆盖范围（%）
+    "caption_bilingual_ratio": 1.0,     # 1=双语，0.5=优先译文，0=仅译文
+    "caption_glossary": {},             # 人名/术语替换表
     "live_caption_resident": True,     # 实时字幕常驻：停止时保留模型进程（重开秒出）
     "live_caption_source": "audio",    # 字幕来源: audio=文件音轨（本地播放，推荐）/ loopback=系统声音
     "live_caption_lang": "en",         # 字幕识别语言: en/ja/ko/fr/de/es/auto
     "live_asr_model": "medium",        # 字幕识别模型档位: tiny/base/small/medium/large-v3
+    "live_model_preset": "balanced",   # fast/balanced/accurate
     "live_asr_dir": "",                # 字幕模型目录（空=HF 缓存下载；可指向本地 faster-whisper 模型文件夹）
     "live_model_preload": True,        # 启动播放器时后台预载字幕模型（不阻塞界面）
+    "hardware_aware_model": False,     # 根据显存自动选择合适识别模型
     "archive_no_thumbs": False,        # 压缩包浏览时不加载缩略图（加快浏览）
     "filter_show_image": True,         # 筛选复选框：显示图片
     "filter_show_video": True,         # 筛选复选框：显示视频

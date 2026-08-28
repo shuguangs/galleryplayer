@@ -16,12 +16,15 @@ from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QLabel, QMenu, QStackedLayout, QWidget
 
 from . import fileops, icons, theme
+from .caption_text import apply_glossary, format_bilingual, merge_short_rows
 from .config import DEFAULTS, resume, settings
 from .controls import SPEEDS, ControlBar, StageButton, TopBar
 from .i18n import t
 from .image_view import ImageView
+from .live_caption_controller import LiveCaptionController
 from .live_engine import matches as live_engine_matches
 from .live_engine import submit as submit_live_engine_job
+from .live_engine_state import EngineEvent, parse_engine_line
 from .media import MediaItem, format_duration, item_for_path
 from .mpv_widget import MpvWidget
 from .playlist_panel import PlaylistPanel
@@ -107,19 +110,10 @@ class Viewer(QWidget):
         self._live_proc: QProcess | None = None
         self._live_on = False
         self._live_paused = False
-        self._live_rows: list[tuple[float, float, str, str]] = []
-        self._live_generation = 0
-        self._live_catching = False
-        self._live_media_path: Path | None = None
-        self._live_full_pass_running = False
-        self._live_full_pass_done = False
-        self._live_task_start_seek = 0.0
-        self._live_last_submit_at = 0.0
-        self._live_last_submit_seek = -10_000.0
-        self._live_restart_timer = QTimer(self)
-        self._live_restart_timer.setSingleShot(True)
-        self._live_restart_timer.setInterval(1200)
-        self._live_restart_timer.timeout.connect(self._submit_pending_live_restart)
+        self._live_ctl = LiveCaptionController(self)
+        self._live_ctl.restart_requested.connect(
+            lambda pos, catching: self._restart_live_for_seek(int(pos), catching=catching)
+        )
         self._live_label = QLabel("", self.stage)
         self._live_label.setObjectName("LiveCaption")
         self._live_label.setAlignment(Qt.AlignCenter)
@@ -188,6 +182,70 @@ class Viewer(QWidget):
         # Track whether we've already fitted the window to the first video's native
         # size in this session: subsequent videos keep the user's chosen window size.
         self._native_size_applied = False
+
+    @property
+    def _live_rows(self):
+        return self._live_ctl.rows
+
+    @_live_rows.setter
+    def _live_rows(self, rows):
+        self._live_ctl.rows = rows
+
+    @property
+    def _live_generation(self):
+        return self._live_ctl.generation
+
+    @_live_generation.setter
+    def _live_generation(self, value):
+        self._live_ctl.generation = value
+
+    @property
+    def _live_catching(self):
+        return self._live_ctl.catching
+
+    @_live_catching.setter
+    def _live_catching(self, value):
+        self._live_ctl.catching = value
+
+    @property
+    def _live_media_path(self):
+        return self._live_ctl.media_path
+
+    @_live_media_path.setter
+    def _live_media_path(self, value):
+        self._live_ctl.media_path = value
+
+    @property
+    def _live_full_pass_running(self):
+        return self._live_ctl.full_pass_running
+
+    @_live_full_pass_running.setter
+    def _live_full_pass_running(self, value):
+        self._live_ctl.full_pass_running = value
+
+    @property
+    def _live_full_pass_done(self):
+        return self._live_ctl.full_pass_done
+
+    @_live_full_pass_done.setter
+    def _live_full_pass_done(self, value):
+        self._live_ctl.full_pass_done = value
+
+    @property
+    def _live_task_start_seek(self):
+        return self._live_ctl.task_start_seek
+
+    @_live_task_start_seek.setter
+    def _live_task_start_seek(self, value):
+        self._live_ctl.task_start_seek = value
+
+    @property
+    def _live_last_position(self):
+        return self._live_ctl.last_position
+
+    @_live_last_position.setter
+    def _live_last_position(self, value):
+        self._live_ctl.last_position = value
 
     # ------------------------------------------------------------- wiring
 
@@ -447,36 +505,15 @@ class Viewer(QWidget):
             self._maybe_restart_live_for_position(pos)
 
     def _maybe_restart_live_for_position(self, pos: float) -> None:
-        """Restart transcription when a seek leaves the available row range."""
+        """Delegate seek decisions to the live-caption controller."""
         if not getattr(self, "_live_on", False):
-            self._live_last_position = pos
+            self._live_ctl.last_position = pos
             return
-        if str(settings["live_caption_source"]) != "audio":
-            self._live_last_position = pos
-            return
-
-        prev = getattr(self, "_live_last_position", None)
-        self._live_last_position = pos
-        if prev is None or abs(pos - prev) < 2:
-            return
-        if abs(pos - getattr(self, "_live_last_restart_pos", -10_000.0)) < 2:
-            return
-
-        rows = sorted(self._live_rows)
-        covered = any(
-            start - 0.2 <= pos <= end + 0.3
-            for start, end, _seg, _zh in rows
+        result = self._live_ctl.handle_position(
+            pos, str(settings["live_caption_source"]) == "audio"
         )
-        if covered:
-            # A jump back into transcribed material must neither cancel the
-            # current engine task nor fire a stale queued restart from earlier.
-            self._live_restart_timer.stop()
-            self._live_pending_restart = None
-            self._live_catching = False
+        if result == "covered":
             self._update_live_caption_for_position(pos)
-            return
-
-        self._request_live_restart(pos)
 
     def _on_duration(self, dur: float) -> None:
         self.controls.set_duration(dur)
@@ -1188,19 +1225,13 @@ class Viewer(QWidget):
 
         self._save_live_srt(announce=False)
         self._stop_live_poll()
-        self._live_rows = []
+        self._live_ctl.reset_for_media(bool(item.is_video))
         self.controls.set_caption_ranges([])
-        self._live_media_path = None
-        self._live_full_pass_running = False
-        self._live_full_pass_done = False
-        self._live_task_start_seek = 0.0
-        self._live_restart_timer.stop()
         if getattr(self, "_live_log", None) is not None and self._live_log.is_file():
             self._live_log_pos = self._live_log.stat().st_size
         else:
             self._live_log_pos = 0
         self._live_paused = False
-        self._live_last_position = None
         self._live_label.clear()
         self._live_label.hide()
         self._live_on = bool(item.is_video)
@@ -1214,11 +1245,8 @@ class Viewer(QWidget):
 
         old_log_size = self._live_log.stat().st_size if self._live_log.is_file() else 0
         if self._live_media_path != media:
-            self._live_rows = []
-            self._live_row_keys = set()
             self.controls.set_caption_ranges([])
         self._live_log_pos = old_log_size
-        self._live_media_path = media
         payload = {
             "media": str(media),
             "seek": max(0.0, float(seek) - 0.5),
@@ -1231,15 +1259,7 @@ class Viewer(QWidget):
         import time as _time
 
         self._live_started_at = _time.time()
-        self._live_last_position = seek
-        self._live_generation = generation
-        self._live_task_start_seek = max(0.0, float(seek))
-        self._live_full_pass_running = self._live_task_start_seek <= 0.5
-        import time as _submit_time
-
-        self._live_last_submit_at = _submit_time.time()
-        self._live_last_submit_seek = seek
-        self._live_catching = catching
+        self._live_ctl.begin_media(media, seek, generation, catching)
         self._live_alive_cache = None
         self._live_label.setText(
             t("viewer.live_caption_catching_status") if catching
@@ -1255,45 +1275,43 @@ class Viewer(QWidget):
         media = self.items[self.index].path if 0 <= self.index < len(self.items) else None
         if media is None or getattr(self, "_live_full_pass_done", False):
             return
+        duration = self.video_view.duration if self._current_is_video() else None
+        seek = self._live_ctl.next_full_pass_start(duration)
+        if seek < 0:
+            self._live_ctl.full_pass_done = True
+            return
         generation = submit_live_engine_job({
             "media": str(media),
-            "seek": 0.0,
+            "seek": seek,
             "mode": "live",
         })
         if generation is None:
             return
-        self._live_generation = generation
-        self._live_task_start_seek = 0.0
-        self._live_full_pass_running = True
+        self._live_ctl.begin_full_pass(generation, seek)
         self._live_started_at = None
-        self._live_catching = False
         self._start_live_poll()
+
+    def _prefetch_next_live_media(self) -> None:
+        """Warm the next playlist item after the current file is fully covered."""
+        if not getattr(self, "_live_on", False) or not self._live_ctl.full_pass_done:
+            return
+        next_index = self.index + 1
+        if not (0 <= next_index < len(self.items)):
+            return
+        item = self.items[next_index]
+        if not item.is_video:
+            return
+        submit_live_engine_job({
+            "media": str(item.path),
+            "seek": 0.0,
+            "mode": "prefetch",
+        })
 
     def _request_live_restart(self, pos: float, catching: bool = True) -> None:
         """Debounce seeks; repeated jumps must not cancel the model endlessly."""
         if not getattr(self, "_live_on", False):
             return
-        import time as _time
-
-        if (
-            _time.time() - getattr(self, "_live_last_submit_at", 0.0) < 12.0
-            and abs(pos - getattr(self, "_live_last_submit_seek", -10_000.0)) < 2.0
-        ):
-            return
-        if getattr(self, "_live_pending_restart", None) == pos:
-            return
-        self._live_pending_restart = pos
-        self._live_pending_catching = catching
-        self._live_restart_timer.start()
-
-    def _submit_pending_live_restart(self) -> None:
-        pos = getattr(self, "_live_pending_restart", None)
-        if pos is None or not getattr(self, "_live_on", False):
-            return
-        self._live_pending_restart = None
-        self._restart_live_for_seek(
-            int(pos), catching=getattr(self, "_live_pending_catching", True)
-        )
+        self._live_ctl.request_restart(pos, catching)
 
     def _update_live_caption_for_position(self, pos: float) -> None:
         rows = sorted(self._live_rows, key=lambda r: r[0])
@@ -1312,21 +1330,17 @@ class Viewer(QWidget):
             self._live_label.hide()
             return
 
-        self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
+        glossary = settings["caption_glossary"] or {}
+        seg = apply_glossary(seg, glossary)
+        zh = apply_glossary(zh, glossary)
+        self._live_label.setText(
+            format_bilingual(seg, zh, float(settings["caption_bilingual_ratio"]))
+        )
         self._live_label.show()
         self._live_label.raise_()
 
     def _sync_caption_ranges(self) -> None:
-        rows = sorted(self._live_rows, key=lambda r: r[0])
-        merged: list[list[float]] = []
-        for start, end, _seg, _zh in rows:
-            if merged and start <= merged[-1][1] + 0.5:
-                merged[-1][1] = max(merged[-1][1], end)
-            else:
-                merged.append([start, end])
-        self.controls.set_caption_ranges(
-            [(start, end) for start, end in merged]
-        )
+        self.controls.set_caption_ranges(self._live_ctl.caption_ranges())
 
     def _find_pipeline(self):
         from .config import find_subtitle_pipeline_dir
@@ -1367,9 +1381,7 @@ class Viewer(QWidget):
         if source == "audio" and self._check_live_alive() and live_engine_matches():
             self._live_paused = False
             self._live_on = True
-            self._live_rows = []
-            self._live_row_keys = set()
-            self._live_media_path = current_media
+            self._live_ctl.reset_for_media(True)
             if source == "audio":
                 try:
                     pos = float(self.video_view.position or 0.0)
@@ -1457,12 +1469,8 @@ class Viewer(QWidget):
 
         self._live_started_at = _time.time()
 
-        self._live_rows = []
-        self._live_row_keys = set()
-        self._live_media_path = None
-        self._live_restart_timer.stop()
+        self._live_ctl.reset_for_media(True)
         self._live_generation = 0
-        self._live_catching = False
         self._live_log_pos = 0
         self._live_label.setText(t("viewer.live_caption_starting"))
         self._live_label.show()
@@ -1626,6 +1634,38 @@ class Viewer(QWidget):
             tmr.stop()
         self._live_srt_save_timer.stop()
 
+    def _handle_live_engine_event(self, event_data) -> None:
+        event = event_data.event
+        if event == EngineEvent.TRANSLATE_READY:
+            self._show_toast(
+                t("viewer.live_caption_translation_ready").format(model=event_data.detail)
+            )
+        elif event == EngineEvent.TRANSLATE_ERROR:
+            self._show_toast(
+                t("viewer.live_caption_translation_error").format(error=event_data.detail)
+            )
+        elif event == EngineEvent.MODEL_ERROR:
+            self._live_on = False
+            self._live_label.hide()
+            self._show_toast(t("viewer.live_caption_error").format(err=event_data.detail[:120]))
+        elif event == EngineEvent.TASK_DONE:
+            result = self._live_ctl.task_done(
+                event_data.generation if event_data.generation is not None else -1
+            )
+            if result == "needs_full_pass":
+                self._start_live_full_pass()
+            elif result == "done":
+                self._prefetch_next_live_media()
+        elif event in (EngineEvent.TASK_STARTED, EngineEvent.TASK_PROGRESS):
+            if not self._live_rows:
+                self._live_label.setText(t("viewer.live_caption_catching_status"))
+                self._live_label.show()
+                self._live_label.raise_()
+        elif event == EngineEvent.ERROR:
+            self._show_toast(
+                t("viewer.live_caption_error").format(err=event_data.detail[:120])
+            )
+
     def _poll_live_log(self) -> None:
         """读 log 新增行：JSON→显示；错误行→提示；启动宽限期外进程死了→复位。"""
         import json as _json
@@ -1656,54 +1696,18 @@ class Viewer(QWidget):
             line = line.strip()
             if not line:
                 continue
-            if line.startswith("{"):
+            event_data = parse_engine_line(line)
+            if event_data is not None:
+                self._handle_live_engine_event(event_data)
+            elif line.startswith("{"):
                 try:
                     obj = _json.loads(line)
                 except Exception:
                     continue
-                if int(obj.get("g", -1)) != getattr(self, "_live_generation", 0):
-                    continue
-                t0 = float(obj.get("t", 0))
-                t1 = float(obj.get("end", t0))
                 seg = obj.get("text", "").strip()
-                zh = obj.get("zh", "").strip()
                 if not seg or self._live_paused or not self._live_on:
                     continue
-                row = (t0, max(t0, t1), seg, zh)
-                row_key = (round(t0, 2), round(max(t0, t1), 2), seg, zh)
-                if row_key not in getattr(self, "_live_row_keys", set()):
-                    if not hasattr(self, "_live_row_keys"):
-                        self._live_row_keys = set()
-                    self._live_row_keys.add(row_key)
-                    self._live_rows.append(row)
-            elif line.startswith("# TRANSLATE_READY "):
-                model = line.split(" ", 2)[2].strip()
-                self._show_toast(t("viewer.live_caption_translation_ready").format(model=model))
-            elif line.startswith("# TRANSLATE_ERROR "):
-                error = line.split(" ", 2)[2].strip()
-                self._show_toast(t("viewer.live_caption_translation_error").format(error=error))
-            elif line.startswith("# MODEL_ERROR "):
-                self._live_on = False
-                self._live_label.hide()
-                self._show_toast(t("viewer.live_caption_error").format(err=line[14:134]))
-            elif line.startswith("# TASK_DONE "):
-                try:
-                    done_generation = int(line.split()[2])
-                except (IndexError, ValueError):
-                    done_generation = -1
-                if done_generation == getattr(self, "_live_generation", -1):
-                    if getattr(self, "_live_task_start_seek", 0.0) <= 0.5:
-                        self._live_full_pass_done = True
-                    self._live_full_pass_running = False
-                    self._start_live_full_pass()
-            elif line.startswith("# 音轨模式：") or line.startswith("# 语言 "):
-                if not self._live_rows:
-                    self._live_label.setText(t("viewer.live_caption_catching_status"))
-                    self._live_label.show()
-                    self._live_label.raise_()
-            else:
-                if any(k in line for k in ("Traceback", "Error", "✗", "RuntimeError", "MODEL_ERROR")):
-                    self._show_toast(t("viewer.live_caption_error").format(err=line[:120]))
+                self._live_ctl.accept_line(obj)
         # 显示：音轨模式按播放位置选行；环路模式显示最新行
         if self._live_on and not self._live_paused and self._live_rows:
             if getattr(self, "_live_source", "audio") == "audio":
@@ -1728,7 +1732,12 @@ class Viewer(QWidget):
                     self._request_live_restart(pos, catching=True)
             else:
                 _t0, _t1, seg, zh = self._live_rows[-1]
-                self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
+                glossary = settings["caption_glossary"] or {}
+                seg = apply_glossary(seg, glossary)
+                zh = apply_glossary(zh, glossary)
+                self._live_label.setText(
+                    format_bilingual(seg, zh, float(settings["caption_bilingual_ratio"]))
+                )
                 self._live_label.show()
                 self._live_label.raise_()
         self._sync_caption_ranges()
@@ -1777,12 +1786,17 @@ class Viewer(QWidget):
 
         if not self._live_rows:
             return
-        # 音轨模式：end 占位（end<=start）用下一句开始时间补全
-        rows = sorted(self._live_rows, key=lambda r: r[0])
+        rows = merge_short_rows(self._live_rows)
+        glossary = _settings["caption_glossary"] or {}
         fixed = []
-        for i, (st, en, seg, zh) in enumerate(rows):
+        for i, row in enumerate(rows):
+            st, en, seg, zh = row
             end = en if en > st else (rows[i + 1][0] if i + 1 < len(rows) else st + 8.0)
-            fixed.append((st, end, seg, zh))
+            fixed.append((
+                st, end,
+                apply_glossary(seg, glossary),
+                apply_glossary(zh, glossary),
+            ))
         if _settings["subtitle_save_dir"] == "player":
             out_dir = APP_DIR
         else:

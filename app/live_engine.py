@@ -31,6 +31,68 @@ def state() -> dict:
         return {}
 
 
+def hardware_snapshot() -> dict:
+    """Best-effort GPU snapshot for diagnostics and model recommendations."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total,memory.used",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3, errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        ).stdout.strip()
+    except Exception:
+        return {"gpu": None, "vram_mb": 0, "used_mb": 0}
+    if not out:
+        return {"gpu": None, "vram_mb": 0, "used_mb": 0}
+    first = out.splitlines()[0].split(",")
+    if len(first) != 3:
+        return {"gpu": None, "vram_mb": 0, "used_mb": 0}
+    try:
+        return {
+            "gpu": first[0].strip(),
+            "vram_mb": int(float(first[1])),
+            "used_mb": int(float(first[2])),
+        }
+    except ValueError:
+        return {"gpu": first[0].strip(), "vram_mb": 0, "used_mb": 0}
+
+
+def recommended_model() -> str:
+    vram = hardware_snapshot().get("vram_mb", 0)
+    if vram >= 8000:
+        return "large-v3"
+    if vram >= 4000:
+        return "medium"
+    if vram >= 2000:
+        return "small"
+    return "tiny"
+
+
+def effective_model() -> str:
+    configured = str(settings["live_asr_model"])
+    if not bool(settings["hardware_aware_model"]):
+        return configured
+    return recommended_model()
+
+
+def control_job() -> dict:
+    found = paths()
+    if found is None:
+        return {}
+    _log, _pid, control, _state = found
+    try:
+        value = json.loads(control.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+    _log, _pid, _control, state_path = found
+    try:
+        value = json.loads(state_path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
 def alive() -> bool:
     found = paths()
     if found is None:
@@ -56,7 +118,7 @@ def matches() -> bool:
     return (
         current.get("engine") == ENGINE_VERSION
         and current.get("source") == "audio"
-        and current.get("model") == str(settings["live_asr_model"])
+        and current.get("model") == effective_model()
         and current.get("model_dir") == str(settings["live_asr_dir"] or "")
         and current.get("translate") == str(settings["live_ollama_model"])
     )
@@ -106,7 +168,7 @@ def start_preload() -> bool:
     args = [
         str(script), "--preload", "--log", str(log),
         "--lang", str(settings["live_caption_lang"]),
-        "--model", str(settings["live_asr_model"]),
+        "--model", effective_model(),
         "--ollama-model", str(settings["live_ollama_model"]),
     ]
     if str(settings["live_asr_dir"] or "").strip():
