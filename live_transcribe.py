@@ -344,9 +344,6 @@ def main() -> None:
             status("模型加载期间收到切换，跳过旧转写任务 ...")
             return
         write_state(media)
-        if generation > 0 and log_fp is not None:
-            log_fp.seek(0)
-            log_fp.truncate()
         if not media.is_file():
             status("✗ 媒体文件不存在: %s" % media)
             return
@@ -382,6 +379,7 @@ def main() -> None:
                     zh = ""
                     status(f"✗ 翻译失败（Ollama）: {exc}")
             line = json.dumps({
+                "g": generation,
                 "t": round(offset + seg.start, 2),
                 "end": round(offset + seg.end, 2),
                 "text": text,
