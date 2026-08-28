@@ -463,8 +463,18 @@ class Viewer(QWidget):
             return
 
         rows = sorted(self._live_rows)
-        if rows and rows[0][0] - 0.2 <= pos <= rows[-1][1] + 0.3:
-            return  # the resident engine already transcribed this range
+        covered = any(
+            start - 0.2 <= pos <= end + 0.3
+            for start, end, _seg, _zh in rows
+        )
+        if covered:
+            # A jump back into transcribed material must neither cancel the
+            # current engine task nor fire a stale queued restart from earlier.
+            self._live_restart_timer.stop()
+            self._live_pending_restart = None
+            self._live_catching = False
+            self._update_live_caption_for_position(pos)
+            return
 
         self._request_live_restart(pos)
 
