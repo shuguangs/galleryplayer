@@ -316,18 +316,31 @@ class SettingsDialog(QDialog):
         idx = self.cb_live_asr.findData(settings["live_asr_model"])
         self.cb_live_asr.setCurrentIndex(max(0, idx))
         self.cb_live_asr.currentIndexChanged.connect(
-            lambda _i: self._set("live_asr_model", self.cb_live_asr.currentData()))
+            self._on_live_asr_model_changed)
         self.cb_live_preset = QComboBox()
         for value, key in (
             ("fast", "settings.live_model_preset_fast"),
             ("balanced", "settings.live_model_preset_balanced"),
             ("accurate", "settings.live_model_preset_accurate"),
+            ("custom", "settings.live_model_preset_custom"),
         ):
             self.cb_live_preset.addItem(t(key), value)
         idx = self.cb_live_preset.findData(str(settings["live_model_preset"]))
         self.cb_live_preset.setCurrentIndex(max(0, idx))
         self.cb_live_preset.setToolTip(t("settings.live_model_preset_hint"))
         self.cb_live_preset.currentIndexChanged.connect(self._on_live_preset_changed)
+        if str(settings["live_model_preset"]) != "custom":
+            mapped = {
+                "fast": "small",
+                "balanced": "medium",
+                "accurate": "large-v3",
+            }[str(settings["live_model_preset"])]
+            idx = self.cb_live_asr.findData(mapped)
+            if idx >= 0:
+                self.cb_live_asr.blockSignals(True)
+                self.cb_live_asr.setCurrentIndex(idx)
+                self.cb_live_asr.blockSignals(False)
+            settings["live_asr_model"] = mapped
         self.cb_live_translate = QComboBox()
         for m in ("none", "qwen2.5:3b", "qwen2.5:7b", "aya-expanse:8b"):
             self.cb_live_translate.addItem("无（仅原语）" if m == "none" else m, m)
@@ -617,11 +630,31 @@ class SettingsDialog(QDialog):
 
     def _on_live_preset_changed(self, _index: int) -> None:
         preset = self.cb_live_preset.currentData()
-        model = {"fast": "small", "balanced": "medium", "accurate": "large-v3"}[preset]
         self._set("live_model_preset", preset)
+        if preset == "custom":
+            return
+        model = {"fast": "small", "balanced": "medium", "accurate": "large-v3"}[preset]
         idx = self.cb_live_asr.findData(model)
         if idx >= 0:
+            self.cb_live_asr.blockSignals(True)
             self.cb_live_asr.setCurrentIndex(idx)
+            self.cb_live_asr.blockSignals(False)
+        self._set("live_asr_model", model)
+
+    def _on_live_asr_model_changed(self, _index: int) -> None:
+        model = self.cb_live_asr.currentData()
+        self._set("live_asr_model", model)
+        preset = {
+            "small": "fast",
+            "medium": "balanced",
+            "large-v3": "accurate",
+        }.get(str(model), "custom")
+        idx = self.cb_live_preset.findData(preset)
+        if idx >= 0:
+            self.cb_live_preset.blockSignals(True)
+            self.cb_live_preset.setCurrentIndex(idx)
+            self.cb_live_preset.blockSignals(False)
+        self._set("live_model_preset", preset)
 
     def _refresh_live_diagnostics(self) -> None:
         from . import live_engine

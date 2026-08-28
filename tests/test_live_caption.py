@@ -64,6 +64,25 @@ class LiveCaptionTests(unittest.TestCase):
         self.assertEqual(event.generation, 12)
         self.assertEqual(parse_engine_line('{"g":1}'), None)
 
+    def test_model_preset_overrides_stale_model_setting(self):
+        from app.config import settings
+        from app.live_engine import effective_model
+
+        old = {
+            key: settings[key]
+            for key in ("live_model_preset", "live_asr_model", "hardware_aware_model")
+        }
+        try:
+            settings["live_model_preset"] = "balanced"
+            settings["live_asr_model"] = "large-v3"
+            settings["hardware_aware_model"] = False
+            self.assertEqual(effective_model(), "medium")
+            settings["live_model_preset"] = "custom"
+            self.assertEqual(effective_model(), "large-v3")
+        finally:
+            for key, value in old.items():
+                settings[key] = value
+
 
 if __name__ == "__main__":
     unittest.main()

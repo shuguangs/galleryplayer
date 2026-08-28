@@ -69,9 +69,13 @@ def recommended_model() -> str:
 
 
 def effective_model() -> str:
-    configured = str(settings["live_asr_model"])
     if not bool(settings["hardware_aware_model"]):
-        return configured
+        preset = str(settings["live_model_preset"])
+        return {
+            "fast": "small",
+            "balanced": "medium",
+            "accurate": "large-v3",
+        }.get(preset, str(settings["live_asr_model"]))
     return recommended_model()
 
 
@@ -85,21 +89,24 @@ def control_job() -> dict:
         return value if isinstance(value, dict) else {}
     except Exception:
         return {}
-    _log, _pid, _control, state_path = found
-    try:
-        value = json.loads(state_path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except Exception:
-        return {}
 
 
 def alive() -> bool:
     found = paths()
     if found is None:
-        return None
+        return False
     _log, pid_path, _control, _state = found
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    try:
+        import psutil
+
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except ImportError:
+        pass
     except Exception:
         return False
     try:
@@ -131,6 +138,21 @@ def kill() -> None:
     _log, pid_path, control, _state = found
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
+        try:
+            import psutil
+
+            process = psutil.Process(pid)
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except psutil.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=3)
+            return
+        except ImportError:
+            pass
+        except Exception:
+            pass
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/F"],
             capture_output=True, timeout=5,

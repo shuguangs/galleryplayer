@@ -105,6 +105,17 @@ class Settings(_JsonStore):
         super().__init__(USERDATA_DIR / "config.json", DEFAULTS)
         for k, v in DEFAULTS.items():
             self._data.setdefault(k, v)
+        # Older configs could carry a preset plus a stale explicit model. The
+        # preset is the user-facing choice, so reconcile it once at startup.
+        preset_models = {
+            "fast": "small",
+            "balanced": "medium",
+            "accurate": "large-v3",
+        }
+        preset = self._data.get("live_model_preset")
+        if preset in preset_models and self._data.get("live_asr_model") != preset_models[preset]:
+            self._data["live_asr_model"] = preset_models[preset]
+            self._dirty = True
 
     def __getitem__(self, key: str) -> Any:
         return self._data.get(key, DEFAULTS.get(key))

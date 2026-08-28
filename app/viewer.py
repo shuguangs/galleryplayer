@@ -22,6 +22,7 @@ from .controls import SPEEDS, ControlBar, StageButton, TopBar
 from .i18n import t
 from .image_view import ImageView
 from .live_caption_controller import LiveCaptionController
+from .live_engine import effective_model
 from .live_engine import matches as live_engine_matches
 from .live_engine import submit as submit_live_engine_job
 from .live_engine_state import EngineEvent, parse_engine_line
@@ -1403,7 +1404,7 @@ class Viewer(QWidget):
         log_path = str(self._live_log)
         log_path = str(_Path(log_path))
         lang = str(_settings["live_caption_lang"])
-        asr_model = str(_settings["live_asr_model"]) or "medium"
+        asr_model = effective_model() or "medium"
         asr_dir = str(_settings["live_asr_dir"] or "").strip()
         translate_on = tr_model != "none"
         common = ["--log", log_path, "--lang", lang, "--model", asr_model,
@@ -1636,7 +1637,11 @@ class Viewer(QWidget):
 
     def _handle_live_engine_event(self, event_data) -> None:
         event = event_data.event
-        if event == EngineEvent.TRANSLATE_READY:
+        if event == EngineEvent.MODEL_LOADING:
+            self._live_label.setText(t("viewer.live_caption_model_loading"))
+            self._live_label.show()
+            self._live_label.raise_()
+        elif event == EngineEvent.TRANSLATE_READY:
             self._show_toast(
                 t("viewer.live_caption_translation_ready").format(model=event_data.detail)
             )

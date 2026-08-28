@@ -3,3 +3,4 @@ python-mpv>=1.0.7
 Pillow>=11.3
 pillow-heif>=0.20
 natsort>=8.4
+psutil>=6.0
