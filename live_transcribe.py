@@ -354,12 +354,14 @@ def main() -> None:
             audio = decode_audio(str(media), sampling_rate=16000)
             audio = audio[int(seek * 16000):]
             seg_iter, info = model.transcribe(
-                audio, language=args.lang or None, beam_size=1, vad_filter=False,
+                audio, language=args.lang or None, beam_size=1, vad_filter=True,
+                word_timestamps=True,
             )
             offset = seek
         else:
             seg_iter, info = model.transcribe(
-                str(media), language=args.lang or None, beam_size=1, vad_filter=False,
+                str(media), language=args.lang or None, beam_size=1, vad_filter=True,
+                word_timestamps=True,
             )
             offset = 0.0
         status(f"语言 {info.language} (p={info.language_probability:.2f})，转写中 ...")
@@ -378,10 +380,13 @@ def main() -> None:
                 except Exception as exc:  # noqa: BLE001
                     zh = ""
                     status(f"✗ 翻译失败（Ollama）: {exc}")
+            words = list(getattr(seg, "words", None) or [])
+            seg_start = words[0].start if words else seg.start
+            seg_end = words[-1].end if words else seg.end
             line = json.dumps({
                 "g": generation,
-                "t": round(offset + seg.start, 2),
-                "end": round(offset + seg.end, 2),
+                "t": round(offset + seg_start, 2),
+                "end": round(offset + seg_end, 2),
                 "text": text,
                 "zh": zh,
             }, ensure_ascii=False)
@@ -389,6 +394,7 @@ def main() -> None:
                 log_fp.write(line + "\n")
                 log_fp.flush()
             print(line, flush=True)
+        status(f"TASK_DONE {generation}")
 
     initial_job: dict | None = None
     if args.media:
