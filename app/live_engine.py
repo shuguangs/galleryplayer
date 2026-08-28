@@ -34,7 +34,7 @@ def state() -> dict:
 def alive() -> bool:
     found = paths()
     if found is None:
-        return False
+        return None
     _log, pid_path, _control, _state = found
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
@@ -148,7 +148,7 @@ def next_generation(control: Path) -> int:
         return 1
 
 
-def submit(job: dict) -> bool:
+def submit(job: dict) -> int | None:
     found = paths()
     if found is None:
         return False
@@ -157,4 +157,4 @@ def submit(job: dict) -> bool:
     tmp = control.with_suffix(control.suffix + ".tmp")
     tmp.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
     tmp.replace(control)
-    return True
+    return job["generation"]

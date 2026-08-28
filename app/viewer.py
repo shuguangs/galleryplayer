@@ -108,12 +108,19 @@ class Viewer(QWidget):
         self._live_on = False
         self._live_paused = False
         self._live_rows: list[tuple[float, float, str, str]] = []
+        self._live_generation = 0
+        self._live_catching = False
         self._live_label = QLabel("", self.stage)
         self._live_label.setObjectName("LiveCaption")
         self._live_label.setAlignment(Qt.AlignCenter)
         self._live_label.setWordWrap(True)
         self._live_label.hide()
         self._apply_live_caption_style(relayout=False)
+        self._live_srt_save_timer = QTimer(self)
+        self._live_srt_save_timer.setInterval(5000)
+        self._live_srt_save_timer.timeout.connect(
+            lambda: self._save_live_srt(announce=False)
+        )
 
         self.error_label = QLabel("", self)
         self.error_label.setObjectName("OverlayError")
@@ -425,10 +432,10 @@ class Viewer(QWidget):
     def _on_position(self, pos: float) -> None:
         if not self._scrubbing:
             self.controls.set_position(pos, self.video_view.duration)
-        self._maybe_restart_live_for_position(pos)
+            self._maybe_restart_live_for_position(pos)
 
     def _maybe_restart_live_for_position(self, pos: float) -> None:
-        """A large backward seek invalidates the current transcription range."""
+        """Restart transcription when a seek leaves the available row range."""
         if not getattr(self, "_live_on", False):
             self._live_last_position = pos
             return
@@ -438,10 +445,14 @@ class Viewer(QWidget):
 
         prev = getattr(self, "_live_last_position", None)
         self._live_last_position = pos
-        if prev is None or prev - pos < 5:
+        if prev is None or abs(pos - prev) < 2:
             return
-        if abs(pos - getattr(self, "_live_last_restart_pos", -10_000.0)) < 5:
+        if abs(pos - getattr(self, "_live_last_restart_pos", -10_000.0)) < 2:
             return
+
+        rows = sorted(self._live_rows)
+        if rows and rows[0][0] - 0.2 <= pos <= rows[-1][1] + 0.3:
+            return  # the resident engine already transcribed this range
 
         self._live_last_restart_pos = pos
         self._restart_live_for_seek(int(pos))
@@ -763,10 +774,13 @@ class Viewer(QWidget):
         """手动定位后播放应从该处继续（退出“播完停帧”状态）。"""
         self._at_eof = False
         self.video_view.seek_absolute(seconds)
+        self._maybe_restart_live_for_position(seconds)
 
     def _seek_relative(self, delta: float) -> None:
         self._at_eof = False
+        target = max(0.0, float(self.video_view.position or 0.0) + delta)
         self.video_view.seek_relative(delta)
+        self._maybe_restart_live_for_position(target)
 
     def _toggle_mute(self) -> None:
         self.video_view.toggle_mute()
@@ -1151,7 +1165,7 @@ class Viewer(QWidget):
         if str(settings["live_caption_source"]) != "audio":
             return False
 
-        self._save_live_srt()
+        self._save_live_srt(announce=False)
         self._stop_live_poll()
         self._live_rows = []
         if getattr(self, "_live_log", None) is not None and self._live_log.is_file():
@@ -1165,7 +1179,8 @@ class Viewer(QWidget):
         self._live_on = bool(item.is_video)
         return self._live_on
 
-    def _switch_live_media(self, media: Path, seek: float = 0.0) -> None:
+    def _switch_live_media(self, media: Path, seek: float = 0.0,
+                           catching: bool = False) -> None:
         """Tell the resident engine to transcribe another file without reloading."""
         if not getattr(self, "_live_on", False) or getattr(self, "_live_log", None) is None:
             return
@@ -1175,18 +1190,24 @@ class Viewer(QWidget):
         self._live_log_pos = old_log_size
         payload = {
             "media": str(media),
-            "seek": max(0.0, float(seek)),
+            "seek": max(0.0, float(seek) - 0.5),
             "mode": "live",
         }
-        if not submit_live_engine_job(payload):
+        generation = submit_live_engine_job(payload)
+        if generation is None:
             return
 
         import time as _time
 
         self._live_started_at = _time.time()
         self._live_last_position = seek
+        self._live_generation = generation
+        self._live_catching = catching
         self._live_alive_cache = None
-        self._live_label.setText(t("viewer.live_caption_starting"))
+        self._live_label.setText(
+            t("viewer.live_caption_catching_status") if catching
+            else t("viewer.live_caption_starting")
+        )
         self._live_label.show()
         self._live_label.raise_()
         self._relayout()
@@ -1341,6 +1362,9 @@ class Viewer(QWidget):
         self._live_started_at = _time.time()
 
         self._live_rows = []
+        self._live_generation = 0
+        self._live_catching = False
+        self._live_log_pos = 0
         self._live_label.setText(t("viewer.live_caption_starting"))
         self._live_label.show()
         self._live_label.raise_()
@@ -1495,12 +1519,13 @@ class Viewer(QWidget):
             self._live_poll.setInterval(600)
             self._live_poll.timeout.connect(self._poll_live_log)
         self._live_poll.start()
-        self._live_log_pos = 0
+        self._live_srt_save_timer.start()
 
     def _stop_live_poll(self) -> None:
         tmr = getattr(self, "_live_poll", None)
         if tmr is not None:
             tmr.stop()
+        self._live_srt_save_timer.stop()
 
     def _poll_live_log(self) -> None:
         """读 log 新增行：JSON→显示；错误行→提示；启动宽限期外进程死了→复位。"""
@@ -1537,6 +1562,8 @@ class Viewer(QWidget):
                     obj = _json.loads(line)
                 except Exception:
                     continue
+                if int(obj.get("g", -1)) != getattr(self, "_live_generation", 0):
+                    continue
                 t0 = float(obj.get("t", 0))
                 t1 = float(obj.get("end", t0))
                 seg = obj.get("text", "").strip()
@@ -1565,11 +1592,20 @@ class Viewer(QWidget):
                 except Exception:
                     pos = 0.0
                 self._update_live_caption_for_position(pos)
-                # 播放位置远超已转写末尾（seek 跳转/转写未追上）→ 自动重转
                 rows = sorted(self._live_rows, key=lambda r: r[0])
-                if pos > rows[-1][0] + 30:
+                outside_rows = (
+                    not rows
+                    or pos < rows[0][0] - 0.2
+                    or pos > rows[-1][1] + 5.0
+                )
+                if outside_rows and getattr(self, "_live_catching", False):
+                    self._live_label.setText(t("viewer.live_caption_catching_status"))
+                    self._live_label.show()
+                    self._live_label.raise_()
+                # 播放位置远超已转写末尾（seek 跳转/转写未追上）→ 自动重转
+                if rows and pos > rows[-1][1] + 5.0:
                     self._show_toast(t("viewer.live_caption_catching"))
-                    self._restart_live_for_seek(int(pos))
+                    self._restart_live_for_seek(int(pos), catching=True)
             else:
                 _t0, _t1, seg, zh = self._live_rows[-1]
                 self._live_label.setText((seg + "\n" + zh).strip() if zh else seg)
@@ -1615,7 +1651,7 @@ class Viewer(QWidget):
             self._kill_live_proc()
             self._show_toast(t("viewer.live_caption_stopped"))
 
-    def _save_live_srt(self) -> None:
+    def _save_live_srt(self, announce: bool = True) -> None:
         from .config import settings as _settings
 
         if not self._live_rows:
@@ -1634,16 +1670,17 @@ class Viewer(QWidget):
         name = self.items[self.index].path.stem if self.items else "live"
         srt = out_dir / f"{name}.live.srt"
         _write_srt_file(srt, fixed)
-        self._show_toast(t("viewer.live_caption_saved").format(path=srt.name))
+        if announce:
+            self._show_toast(t("viewer.live_caption_saved").format(path=srt.name))
 
-    def _restart_live_for_seek(self, pos: int) -> None:
+    def _restart_live_for_seek(self, pos: int, catching: bool = True) -> None:
         """播放位置超出已转写范围 → 以 --seek pos 重启转写进程（追进度）。"""
         if not getattr(self, "_live_on", False):
             return
         media = self.items[self.index].path if 0 <= self.index < len(self.items) else None
         if media is None:
             return
-        self._switch_live_media(media, pos)
+        self._switch_live_media(media, pos, catching=catching)
 
     def _copy_current_image(self, item: MediaItem) -> None:
         ok = fileops.copy_image_to_clipboard(item.path)
@@ -1852,6 +1889,8 @@ class Viewer(QWidget):
                     self._kill_live_proc()
         # 仅关闭播放界面：不弹窗、默认不杀模型（进程独立保活，重开秒出）
         self._stop_live_poll()
+        if self._live_on or self._live_paused:
+            self._save_live_srt(announce=False)
         self._live_on = False
         self._live_label.hide()
         self._remember_position()
