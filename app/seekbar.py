@@ -104,6 +104,7 @@ class SeekBar(QWidget):
         self._duration = 0.0
         self._position = 0.0
         self._cache_end = 0.0
+        self._caption_ranges: list[tuple[float, float]] = []
         self._hover_x: int | None = None
         self._scrubbing = False
         self._enabled = True
@@ -129,6 +130,15 @@ class SeekBar(QWidget):
 
     def set_cache_end(self, seconds: float) -> None:
         self._cache_end = max(0.0, seconds)
+        self.update()
+
+    def set_caption_ranges(self, ranges: list[tuple[float, float]]) -> None:
+        """Caption coverage is shown as a subtle second track while hovered."""
+        self._caption_ranges = [
+            (max(0.0, float(start)), max(0.0, float(end)))
+            for start, end in ranges
+            if end > start
+        ]
         self.update()
 
     def set_active(self, active: bool) -> None:
@@ -168,6 +178,23 @@ class SeekBar(QWidget):
         base = QPainterPath()
         base.addRoundedRect(tr, radius, radius)
         p.fillPath(base, QColor(255, 255, 255, 46))
+
+        if hovered and self._caption_ranges:
+            caption_track = QRect(
+                tr.left(), max(0, tr.top() - 8), tr.width(), 2
+            )
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(255, 255, 255, 42))
+            p.drawRoundedRect(caption_track, 1, 1)
+            p.setBrush(QColor(theme.ACCENT_DIM))
+            for start, end in self._caption_ranges:
+                x0 = self._x_at_time(start, hovered)
+                x1 = self._x_at_time(end, hovered)
+                if x1 <= x0:
+                    continue
+                p.drawRoundedRect(
+                    QRect(caption_track.left(), caption_track.top(), max(1, x1 - x0), 2), 1, 1
+                )
 
         if not self._enabled or self._duration <= 0:
             return

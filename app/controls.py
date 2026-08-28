@@ -649,6 +649,9 @@ class ControlBar(QWidget):
     def set_cache_end(self, t: float) -> None:
         self.seek.set_cache_end(t)
 
+    def set_caption_ranges(self, ranges: list[tuple[float, float]]) -> None:
+        self.seek.set_caption_ranges(ranges)
+
     def set_speed(self, speed: float) -> None:
         self._speed = speed
         self.btn_speed.setText(f"{speed:g}×")
