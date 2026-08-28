@@ -20,6 +20,8 @@ from .config import DEFAULTS, resume, settings
 from .controls import SPEEDS, ControlBar, StageButton, TopBar
 from .i18n import t
 from .image_view import ImageView
+from .live_engine import matches as live_engine_matches
+from .live_engine import submit as submit_live_engine_job
 from .media import MediaItem, format_duration, item_for_path
 from .mpv_widget import MpvWidget
 from .playlist_panel import PlaylistPanel
@@ -1168,30 +1170,16 @@ class Viewer(QWidget):
         if not getattr(self, "_live_on", False) or getattr(self, "_live_log", None) is None:
             return
 
-        generation = getattr(self, "_live_media_generation", 0) + 1
-        self._live_media_generation = generation
         old_log_size = self._live_log.stat().st_size if self._live_log.is_file() else 0
         self._live_rows = []
         self._live_log_pos = old_log_size
         payload = {
             "media": str(media),
             "seek": max(0.0, float(seek)),
-            "generation": generation,
+            "mode": "live",
         }
-        control = Path(str(self._live_log) + ".control")
-        tmp = control.with_suffix(control.suffix + ".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(control)
-
-        state = {
-            "source": "audio",
-            "media": str(media),
-            "translate": str(settings["live_ollama_model"]),
-            "engine": 2,
-        }
-        (self._live_log.parent / "live-caption.state").write_text(
-            json.dumps(state, ensure_ascii=False), encoding="utf-8"
-        )
+        if not submit_live_engine_job(payload):
+            return
 
         import time as _time
 
@@ -1260,21 +1248,8 @@ class Viewer(QWidget):
                 return
             current_media = self.items[self.index].path
         tr_model = str(_settings["live_ollama_model"])
-        state_file = pipe / "live-caption.state"
-        wanted_state = {"source": source, "media": str(current_media or ""),
-                        "translate": tr_model, "engine": 2}
-
-        def _state_matches() -> bool:
-            try:
-                import json as _json
-
-                state = _json.loads(state_file.read_text(encoding="utf-8"))
-                return state == wanted_state
-            except Exception:
-                return False
-
         # 1) 常驻/复用：相同来源/媒体/翻译模型的活跃进程 → 直接开始监视，秒出
-        if self._check_live_alive() and _state_matches():
+        if source == "audio" and self._check_live_alive() and live_engine_matches():
             self._live_paused = False
             self._live_on = True
             self._live_rows = []
@@ -1338,7 +1313,6 @@ class Viewer(QWidget):
         self._live_log.unlink(missing_ok=True)
         self._live_pid.unlink(missing_ok=True)
         Path(str(self._live_log) + ".control").unlink(missing_ok=True)
-        state_file.write_text(json.dumps(wanted_state, ensure_ascii=False), encoding="utf-8")
         err_path = pipe / "live-caption.err"
         try:
             self._live_err_fh = open(err_path, "w", encoding="utf-8", errors="replace")
@@ -1576,8 +1550,12 @@ class Viewer(QWidget):
             elif line.startswith("# TRANSLATE_ERROR "):
                 error = line.split(" ", 2)[2].strip()
                 self._show_toast(t("viewer.live_caption_translation_error").format(error=error))
+            elif line.startswith("# MODEL_ERROR "):
+                self._live_on = False
+                self._live_label.hide()
+                self._show_toast(t("viewer.live_caption_error").format(err=line[14:134]))
             else:
-                if any(k in line for k in ("Traceback", "Error", "✗", "RuntimeError")):
+                if any(k in line for k in ("Traceback", "Error", "✗", "RuntimeError", "MODEL_ERROR")):
                     self._show_toast(t("viewer.live_caption_error").format(err=line[:120]))
         # 显示：音轨模式按播放位置选行；环路模式显示最新行
         if self._live_on and not self._live_paused and self._live_rows:

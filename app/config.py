@@ -58,6 +58,7 @@ DEFAULTS: dict[str, Any] = {
     "live_caption_lang": "en",         # 字幕识别语言: en/ja/ko/fr/de/es/auto
     "live_asr_model": "medium",        # 字幕识别模型档位: tiny/base/small/medium/large-v3
     "live_asr_dir": "",                # 字幕模型目录（空=HF 缓存下载；可指向本地 faster-whisper 模型文件夹）
+    "live_model_preload": True,        # 启动播放器时后台预载字幕模型（不阻塞界面）
     "archive_no_thumbs": False,        # 压缩包浏览时不加载缩略图（加快浏览）
     "filter_show_image": True,         # 筛选复选框：显示图片
     "filter_show_video": True,         # 筛选复选框：显示视频

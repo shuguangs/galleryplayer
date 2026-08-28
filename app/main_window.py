@@ -11,8 +11,6 @@ from PySide6.QtCore import (
     QDir,
     QModelIndex,
     QObject,
-    QProcess,
-    QProcessEnvironment,
     QRunnable,
     QThreadPool,
     QTimer,
@@ -207,7 +205,10 @@ class MainWindow(QMainWindow):
         self._scan_signals.batch.connect(self._on_scan_batch)
         self._pending_viewer_folder: Path | None = None
         self._quiet_scan = False  # startup playback: browser model updates are skipped
-        self._srt_proc: QProcess | None = None  # background SRT generation job
+        self._srt_timer = QTimer(self)  # monitors the resident engine's SRT job
+        self._srt_timer.setInterval(500)
+        self._srt_timer.timeout.connect(self._poll_srt_job)
+        self._srt_active = False
         self._archive_mode = False
         self._archive_back: Path | None = None
         self._archive_archive: Path | None = None
@@ -253,6 +254,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._startup_play)
         else:
             self._show_welcome()
+        if bool(settings["live_model_preload"]):
+            # Keep model loading off the UI thread and after first paint.
+            QTimer.singleShot(1200, self._preload_live_model)
 
     # ------------------------------------------------------------------ UI
 
@@ -822,22 +826,28 @@ class MainWindow(QMainWindow):
         self._leave_archive_state()
         self.set_folder(back)
 
+    def _preload_live_model(self) -> None:
+        """Silently warm the subtitle engine without blocking the browser UI."""
+        from . import live_engine
+
+        live_engine.start_preload()
+
     def _gen_srt_for(self, path: Path) -> None:
-        """后台生成 SRT 字幕（识别 + 翻译）：调 live-subtitle 管道，不打开播放器。
+        """后台生成 SRT 字幕：复用常驻模型，不打开播放器。
 
         弹出进度窗口实时显示识别/翻译日志；完成后可一键打开字幕文件夹。
         """
         from PySide6.QtWidgets import QDialog, QMessageBox, QPlainTextEdit, QVBoxLayout
 
-        from .config import find_subtitle_pipeline_dir, settings
+        from . import live_engine
+        from .config import settings
         from .runtime import APP_DIR
 
-        if getattr(self, "_srt_proc", None) is not None and self._srt_proc.state() != QProcess.NotRunning:
+        if self._srt_active:
             QMessageBox.information(self, t("main_window.gen_srt"), t("main_window.gen_srt_busy"))
             return
 
-        pipe = find_subtitle_pipeline_dir()
-        if pipe is None:
+        if live_engine.paths() is None:
             QMessageBox.warning(
                 self, t("main_window.gen_srt"), t("main_window.gen_srt_no_pipeline")
             )
@@ -845,9 +855,11 @@ class MainWindow(QMainWindow):
 
         # 保存位置：视频所在文件夹 / 播放器所在文件夹
         if settings["subtitle_save_dir"] == "player":
-            out_dir = str(APP_DIR)
+            srt = APP_DIR / f"{path.stem}.zh.srt"
         else:
-            out_dir = str(path.parent)
+            srt = path.with_suffix(".zh.srt")
+        job_log = live_engine.paths()[0].parent / "srt-generation.log"
+        job_log.unlink(missing_ok=True)
 
         # ---- 进度窗口 ----
         dlg = QDialog(self)
@@ -867,67 +879,84 @@ class MainWindow(QMainWindow):
         self._srt_status = QLabel(t("main_window.gen_srt_running"), dlg)
         lay.addWidget(self._srt_status)
         dlg.setModal(False)
+        dlg.rejected.connect(self._srt_dialog_closed)
         dlg.show()
         self._srt_dialog = dlg
 
-        proc = QProcess(self)
-        self._srt_proc = proc
-        env = QProcessEnvironment.systemEnvironment()
-        nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
-        env.insert("PATH", f"{nv / 'cublas' / 'bin'};{nv / 'cudnn' / 'bin'};{nv / 'cuda_nvrtc' / 'bin'};" + env.value("PATH"))
-        env.insert("HUGGINGFACE_HUB_CACHE", str(pipe / "models" / "hf" / "hub"))
-        proc.setProcessEnvironment(env)
-
-        script = pipe / "live_translate.py"
-        exe = pipe / ".venv" / "Scripts" / "python.exe"
-        proc.readyReadStandardOutput.connect(self._on_srt_stdout)
-        proc.readyReadStandardError.connect(self._on_srt_stdout)
-        proc.finished.connect(lambda code, _s: self._on_srt_done(code, path, proc, out_dir))
-        proc.start(str(exe), [str(script), str(path), "--out-dir", out_dir])
-
-    def _on_srt_stdout(self) -> None:
-        proc = self._srt_proc
-        if proc is None or not hasattr(self, "_srt_log"):
+        if not live_engine.start_preload():
+            self._finish_srt_job(srt, t("main_window.gen_srt_no_pipeline"))
             return
-        data = bytes(proc.readAllStandardOutput()) + bytes(proc.readAllStandardError())
-        if data:
-            self._srt_log.appendPlainText(data.decode("utf-8", "replace").strip())
+        submitted = live_engine.submit({
+            "mode": "srt",
+            "media": str(path),
+            "output": str(srt),
+            "log": str(job_log),
+            "seek": 0.0,
+        })
+        if not submitted:
+            self._finish_srt_job(srt, t("main_window.gen_srt_no_pipeline"))
+            return
 
-    def _on_srt_done(self, code: int, source: Path, proc: QProcess, out_dir: str) -> None:
-        from PySide6.QtWidgets import QDialogButtonBox, QPushButton
+        self._srt_active = True
+        self._srt_output = srt
+        self._srt_job_log = job_log
+        self._srt_job_log_pos = 0
+        self._srt_timer.start()
+
+    def _srt_dialog_closed(self) -> None:
+        """Closing the dialog stops monitoring; the background engine job continues."""
+        self._srt_timer.stop()
+        self._srt_active = False
+
+    def _poll_srt_job(self) -> None:
+        if not self._srt_active or not hasattr(self, "_srt_log"):
+            return
+        log_path = getattr(self, "_srt_job_log", None)
+        if log_path is None or not log_path.is_file():
+            return
+        try:
+            with open(log_path, "r", encoding="utf-8") as fp:
+                fp.seek(getattr(self, "_srt_job_log_pos", 0))
+                new = fp.read()
+                self._srt_job_log_pos = fp.tell()
+        except Exception:
+            return
+        if not new:
+            return
+        self._srt_log.appendPlainText(new.strip())
+        for line in new.splitlines():
+            line = line.strip()
+            if line.startswith("# SRT_READY "):
+                self._finish_srt_job(getattr(self, "_srt_output", Path()))
+                return
+            if line.startswith("# SRT_ERROR ") or line == "# SRT_CANCELLED":
+                error = line.removeprefix("# SRT_ERROR ").strip() or t("main_window.gen_srt_fail").format(error="")
+                self._finish_srt_job(getattr(self, "_srt_output", Path()), error)
+                return
+
+    def _finish_srt_job(self, srt: Path, error: str = "") -> None:
+        from PySide6.QtWidgets import QDialogButtonBox
 
         from .fileops import reveal
 
-        if settings["subtitle_save_dir"] == "player":
-            srt = Path(out_dir) / (source.stem + ".zh.srt")
-        else:
-            srt = source.with_suffix(".zh.srt")
+        self._srt_timer.stop()
+        self._srt_active = False
         dlg = getattr(self, "_srt_dialog", None)
-        if dlg is not None:
-            if code == 0 and srt.is_file():
-                self._srt_status.setText(t("main_window.gen_srt_done").format(path=srt.name))
-                self._srt_status.setStyleSheet("color:#5dc0f0;")
-                bb = QDialogButtonBox(dlg)
-                open_btn = bb.addButton(t("main_window.gen_srt_open_folder"), QDialogButtonBox.ActionRole)
-                close_btn = bb.addButton(QDialogButtonBox.Close)
-                open_btn.clicked.connect(lambda: reveal(srt))
-                close_btn.clicked.connect(dlg.accept)
-                lay = dlg.layout()
-                lay.addWidget(bb)
-            else:
-                try:
-                    err = bytes(proc.readAllStandardError()).decode("utf-8", "replace").strip()
-                except RuntimeError:
-                    err = ""
-                self._srt_status.setText(
-                    t("main_window.gen_srt_fail").format(error=(err or f"exit {code}")[:300])
-                )
-                self._srt_status.setStyleSheet("color:#e0653f;")
-                bb = QDialogButtonBox(dlg)
-                bb.addButton(QDialogButtonBox.Close).clicked.connect(dlg.accept)
-                lay = dlg.layout()
-                lay.addWidget(bb)
-            dlg.adjustSize()
+        if dlg is None:
+            return
+
+        bb = QDialogButtonBox(dlg)
+        if not error and srt.is_file():
+            self._srt_status.setText(t("main_window.gen_srt_done").format(path=srt.name))
+            self._srt_status.setStyleSheet("color:#5dc0f0;")
+            open_btn = bb.addButton(t("main_window.gen_srt_open_folder"), QDialogButtonBox.ActionRole)
+            open_btn.clicked.connect(lambda: reveal(srt))
+        else:
+            self._srt_status.setText(t("main_window.gen_srt_fail").format(error=error[:300]))
+            self._srt_status.setStyleSheet("color:#e0653f;")
+        bb.addButton(QDialogButtonBox.Close).clicked.connect(dlg.accept)
+        dlg.layout().addWidget(bb)
+        dlg.adjustSize()
 
     def _go_up(self) -> None:
         if self.folder and self.folder.parent != self.folder:

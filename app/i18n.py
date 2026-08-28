@@ -450,6 +450,8 @@ _TR: dict[str, dict[str, str]] = {
     "settings.subtitle_save_hint": {"zh": "实时字幕与右键生成的 .srt 都保存到所选位置。", "en": "Both live captions and right-click generated .srt files are saved to the chosen location."},
     "settings.live_resident_label": {"zh": "实时字幕常驻（停止后保留识别模型，重开秒出）", "en": "Keep live-caption model resident (stop keeps the process, restart is instant)"},
     "settings.live_resident_hint": {"zh": "常驻会持续占用约 1.5GB 显存；关闭后每次开启需重新加载模型（约 10-15 秒）。", "en": "Resident keeps ~1.5GB VRAM busy; when off, each start reloads the model (~10-15s)."},
+    "settings.live_model_preload_label": {"zh": "启动时后台预载字幕模型", "en": "Preload subtitle model in background at startup"},
+    "settings.live_model_preload_hint": {"zh": "界面不等待模型；预载在后台完成，实时字幕和生成 SRT 共用该模型。", "en": "The UI never waits; live captions and SRT generation share the preloaded model."},
     "settings.live_source_label": {"zh": "实时字幕来源", "en": "Caption source"},
     "settings.live_source_audio": {"zh": "文件音轨（推荐，本地播放）", "en": "File audio track (recommended)"},
     "settings.live_source_loopback": {"zh": "系统声音（其他程序/网页出声）", "en": "System sound (browser / other apps)"},
