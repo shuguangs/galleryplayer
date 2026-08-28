@@ -1836,6 +1836,33 @@ class MainWindow(QMainWindow):
             pass
 
     def closeEvent(self, e):
+        from PySide6.QtWidgets import QMessageBox
+
+        from . import live_engine
+
+        if live_engine.alive():
+            box = QMessageBox(self)
+            box.setWindowTitle(t("viewer.live_caption_quit_title"))
+            box.setText(t("viewer.live_caption_quit_text"))
+            box.setIcon(QMessageBox.Question)
+            keep_btn = box.addButton(
+                t("viewer.live_caption_quit_keep"), QMessageBox.AcceptRole
+            )
+            stop_btn = box.addButton(
+                t("viewer.live_caption_quit_close"), QMessageBox.DestructiveRole
+            )
+            cancel_btn = box.addButton(
+                t("viewer.live_caption_quit_cancel"), QMessageBox.RejectRole
+            )
+            box.setDefaultButton(keep_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn:
+                e.ignore()
+                return
+            if clicked is stop_btn:
+                live_engine.kill()
+
         self._save_state()
         self._save_scroll_positions()
         if self.viewer is not None:

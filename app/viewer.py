@@ -2009,25 +2009,8 @@ class Viewer(QWidget):
         super().changeEvent(e)
 
     def closeEvent(self, e):
-        # 软件退出（shutdown 流程）且字幕模型在运行 → 询问是否关闭（弹窗）
-        if self._shutdown and (self._live_on or self._live_paused):
-            from PySide6.QtWidgets import QMessageBox
-
-            from .config import settings as _settings
-
-            if bool(_settings["live_caption_resident"]):
-                box = QMessageBox(self)
-                box.setWindowTitle(t("viewer.live_caption_quit_title"))
-                box.setText(t("viewer.live_caption_quit_text"))
-                box.setIcon(QMessageBox.Question)
-                close_btn = box.addButton(
-                    t("viewer.live_caption_quit_close"), QMessageBox.DestructiveRole)
-                box.addButton(QMessageBox.Cancel)
-                box.setDefaultButton(box.buttons()[0])
-                box.exec()
-                if box.clickedButton() is close_btn:
-                    self._kill_live_proc()
-        # 仅关闭播放界面：不弹窗、默认不杀模型（进程独立保活，重开秒出）
+        # Closing the viewer only hides this window. MainWindow asks about the
+        # resident engine when the whole application exits.
         self._stop_live_poll()
         if self._live_on or self._live_paused:
             self._save_live_srt(announce=False)
