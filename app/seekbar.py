@@ -216,7 +216,12 @@ class SeekBar(QWidget):
                 x1 = self._x_at_time(end, hovered)
                 if x1 <= x0:
                     continue
-                seg = QRect(tr.left(), tr.top(), min(tr.width(), x1 - tr.left()), tr.height())
+                # 每段从自己的起点画起：原实现固定从轨道左端画到 x1，跳转转写后
+                # 的第二段会把中间没转写的整块空洞也涂成青色（控制器刻意保留的
+                # 空洞语义被抹平，用户以为整片都已转写）
+                left = max(tr.left(), x0)
+                right = min(tr.right() + 1, x1)
+                seg = QRect(left, tr.top(), max(1, right - left), tr.height())
                 cap_path.addRoundedRect(seg, radius, radius)
             if not cap_path.isEmpty():
                 p.fillPath(cap_path, QColor(72, 209, 183, 185))

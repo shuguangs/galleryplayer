@@ -30,12 +30,27 @@ LLAMA_PORT = 8020
 
 SYSTEM_PROMPT = (
     "你是资深影视字幕译者，把台词翻成{target}。要求：\n"
-    "1. 说人话——用中文影视字幕的口语腔，别留直译痕迹和英式/日式语序；\n"
-    "2. 习语按中文习惯意译（如 call it 在急救语境是「宣布死亡」，不是「叫它」）；\n"
+    "1. 说人话——{style}；\n"
+    "2. 习语按{target}的习惯意译（如 call it 在急救语境是「宣布死亡」，不是「叫它」）；\n"
     "3. 保留人名、数字、专业术语；语气词、反讽、粗话都要译出来，不要净化；\n"
     "4. 一行台词一行译文，长度接近原文；\n"
     "5. 只输出译文，不要解释、不要注音、不要重复原文。"
 )
+# 目标语言不是中文时，第 1 条不能再要求"中文口语腔/别留英式语序"——那是
+# 与输出语言直接矛盾的指令，会诱导模型输出中文或中式英文
+STYLE_HINTS = {
+    "zh": "用中文影视字幕的口语腔，别留直译痕迹和英式/日式语序",
+    "zh-Hant": "用中文影视字幕的口语腔，别留直译痕迹和英式/日式语序",
+}
+STYLE_DEFAULT = "用目标语言影视字幕的口语腔，别留逐字直译的痕迹"
+
+
+def system_prompt(target: str) -> str:
+    """按目标语言组装系统提示（target 为 zh/zh-Hant/en 等设置值）。"""
+    name = TARGET_NAMES.get(target, target)
+    return SYSTEM_PROMPT.format(
+        target=name, style=STYLE_HINTS.get(str(target), STYLE_DEFAULT)
+    )
 
 # 各家模型泄漏的控制 token（aya 的 turn marker、HY-MT2 的 hy_ 系列等）
 JUNK_TOKENS = (
@@ -81,7 +96,6 @@ class Translator:
         self._recent.clear()
 
     def _payload(self, text: str) -> bytes:
-        target = TARGET_NAMES.get(self.target, self.target)
         user = text
         if self.context_lines and self._recent:
             prev = "\n".join(self._recent[-self.context_lines:])
@@ -93,7 +107,7 @@ class Translator:
             "options": {"temperature": 0.7, "top_p": 0.6, "top_k": 20,
                         "repeat_penalty": 1.05},
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT.format(target=target)},
+                {"role": "system", "content": system_prompt(self.target)},
                 {"role": "user", "content": user},
             ],
         }
@@ -195,7 +209,6 @@ class LlamaServerTranslator:
         text = (text or "").strip()
         if not text:
             return ""
-        target = TARGET_NAMES.get(self.target, self.target)
         user = text
         if self.context_lines and self._recent:
             prev = chr(10).join(self._recent[-self.context_lines:])
@@ -204,7 +217,7 @@ class LlamaServerTranslator:
             user = header
         body = json.dumps({
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT.format(target=target)},
+                {"role": "system", "content": system_prompt(self.target)},
                 {"role": "user", "content": user},
             ],
             "temperature": 0.7, "top_p": 1.0, "top_k": 0,

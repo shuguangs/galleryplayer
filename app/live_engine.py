@@ -139,6 +139,14 @@ def effective_model() -> str:
     return model
 
 
+def invalidate_model_cache() -> None:
+    """安装/删除模型后调用：缓存键不含文件系统状态，装完不作废会一直返回
+    安装前的回退档位（装好 qwen 后不重启播放器仍按 whisper 起，直接 MODEL_ERROR）。
+    """
+    _em_cache["key"] = None
+    _em_cache["value"] = None
+
+
 def vram_footprint_gb(include_translate: bool = True) -> float:
     """当前引擎组合的显存占用估计（GB）。
 
@@ -209,6 +217,31 @@ def model_dir_arg() -> str:
     return str(settings["live_asr_dir"] or "").strip()
 
 
+def pid_is_transcribe() -> bool:
+    """pid 文件里的进程是不是常驻转写引擎（live_transcribe）。
+
+    环路模式的 live_capture.py 写同一个 pid 文件但**不读 control、不写 .state**，
+    而 .state 可能是上次音轨引擎留下的陈旧数据——只看 alive()+matches() 会把
+    环路进程当成"引擎已就绪"，提交的 SRT 任务永远没人处理（进度窗永久挂起）。
+    """
+    found = paths()
+    if found is None:
+        return False
+    _log, pid_path, _control, _state = found
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    try:
+        import psutil
+    except ImportError:
+        return True  # 判不了就别打扰活着的引擎（psutil 是 requirements 里的硬依赖）
+    try:
+        return "live_transcribe" in " ".join(psutil.Process(pid).cmdline())
+    except Exception:
+        return False
+
+
 def matches() -> bool:
     current = state()
     return (
@@ -226,33 +259,50 @@ def kill() -> None:
     found = paths()
     if found is None:
         return
-    _log, pid_path, control, _state = found
+    _log, pid_path, control, state_path = found
     try:
         pid = int(pid_path.read_text(encoding="utf-8").strip())
+        killed = False
         try:
             import psutil
 
             process = psutil.Process(pid)
+            # 子进程一并收：SRT 用 HY-MT2 翻译时引擎会拉起 llama-server.exe，
+            # 只终止引擎会留下占着 ~5GB 显存和 8020 端口的孤儿（TerminateProcess
+            # 不给引擎跑 atexit 的机会，靠引擎自己收尾收不掉）
+            children = process.children(recursive=True)
             process.terminate()
             try:
                 process.wait(timeout=3)
             except psutil.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=3)
-            return
+            for child in children:
+                try:
+                    child.kill()
+                except Exception:
+                    pass
+            killed = True
         except ImportError:
             pass
         except Exception:
             pass
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/F"],
-            capture_output=True, timeout=5,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
+        if not killed:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
     except Exception:
         pass
     pid_path.unlink(missing_ok=True)
     control.unlink(missing_ok=True)
+    # .state 也要清：留着会让下一次 matches() 拿陈旧配置判"可复用"，把环路
+    # 进程或已死引擎当成就绪的转写引擎
+    try:
+        state_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def start_preload() -> bool:
@@ -261,17 +311,22 @@ def start_preload() -> bool:
     pipe = find_subtitle_pipeline_dir()
     if pipe is None:
         return False
-    if alive() and matches():
+    if alive() and matches() and pid_is_transcribe():
         return True
     if alive():
-        # A just-launched engine may not have written its state file yet.
-        if not state():
-            return True
-        # 冷却期内不动刚拉起的引擎（即使配置不匹配——那多半是设置刚变更，
-        # 让下一次调用再重建，也别在它加载模型的 20-60s 里反复杀）
-        if time.time() - _last_spawn_at < 30:
-            return True
-        kill()
+        # 环路进程占着 pid 文件时不能"等下一次"：它永远不会读 control，
+        # 必须就地换成真正的转写引擎
+        if not pid_is_transcribe():
+            kill()
+        else:
+            # A just-launched engine may not have written its state file yet.
+            if not state():
+                return True
+            # 冷却期内不动刚拉起的引擎（即使配置不匹配——那多半是设置刚变更，
+            # 让下一次调用再重建，也别在它加载模型的 20-60s 里反复杀）
+            if time.time() - _last_spawn_at < 30:
+                return True
+            kill()
 
     found = paths()
     if found is None:

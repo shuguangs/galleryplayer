@@ -3,7 +3,29 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from translate_service import clean_output, write_srt_file
+from translate_service import clean_output, system_prompt, write_srt_file
+
+
+class SystemPromptTests(unittest.TestCase):
+    """提示词第 1 条要求必须跟着目标语言走（英文目标不能再要求"中文口语腔"）。"""
+
+    def test_chinese_targets_keep_chinese_style(self):
+        for target in ("zh", "zh-Hant"):
+            prompt = system_prompt(target)
+            self.assertIn("中文影视字幕的口语腔", prompt)
+        self.assertIn("简体中文", system_prompt("zh"))
+        self.assertIn("繁体中文", system_prompt("zh-Hant"))
+
+    def test_english_target_drops_chinese_style(self):
+        prompt = system_prompt("en")
+        self.assertIn("English", prompt)
+        self.assertNotIn("中文影视字幕的口语腔", prompt)
+        self.assertNotIn("英式/日式语序", prompt)
+
+    def test_unknown_target_falls_back_to_raw_name(self):
+        prompt = system_prompt("ja")
+        self.assertIn("ja", prompt)
+        self.assertNotIn("{", prompt)  # 占位符全部填上，没有漏的 format 键
 
 
 class CleanOutputTests(unittest.TestCase):

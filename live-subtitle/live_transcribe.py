@@ -282,7 +282,23 @@ def main() -> None:
                             if key in entry:
                                 entry[key] = Path(str(entry[key]))
                         with pending_lock:
+                            dropped = pending_job
                             pending_job = entry
+                        # 单槽被顶掉的 SRT 任务从未进主循环，它的 job log 还
+                        # 不存在——播放器的进度窗只认 job log 里的终止标记，
+                        # 漏写会让对话框与 srt_busy 永久挂起（"生成中"不动）。
+                        # 这里直接写文件而不用 _job_status：模型加载期间它还
+                        # 没定义（本线程比它先跑起来）
+                        if (dropped is not None and dropped.get("mode") == "srt"
+                                and dropped.get("log")):
+                            try:
+                                dropped["log"].parent.mkdir(parents=True,
+                                                            exist_ok=True)
+                                with open(dropped["log"], "a",
+                                          encoding="utf-8") as fp:
+                                    fp.write("# SRT_CANCELLED\n")
+                            except Exception:
+                                pass
                         cancel_generation = generation
                 except Exception:
                     pass
@@ -325,22 +341,26 @@ def main() -> None:
                                      device=args.device, compute_type="int8")
         except Exception as exc:  # noqa: BLE001
             status(f"MODEL_ERROR {exc}")
-            with pending_lock:
-                job = pending_job
-                pending_job = None
-            if job and job.get("mode") == "srt" and job.get("log"):
-                try:
-                    job["log"].parent.mkdir(parents=True, exist_ok=True)
-                    with open(job["log"], "a", encoding="utf-8") as fp:
-                        fp.write(f"# SRT_ERROR 模型加载失败: {exc}\n")
-                except Exception:
-                    pass
             raise
         status(f"模型就绪 {time.perf_counter() - t0:.0f}s")
 
     try:
         _load_model()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 启动期首次加载失败，进程随即退出：此刻 pending 里可能已排着一个 SRT
+        # 任务（播放器 preload 后立刻提交），替它写终止标记否则进度窗永久挂起。
+        # 运行期的重载失败绝不能碰 pending——那是刚到达的下一个任务，吞掉它
+        # 会让补洞/重启调度整体停摆
+        with pending_lock:
+            job = pending_job
+            pending_job = None
+        if job and job.get("mode") == "srt" and job.get("log"):
+            try:
+                job["log"].parent.mkdir(parents=True, exist_ok=True)
+                with open(job["log"], "a", encoding="utf-8") as fp:
+                    fp.write(f"# SRT_ERROR 模型加载失败: {exc}\n")
+            except Exception:
+                pass
         sys.exit(1)
 
     def _ensure_model() -> None:
@@ -370,6 +390,10 @@ def main() -> None:
 
     translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang)
                   if args.translate else None)
+    # 降级只在"本任务"内生效：translator 置 None 后靠这个原始引用在下一个
+    # 任务（新代次/新 SRT）恢复。原实现是终身降级——Ollama 抖动一次，此后
+    # 几小时内所有实时字幕与 SRT 都静默变纯原文，且 SRT 仍报"生成成功"
+    translator_base = translator
     # 有界翻译队列：Ollama 卡顿时旧实现无限积压（内存膨胀 + 拖住 join）；
     # 满了丢最旧一条的译文（字幕跟手优先，丢的只是后补的翻译）
     _translate_q: queue.Queue = queue.Queue(maxsize=64)
@@ -377,6 +401,21 @@ def main() -> None:
     # （seek≈0 且文件未变）时直接复用，省掉整片重复转写。缓存只存一行一句
     # 的 (start, end, text)，体量可忽略；文件被修改/换片即失效
     _prefetch: dict = {"key": None, "rows": []}
+
+    def _drain_translations(timeout: float = 90.0) -> None:
+        """收尾前等译文写完，但有上限。
+
+        裸 join() 会把引擎主循环永久挂住：Ollama "能连上但不回"时单句就要等
+        120s×2 次重试，队列里最多 64 条——期间换片/seek/新任务全不响应，而心跳
+        仍在 touch log，播放器判"存活"永不重启。超时后未译完的行留在队列里，
+        由 worker 继续写（同代次的更新行播放器仍会原地补上）。
+        """
+        deadline = time.monotonic() + timeout
+        while getattr(_translate_q, "unfinished_tasks", 0) > 0:
+            if time.monotonic() >= deadline:
+                status("翻译收尾超时，先结束任务（剩余译文稍后补写）")
+                return
+            time.sleep(0.05)
 
     def _translate_with_retry(trans, text: str, note) -> tuple[str, bool]:
         """翻译一句，异常重试一次。返回 (译文, 是否最终失败)。
@@ -395,6 +434,7 @@ def main() -> None:
         nonlocal translator
         cur_gen = None
         fail_streak = 0
+        degrade_count = 0
         while True:
             item = _translate_q.get()
             if item is None:
@@ -404,6 +444,14 @@ def main() -> None:
                 if cancel_generation > gen:
                     continue
                 if gen != cur_gen:
+                    # 新任务：上一任务的降级不带过来（Ollama 恢复后自动重启
+                    # 翻译）。连续降级 3 次后才彻底放弃，避免服务长期不可用时
+                    # 每个任务都白等重试
+                    if (translator is None and translator_base is not None
+                            and degrade_count < 3):
+                        translator = translator_base
+                        fail_streak = 0
+                        status("翻译恢复重试（新任务）")
                     if translator is not None:
                         translator.reset()  # 换片/seek：上一段剧情不带过来
                     cur_gen = gen
@@ -413,8 +461,9 @@ def main() -> None:
                     if failed:
                         fail_streak += 1
                         if fail_streak >= 5:
-                            status("翻译连续失败，实时字幕降级为仅原文")
+                            status("TRANSLATE_ERROR 连续失败，本任务降级为仅原文")
                             translator = None
+                            degrade_count += 1
                     else:
                         fail_streak = 0
                 line = json.dumps({
@@ -428,6 +477,13 @@ def main() -> None:
                     log_fp.write(line + "\n")
                     log_fp.flush()
                 print(line, flush=True)
+            except Exception as exc:  # noqa: BLE001
+                # 线程死了没人再 task_done，_translate_q.join() 会永久卡住收尾
+                # （心跳仍在 touch log，播放器判"存活"，字幕彻底静默）
+                try:
+                    status(f"✗ 翻译线程异常（本行跳过）: {str(exc)[:120]}")
+                except Exception:
+                    pass
             finally:
                 _translate_q.task_done()
 
@@ -604,7 +660,9 @@ def main() -> None:
         # SRT 翻译模型按任务指定（设置里与实时字幕分开）：hy-mt2-30b 走
         # llama.cpp（按需启动、用完即关）；live=跟随实时字幕的 Ollama 模型
         job_model = str(job.get("translate_model") or "live")
-        job_translator = translator
+        # translator 可能被上一个任务的连续失败降级成 None——SRT 不能跟着
+        # 静默交付纯原文（还报 SRT_READY"成功"），用原始引用重试
+        job_translator = translator if translator is not None else translator_base
         llama_used = False
         try:
             if job_model == "hy-mt2-30b":
@@ -658,6 +716,11 @@ def main() -> None:
 
                 stop_llama_server()
 
+        if not translated_rows:
+            # 一句都没识别出来（纯音乐/全静音/全被 VAD 过滤）：写 0 字节文件并
+            # 报 SRT_READY 会让播放器弹"已生成"，用户拿到空字幕
+            _job_status(job, "SRT_ERROR 未识别到语音，未生成字幕")
+            return
         _write_srt(output, translated_rows, str(job.get("format", "srt")))
         _job_status(job, f"SRT_READY {output}")
 
@@ -682,7 +745,8 @@ def main() -> None:
         # "更新行"（同 g/t/end/text，zh=译文）——转写不再被 Ollama 延迟拖住，
         # 播放器端按 (g,t,end,text) 匹配原地补译文
 
-        def _emit(piece_start: float, piece_end: float, piece_text: str) -> None:
+        def _emit(piece_start: float, piece_end: float, piece_text: str,
+                  block: bool = False) -> None:
             line = json.dumps({
                 "g": generation,
                 "t": round(piece_start, 2),
@@ -696,6 +760,17 @@ def main() -> None:
             print(line, flush=True)
             if translator is not None:
                 item = (generation, piece_start, piece_end, piece_text)
+                if block:
+                    # 缓存回放（预转写命中）是紧循环：整片几百行几十毫秒内灌完，
+                    # drop-oldest 会把除最后 64 条以外的译文全部丢掉。这里按翻译
+                    # 速度回压，代次前进即放弃
+                    while True:
+                        try:
+                            _translate_q.put(item, timeout=0.5)
+                            return
+                        except queue.Full:
+                            if cancel_generation > generation:
+                                return
                 try:
                     _translate_q.put_nowait(item)
                 except queue.Full:
@@ -727,9 +802,10 @@ def main() -> None:
                         if cancel_generation > generation:
                             status("切换媒体，中断当前转写 ...")
                             return
-                        _emit(seek + piece_start, seek + piece_end, piece_text)
+                        _emit(seek + piece_start, seek + piece_end, piece_text,
+                              block=True)
                     if translator is not None:
-                        _translate_q.join()  # 尾部译文随任务收尾写完，不留给下一代次
+                        _drain_translations()  # 尾部译文随任务收尾写完，不留给下一代次
                     status(f"TASK_DONE {generation}")
                     return
 
@@ -746,7 +822,7 @@ def main() -> None:
                 if piece_text:
                     _emit(seek + piece_start, seek + piece_end, piece_text)
             if translator is not None:
-                _translate_q.join()  # 同 whisper 路径：收尾前等译文全部写出
+                _drain_translations()  # 同 whisper 路径：收尾前等译文全部写出
             status(f"TASK_DONE {generation}")
             return
 
@@ -780,7 +856,7 @@ def main() -> None:
             for piece_start, piece_end, piece_text in pieces:
                 _emit(offset + piece_start, offset + piece_end, piece_text)
         if translator is not None:
-            _translate_q.join()  # 等译文全部写出
+            _drain_translations()  # 等译文全部写出
         status(f"TASK_DONE {generation}")
 
     initial_job: dict | None = None

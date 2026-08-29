@@ -239,6 +239,7 @@ _TR: dict[str, dict[str, str]] = {
     "main_window.restore_playlist": {"zh": "上次未正常退出，检测到 {n} 个文件的播放列表。\n\n要恢复继续播放吗？", "en": "The player did not exit cleanly last time; a playlist of {n} files was saved.\n\nRestore and resume it?"},
     "main_window.title_with_folder": {"zh": "{folder} — 媒体播放器", "en": "{folder} — Media Player"},
     "main_window.no_folder": {"zh": "未打开文件夹", "en": "No folder open"},
+    "main_window.unsupported_file": {"zh": "不支持的文件类型：{name}", "en": "Unsupported file type: {name}"},
     "main_window.open_folder": {"zh": "  打开文件夹", "en": "  Open Folder"},
     "main_window.choose_folder_tip": {"zh": "选择文件夹  (Ctrl+O)", "en": "Choose folder  (Ctrl+O)"},
     "main_window.open_archive": {"zh": "打开压缩包", "en": "Open Archive"},

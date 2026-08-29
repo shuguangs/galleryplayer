@@ -111,9 +111,16 @@ def _list_zip(path: Path, password: str | None) -> tuple[list[ArchiveEntry], str
         with zipfile.ZipFile(path) as zf:
             if password:
                 zf.setpassword(password.encode("utf-8"))
+            infos = zf.infolist()
+            # zip 的中央目录不用密码就能列出来，加密要等解压成员时才报错——不在
+            # 这里先问一次，进包后每个成员都会弹一次密码框（N 个文件弹 N 次，
+            # 点取消也只跳过当前成员）。7z/rar 分支本就有同样的提前检查
+            if password is None and any(
+                    info.flag_bits & 0x1 for info in infos if not info.is_dir()):
+                return [], "password"
             entries = [
                 ArchiveEntry(info.filename, info.file_size, info.is_dir())
-                for info in zf.infolist()
+                for info in infos
             ]
         return entries, None
     except RuntimeError as exc:

@@ -1069,19 +1069,38 @@ class SettingsDialog(QDialog):
         """
         import os
         import shutil
+        import subprocess
         import sys
 
         if not getattr(sys, "frozen", False):
             return sys.executable, []
-        for cand in (shutil.which("python"), shutil.which("python3"),
-                     shutil.which("py")):
-            if cand and os.path.basename(cand).lower().startswith(("python", "py")):
-                return cand, ["-3"] if cand.lower().endswith("py.exe") else []
+        cands = [c for c in (shutil.which("python"), shutil.which("python3"),
+                             shutil.which("py")) if c]
+        # Win10 1903+ 默认在 WindowsApps 放 python.exe 别名 stub：没装 Python 的
+        # 机器上 which 同样命中它，启动只会弹 Microsoft Store 再秒退（界面只显示
+        # "安装失败"，新加的"未找到 Python"指引反而永远走不到）。真解释器优先，
+        # stub 排到最后，并逐个用 -c 验一次是不是真能跑
+        cands.sort(key=lambda c: "\\windowsapps\\" in c.lower())
+        for cand in cands:
+            if not os.path.basename(cand).lower().startswith(("python", "py")):
+                continue
+            prefix = ["-3"] if cand.lower().endswith("py.exe") else []
+            try:
+                done = subprocess.run(
+                    [cand, *prefix, "-c", "import sys"],
+                    capture_output=True, timeout=6,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:  # noqa: BLE001 - 超时/无法执行都算不可用
+                continue
+            if done.returncode == 0:
+                return cand, prefix
         return None, []
 
     def _start_install(self) -> None:
         from PySide6.QtCore import QProcess
 
+        from . import live_engine
         from .config import find_subtitle_pipeline_dir
 
         if getattr(self, "_install_proc", None) is not None \
@@ -1119,6 +1138,11 @@ class SettingsDialog(QDialog):
                 t("settings.install_done") if ok else t("settings.install_failed")
             )
             self.install_status.setStyleSheet("color:#5dc0f0;" if ok else "color:#e0653f;")
+            if ok:
+                # 装完必须作废 effective_model 缓存：它按设置项缓存、不含文件系统
+                # 状态，不清会一直返回安装前的回退档位（刚装好的 qwen 用不上，
+                # 引擎按 whisper 起直接 MODEL_ERROR）
+                live_engine.invalidate_model_cache()
             self._refresh_subtitle_status()
 
         proc.readyReadStandardOutput.connect(on_stdout)
@@ -1130,6 +1154,7 @@ class SettingsDialog(QDialog):
             self.install_status.setText(
                 t("settings.install_no_python"))
             self.install_status.setStyleSheet("color:#e0653f;")
+            self.btn_install.setEnabled(True)  # 进程没起来，on_finished 不会来
             return
         args = [*prefix, str(script), "--dir", str(pipe),
                 "--model", str(self.install_model.currentData() or "qwen"),
@@ -1186,6 +1211,10 @@ class SettingsDialog(QDialog):
         if exe is None:
             self.install_status.setText(t("settings.install_no_python"))
             self.install_status.setStyleSheet("color:#e0653f;")
+            # 进程没起来 → on_finished 永不触发，按钮会永久灰掉（文案却写着
+            # "装好后再点一次安装"，实际必须关掉设置窗重开）
+            self.btn_install.setEnabled(True)
+            self.btn_install_llama.setEnabled(True)
             return
         proc.start(exe, [*prefix, str(script), "--dir", str(pipe), "--llamacpp-only"])
 

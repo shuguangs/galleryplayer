@@ -589,14 +589,18 @@ class ControlBar(QWidget):
                 n += 1
         return total + self._row.spacing() * max(0, n - 1)
 
+    def _flex_pool(self) -> list:
+        """当前媒体类型下可折叠的控件（图片模式剔除全套视频按钮）。"""
+        return [(w, top) for w, top in self._flex
+                if self._is_video or w not in self.vid_widgets]
+
     def _update_flex(self) -> None:
         """Fold the least-used video buttons into the "more" menu when narrow."""
         if not hasattr(self, "_flex"):
             return
         # 图片模式下视频按钮必须保持隐藏：这里原先无条件 re-show，会把
         # set_media_kind(False) 刚藏掉的全套视频控件在宽窗口下全部复活
-        pool = [(w, top) for w, top in self._flex
-                if self._is_video or w not in self.vid_widgets]
+        pool = self._flex_pool()
         # start fully expanded
         for w, _ in pool:
             w.show()
@@ -615,7 +619,10 @@ class ControlBar(QWidget):
 
     def _rebuild_more_menu(self) -> None:
         self._more_menu.clear()
-        for w, label in self._flex:
+        # 与 _update_flex 用同一个池：直接遍历 _flex 时，图片模式下被
+        # set_media_kind(False) 隐藏的视频按钮会被当成"折叠项"塞进菜单
+        # （看图片时窄窗口的"更多"里冒出倍速/字幕/音轨/截图等无效项）
+        for w, label in self._flex_pool():
             if not w.isHidden():
                 continue
             if w.menu() is not None:

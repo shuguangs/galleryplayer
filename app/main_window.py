@@ -686,14 +686,6 @@ class MainWindow(QMainWindow):
 
         from .archive import cache_dir, list_archive
 
-        if self._archive_mode:
-            return
-        # 作废进行中的目录扫描：否则后台 done 批次落地时会用文件夹内容
-        # 覆盖压缩包视图（token 匹配 + 无 stop_check 双重失效）
-        self._scan_token += 1
-        self._streaming = False
-        self._stream_items = []
-        self._stream_timer.stop()
         password: str | None = None
         entries, err = list_archive(path, None)
         while err == "password":
@@ -718,7 +710,20 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, t("archive.title_suffix"), t("archive.empty"))
             return
 
-        self._archive_back = self.folder
+        # 已在浏览另一个压缩包：换成新包（原实现直接 return，包中包/拖入第二个
+        # 压缩包时静默无反应），但"返回"仍回到最初进包前的那个文件夹
+        back = self._archive_back if self._archive_mode else self.folder
+        if self._archive_mode:
+            self._leave_archive_state()
+        # 作废进行中的目录扫描：否则后台 done 批次落地时会用文件夹内容覆盖压缩
+        # 包视图（token 匹配 + 无 stop_check 双重失效）。必须放在上面所有校验
+        # 之后——密码取消/损坏包/包内无媒体时提前 return，扫描已被作废却没人
+        # 恢复，文件列表会永久停在半截结果
+        self._scan_token += 1
+        self._streaming = False
+        self._stream_items = []
+        self._stream_timer.stop()
+        self._archive_back = back
         self._archive_archive = path
         self._archive_password = password
         self._archive_entries = entries
@@ -780,6 +785,7 @@ class MainWindow(QMainWindow):
         prefix = rel_dir + "/" if rel_dir else ""
         items: list[media.MediaItem] = []
         self.status_count.setText(t("archive.extracting"))
+        prompted = False
         for e in self._archive_entries:
             if not e.is_media:
                 continue
@@ -795,6 +801,9 @@ class MainWindow(QMainWindow):
                 )
             except RuntimeError as exc:
                 if str(exc) == "password":
+                    if prompted:
+                        continue  # 只问一次：取消/输错后不再逐个成员弹密码框
+                    prompted = True
                     pwd, ok = QInputDialog.getText(
                         self, t("archive.password_title"), t("archive.password_prompt"),
                         QLineEdit.Password,
@@ -851,7 +860,16 @@ class MainWindow(QMainWindow):
             return
         back = self._archive_back
         self._leave_archive_state()
-        self.set_folder(back)
+        if back is None:
+            # 没有"来处"（启动后直接打开压缩包）：不能只切树，网格里还留着包内
+            # 解压出来的文件、标题也还是压缩包名
+            self.model.set_items([])
+            self.all_items = []
+            self._show_welcome()
+            return
+        # force：back 常常就等于 self.folder（进包时 folder 没变），不强制会被
+        # set_folder 的"同一目录直接 return"挡掉，网格仍显示包内文件
+        self.set_folder(back, force=True)
 
     def _preload_live_model(self) -> None:
         """Silently warm the subtitle engine without blocking the browser UI."""
@@ -1185,6 +1203,11 @@ class MainWindow(QMainWindow):
         if getattr(self, "_batch_active_gen", 0):
             live_engine.submit({"mode": "cancel", "media": "", "output": "",
                                 "log": "", "seek": 0.0})
+        # 代次也必须归零：懒提交的第一步是 `if not active_gen`，留着上一批的
+        # 陈旧代次会让下一次批量永远停在 0/N（一个任务都不提交），而
+        # srt_busy 已被置 True，实时字幕跟着被永久互斥
+        self._batch_active_gen = 0
+        self._batch_srt_timer.stop()
         live_engine.srt_busy = False
         self._batch_srt_jobs = []  # 清队列，否则下次批量永远被"已有任务"守卫拒绝
         self._batch_srt_status.setText(t("main_window.gen_srt_cancelled"))
@@ -1256,6 +1279,7 @@ class MainWindow(QMainWindow):
         if done == total:
             self._batch_srt_timer.stop()
             live_engine.srt_busy = False
+            self._batch_active_gen = 0
             self._batch_srt_jobs = []  # 同上：清队列允许下一次批量
             btn = getattr(self, "_batch_cancel_btn", None)
             if btn is not None:
@@ -1303,6 +1327,13 @@ class MainWindow(QMainWindow):
             self._enter_archive(target)
             return
         item = media.item_for_path(target)
+        if item is None:
+            # 「打开方式」可以指到任意文件（txt/mp3 等非图片非视频）：不校验会在
+            # open_playlist 里 AttributeError，主窗口停在空白页且毫无提示
+            self._show_welcome()
+            self.status_path.setText(
+                t("main_window.unsupported_file").format(name=target.name))
+            return
         self.ensure_viewer().open_playlist([item], 0)
         # quiet: the player window is already up; scanning the folder in the
         # background must not switch the UI to (and build) the browser.
@@ -1832,6 +1863,14 @@ class MainWindow(QMainWindow):
             and self.viewer.isVisible()
         ):
             items = self.all_items if self._quiet_scan else self.model.items
+            if self._quiet_scan:
+                # 安静扫描（命令行/双击打开）时浏览器的 model 还没建，all_items
+                # 是扫描顺序：按当前排序规则排一次，播放器与面板的顺序才与
+                # 浏览器一致（面板不再自己重排，否则行号与 viewer.items 错位）
+                items = media.sort_items(
+                    items, self.sort_combo.currentData() or "name",
+                    self.btn_desc.isChecked(), self._random_seed,
+                )
             row = next(
                 (i for i, it in enumerate(items) if it.path == startup),
                 -1,

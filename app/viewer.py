@@ -444,14 +444,23 @@ class Viewer(QWidget):
         with a single file: the current playback keeps running, only the panel
         list and navigation states are updated.
         """
+        target = items[index].path if 0 <= index < len(items) else None
         items = [i for i in items if not getattr(i, "is_archive", False)]
         if not items:
             return
         self.items = list(items)
-        if self.index >= len(self.items):
-            self.index = len(self.items) - 1
+        # index 必须真正落到 self.index，且要按 path 重算（压缩包被过滤掉后下标
+        # 会整体前移）：只夹紧局部变量会让面板高亮、上/下一个都停在第 0 项，而
+        # _remember_position 因 items[0] != 正在播放的文件直接 return——命令行/
+        # 双击打开的那部片断点续播永远不保存
+        if target is not None:
+            for i, it in enumerate(self.items):
+                if it.path == target:
+                    index = i
+                    break
         if index >= len(self.items):
             index = len(self.items) - 1
+        self.index = max(0, index)
         self.panel.set_playlist(self.items, self.index)
         self.controls.set_navigation(self.index > 0, self.index < len(self.items) - 1)
         # Same low-priority treatment as open_playlist: pause thumbnail requests
@@ -1360,6 +1369,11 @@ class Viewer(QWidget):
                 if _le.srt_busy:
                     return
                 timer.stop()
+                # 期间切到图片就不再抢跑：否则会把图片路径当媒体提交给引擎，
+                # 图片界面上还冒出"启动中…"（切图片时有意关闭实时字幕）
+                if not self._current_is_video():
+                    self._live_paused = False
+                    return
                 # 用户在此期间手动停止（菜单变「开启」后又被点开）则不再抢跑
                 if not self._live_on and self.isVisible():
                     self._start_live_caption()
@@ -1547,6 +1561,10 @@ class Viewer(QWidget):
         if _le.srt_busy:
             self._pause_live_for_srt()
             return
+        # 暂停标志在这里统一复位：只有"复用"分支清过它，SRT 结束后的自动恢复
+        # 若走 spawn（引擎已死/来源是系统声音/设置变更），_live_paused 会一直
+        # 是 True，轮询里每条字幕行都被丢掉——引擎在跑却永远停在"启动中…"
+        self._live_paused = False
         source = str(_settings["live_caption_source"])
         self._live_source = source
         current_media = None
@@ -1701,7 +1719,9 @@ class Viewer(QWidget):
             except Exception:
                 pos = 0.0
             if pos > 10:
-                start = max(0.0, pos - 5.0)
+                # 与上面传给引擎的 --seek int(pos) 对齐：起点取早了会把没转写的
+                # 几秒也画成青色已覆盖区，并让 span_covered 误报已覆盖
+                start = float(int(pos))
             self._live_ctl.begin_media(current_media, start, 0, False)
         self._live_label.setText(t("viewer.live_caption_starting"))
         self._live_label.show()
@@ -1824,7 +1844,7 @@ class Viewer(QWidget):
         if pid_file is not None and pid_file.is_file():
             try:
                 pid = int(pid_file.read_text(encoding="utf-8").strip())
-                _sp.run(["taskkill", "/PID", str(pid), "/F"],
+                _sp.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                         capture_output=True, timeout=10,
                         creationflags=_sp.CREATE_NO_WINDOW)
                 pid_file.unlink(missing_ok=True)
@@ -1875,7 +1895,9 @@ class Viewer(QWidget):
                 pids = []
         for pid in pids:
             try:
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                # /T：连子进程一起收（SRT 翻译拉起的 llama-server 否则留成孤儿，
+                # 常驻 ~5GB 显存并占着 8020 端口）
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                                capture_output=True, timeout=10,
                                creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception:
@@ -1977,6 +1999,13 @@ class Viewer(QWidget):
                 seg = obj.get("text", "").strip()
                 if not seg or self._live_paused or not self._live_on:
                     continue
+                if getattr(self, "_live_source", "audio") != "audio":
+                    # 环路引擎（live_capture）没有任务代次概念，旧版本连 end 都
+                    # 不写：accept_line 会按 g 不匹配 + end<=t 把每一行都丢掉，
+                    # 系统声音模式一行字幕都出不来。就地补齐再交给控制器
+                    obj["g"] = self._live_ctl.generation
+                    if float(obj.get("end", 0.0)) <= float(obj.get("t", 0.0)):
+                        obj["end"] = float(obj.get("t", 0.0)) + 5.0
                 self._live_ctl.accept_line(obj)
         # 显示：音轨模式按播放位置选行；环路模式显示最新行
         if self._live_on and not self._live_paused and self._live_rows:

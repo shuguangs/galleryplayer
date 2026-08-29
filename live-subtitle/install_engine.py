@@ -122,15 +122,31 @@ def ms_download(venv_py: Path, repo: str, target: Path, label: str) -> bool:
 
 
 def _curl(url: str, out: Path, min_bytes: int = 1_000_000) -> bool:
-    """curl 下载（gh-proxy 加速失败自动回落直连），幂等：文件够大则跳过。"""
+    """curl 下载（gh-proxy 加速失败自动回落直连）。
+
+    幂等只认"下完的最终文件"：先下到 .part，curl 正常退出且体积达标才改名。
+    原实现按"文件够大"（阈值是期望大小的 95%）跳过下载——11.6GB 的模型下到
+    96% 中断就会被永久当成"已下载"，llama-server 加载半截 GGUF 启动即退，
+    而重装因幂等跳过下载永远修不好。顺带补上真续传（-C -）。
+    """
     if out.is_file() and out.stat().st_size >= min_bytes:
         log(f"已存在，跳过下载: {out.name}")
         return True
     out.parent.mkdir(parents=True, exist_ok=True)
+    part = out.with_name(out.name + ".part")
     for base in (GGH, ""):
         url2 = base + url if base else url
         log(f"下载 {out.name}（{url2[:80]}...）")
-        if run(["curl.exe", "-L", "--fail", "-o", str(out), url2]) == 0                 and out.is_file() and out.stat().st_size >= min_bytes:
+        cmd = ["curl.exe", "-L", "--fail", "-o", str(part), url2]
+        if part.is_file() and part.stat().st_size > 0:
+            cmd = ["curl.exe", "-L", "--fail", "-C", "-", "-o", str(part), url2]
+        code = run(cmd)
+        if code in (22, 33, 36) and part.is_file():
+            # 续传被拒（服务器不支持 Range，或 .part 已完整触发 416）：整份重下
+            part.unlink(missing_ok=True)
+            code = run(["curl.exe", "-L", "--fail", "-o", str(part), url2])
+        if code == 0 and part.is_file() and part.stat().st_size >= min_bytes:
+            part.replace(out)
             return True
     return False
 
@@ -140,7 +156,9 @@ def install_llamacpp(root: Path, mirror: str) -> None:
     hf = "https://hf-mirror.com" if mirror == "hf-mirror" else "https://huggingface.co"
     llamacpp = root / "llamacpp"
     server = llamacpp / "llama-server.exe"
-    if server.is_file():
+    # 完成判据必须包含 CUDA 运行库：只看 llama-server.exe 时，cudart 包损坏
+    # 导致的半截安装会被下次运行整块跳过，cudart64_*.dll 永久缺失
+    if server.is_file() and any(llamacpp.glob("cudart*.dll")):
         log("llama.cpp 已存在，跳过")
     else:
         release, bins, cudart = LLAMACPP_RELEASE
@@ -155,20 +173,21 @@ def install_llamacpp(root: Path, mirror: str) -> None:
             zips.append(z)
         import zipfile
 
+        # 两个包全部校验通过再解压：原实现先解压 bins 再校验 cudart，cudart
+        # 损坏时 llama-server.exe 已落地，下次运行就"已存在"跳过整块安装
         for z in zips:
-            # 下载中断可能留下够大但损坏的半截 zip：不校验会在解压时崩溃，
-            # 且下次运行因"文件够大"跳过下载，反复失败
             if not zipfile.is_zipfile(z):
                 z.unlink(missing_ok=True)
                 log("✗ 下载的压缩包损坏（已删除），请重试安装")
                 sys.exit(1)
+        for z in zips:
             log(f"解压 {z.name} ...")
             with zipfile.ZipFile(z) as zf:
                 zf.extractall(llamacpp)
             z.unlink()
         tmp.rmdir()
-        if not server.is_file():
-            log("✗ 解压后未找到 llama-server.exe")
+        if not server.is_file() or not any(llamacpp.glob("cudart*.dll")):
+            log("✗ 解压后缺少 llama-server.exe 或 CUDA 运行库")
             sys.exit(1)
         log("llama.cpp 就绪")
 

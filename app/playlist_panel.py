@@ -532,6 +532,14 @@ class PlaylistPanel(QWidget):
         gone = {p for p in paths if not p.exists()}
         remaining = [i for i in self._all_items if i.path not in gone]
         self._toast(t("panel.recycled_count").format(done=done))
+        # 列表与 _all_items 必须一起更新（对比 _remove_selected）：只发信号会
+        # 让被删的行留在面板里，之后所有行号 → _all_items 的映射整体错位。
+        # 高亮按 path 在**删除后**的列表里重算（删掉的项在它前面时下标会前移）
+        row = self._current_index()
+        playing = self._all_items[row].path if 0 <= row < len(self._all_items) else None
+        new_row = next((i for i, x in enumerate(remaining) if x.path == playing), -1) \
+            if playing is not None else -1
+        self.set_playlist(remaining, new_row)
         self.playlist_removed.emit(remaining)
 
     def _add_to_album(self, name: str, rows: tuple[int, ...]) -> None:
@@ -841,15 +849,30 @@ class PlaylistPanel(QWidget):
     def _apply_panel_sort(self) -> None:
         key = self.sort_combo.currentData() or "name"
         desc = self.btn_sort_desc.isChecked()
+        row = getattr(self.list, "playing_row", -1)
+        playing = None
+        if 0 <= row < self.list.count():
+            cur_item = self.list.item(row)
+            playing = cur_item.data(ITEM_ROLE).path if cur_item is not None else None
         items = media.sort_items(self._all_items, key, desc)
-        current = getattr(self.list, "playing_row", -1)
         self._all_items = list(items)
         self.list.set_items(self._all_items, -1)
         self._apply_filter(self.search.text())
-        self.list.set_playing(current)
+        # 排序后行号全变了：按 path 重新定位"正在播放"。原实现回填排序前的旧
+        # 行号，高亮会落在一个不相干的文件上
+        new_row = -1
+        if playing is not None:
+            for i in range(self.list.count()):
+                if self.list.item(i).data(ITEM_ROLE).path == playing:
+                    new_row = i
+                    break
+        self.list.set_playing(new_row)
         # shared with the main window: persist + tell it to re-sort the browser
         settings["sort_key"] = key
         settings["sort_desc"] = desc
+        # 播放器也要同步新顺序：只发 sort_requested 时 viewer.items 仍是旧序，
+        # 之后双击任一行播的都是错误的文件
+        self.playlist_reordered.emit(self._all_items)
         self.sort_requested.emit(key, desc)
 
     def _footer_add(self) -> None:
@@ -1009,19 +1032,12 @@ class PlaylistPanel(QWidget):
         self.list.set_thumbs_paused(paused)
 
     def set_playlist(self, items: list[MediaItem], current: int) -> None:
-        # Inherit the browser's current ordering: the playlist opens sorted the
-        # same way the main window's file browser is sorted.
-        target = items[current].path if 0 <= current < len(items) else None
-        items = media.sort_items(
-            list(items), str(settings["sort_key"]), bool(settings["sort_desc"])
-        )
+        # 直接沿用播放器给的顺序（它本身就是浏览器排好序的那一份）。这里绝不能
+        # 自己再排一次：面板拿不到主窗口的随机种子（sort_items 默认 seed=0）、
+        # settings["sort_key"] 也可能还没同步，重排后 _all_items 与 viewer.items
+        # 顺序脱钩——双击第 N 行播的是另一个文件，"正在播放"高亮也落错行
         self._all_items = list(items)
-        cur = -1
-        if target is not None:
-            for i, it in enumerate(items):
-                if it.path == target:
-                    cur = i
-                    break
+        cur = current if 0 <= current < len(self._all_items) else -1
         self.list.set_items(self._all_items, cur)
         self._apply_filter(self.search.text())
         self.list.set_playing(cur)

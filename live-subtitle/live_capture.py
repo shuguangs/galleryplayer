@@ -87,17 +87,26 @@ def transcribe_worker(model, engine: str, jobs: queue.Queue, out: queue.Queue,
             out.put(None)  # EOF：通知主循环结束（wav 模拟模式）
             return
         t0, samples = item
-        if engine in TORCH_ENGINES:
-            # qwen / sensevoice：窗口整段直推（窗口自带重叠，无需 VAD）
-            if engine == "qwen":
-                text, _det = asr_engines.qwen_transcribe(model, samples, language)
+        try:
+            if engine in TORCH_ENGINES:
+                # qwen / sensevoice：窗口整段直推（窗口自带重叠，无需 VAD）
+                if engine == "qwen":
+                    text, _det = asr_engines.qwen_transcribe(model, samples, language)
+                else:
+                    text = asr_engines.sv_transcribe(model, samples, language)
             else:
-                text = asr_engines.sv_transcribe(model, samples, language)
-        else:
-            segments, info = model.transcribe(
-                samples, language=language, beam_size=1, vad_filter=False,
-            )
-            text = " ".join(s.text.strip() for s in segments).strip()
+                segments, info = model.transcribe(
+                    samples, language=language, beam_size=1, vad_filter=False,
+                )
+                text = " ".join(s.text.strip() for s in segments).strip()
+        except Exception as exc:  # noqa: BLE001
+            # 与录音线程同一纪律：转写线程死了主循环会永久卡在 out.get()，
+            # 心跳却仍在 touch log，播放器判"存活"永不重启——字幕无声消失。
+            # CUDA OOM / 驱动 TDR 直接退进程，由播放器重建
+            status(f"✗ 转写线程崩溃，退出以触发自动重启: {exc}")
+            import os
+
+            os._exit(1)
         zh = ""
         if text and translator is not None:
             try:
@@ -325,7 +334,13 @@ def main() -> None:
             if not text:
                 continue
             if args.json or args.log:
-                line = json.dumps({"t": round(t0, 1), "text": text, "zh": zh},
+                # g/end 必须带上：播放器的 accept_line 按代次过滤、并要求
+                # end > t，缺字段的行会被整条丢弃（系统声音模式一行字幕都不
+                # 出）。环路没有任务代次概念，固定 0；时间区间与 SRT 行一致
+                # 取滑动窗 [t0-WINDOW, t0]
+                start = max(0.0, t0 - WINDOW_SECS)
+                line = json.dumps({"g": 0, "t": round(start, 2),
+                                   "end": round(t0, 2), "text": text, "zh": zh},
                                   ensure_ascii=False)
                 if args.log:
                     log_fp.write(line + "\n")

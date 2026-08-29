@@ -142,7 +142,9 @@ class ImageView(QWidget):
                 return True
 
         frames, error = _decode_image(path)
-        return self._apply_result(seq, path, frames, error, background=False)
+        # 同步分支也要传文件名：_apply_result 的形参改成 name 后这里仍传 Path，
+        # 小图解码失败的提示里会是整条绝对路径
+        return self._apply_result(seq, path.name, frames, error, background=False)
 
     def _decode_background(self, path: Path, seq: int) -> None:
         frames, error = _decode_image(path)
