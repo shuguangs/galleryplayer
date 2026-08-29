@@ -418,6 +418,21 @@ class SettingsDialog(QDialog):
         gg.addWidget(QLabel(t("settings.translate_target_label")), 16, 0)
         gg.addWidget(self.cb_translate_target, 16, 1)
 
+        # 内容场景提示词组：按片源类型微调翻译语气与术语策略
+        self.cb_translate_scenario = QComboBox()
+        for key in ("general", "nsfw", "science", "meeting", "blog",
+                    "documentary", "variety", "anime", "legal_med"):
+            self.cb_translate_scenario.addItem(
+                t("settings.translate_scenario_" + key), key)
+        idx = self.cb_translate_scenario.findData(str(settings["translate_scenario"]))
+        self.cb_translate_scenario.setCurrentIndex(max(0, idx))
+        self.cb_translate_scenario.setToolTip(t("settings.translate_scenario_hint"))
+        self.cb_translate_scenario.currentIndexChanged.connect(
+            lambda _i: self._set("translate_scenario",
+                                 self.cb_translate_scenario.currentData()))
+        gg.addWidget(QLabel(t("settings.translate_scenario_label")), 16, 4)
+        gg.addWidget(self.cb_translate_scenario, 16, 5)
+
         self.cb_srt_format = QComboBox()
         for fmt in ("srt", "vtt", "ass"):
             self.cb_srt_format.addItem(fmt.upper(), fmt)

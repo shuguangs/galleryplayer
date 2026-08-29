@@ -45,12 +45,62 @@ STYLE_HINTS = {
 STYLE_DEFAULT = "用目标语言影视字幕的口语腔，别留逐字直译的痕迹"
 
 
-def system_prompt(target: str) -> str:
-    """按目标语言组装系统提示（target 为 zh/zh-Hant/en 等设置值）。"""
+def system_prompt(target: str, scenario: str = "general") -> str:
+    """按目标语言 + 内容场景组装系统提示（target 为 zh/zh-Hant/en 等设置值）。
+
+    scenario 见 SCENARIO_HINTS；general（通用影视）不追加场景段。
+    """
     name = TARGET_NAMES.get(target, target)
-    return SYSTEM_PROMPT.format(
+    prompt = SYSTEM_PROMPT.format(
         target=name, style=STYLE_HINTS.get(str(target), STYLE_DEFAULT)
     )
+    hint = SCENARIO_HINTS.get(str(scenario))
+    if hint:
+        prompt += "\n6. 场景补充——" + hint
+    return prompt
+
+# 内容场景提示词组：按片源类型微调语气与术语策略（设置界面可选）。
+# 原则：场景补充只调整"译文的语域与术语策略"，与第 3 条"粗话要译出来，
+# 不要净化"叠加而非冲突——nsfw 是把它推向粗俗对等，meeting 是推向正式。
+SCENARIO_HINTS = {
+    # general 无补充，用基础提示
+    "nsfw": (
+        "本片含成人/情色内容。性器官、性行为的俚语与粗话按原语同样的粗俗度"
+        "和直白度对等翻译（如 dick→鸡巴、cum→射了、fuck→肏/操），"
+        "禁止替换成临床、学术或委婉净化的说法（不要「阴茎」「交合」这类书面词）；"
+        "调情、呻吟、挑逗的语气完整保留，不做删减、弱化或道德评判。"
+    ),
+    "science": (
+        "本片为科学科普：术语按行业通行译法，首次出现的关键缩写保留英文并在"
+        "括号内注明中文；数字、单位、百分比必须精确，比喻可以口语化但不得"
+        "为顺口牺牲准确性。"
+    ),
+    "meeting": (
+        "本片为多人会议/访谈：用正式、简洁的书面语；多人发言时称谓与指代"
+        "保持清晰一致，不混用「我/您」；专业术语、数字、日期、金额精确保留。"
+    ),
+    "blog": (
+        "本片为单人博客/Vlog：轻松的口语独白，保留语气词、口头禅和网络流行语；"
+        "对镜头说话的互动感保留（「大家好呀」），过长的句子拆成短句。"
+    ),
+    "documentary": (
+        "本片为纪录片：解说部分用沉稳的叙述语感，采访部分保留口语；"
+        "人名、地名、年代按通行译法，首次出现可附原文。"
+    ),
+    "variety": (
+        "本片为综艺/脱口秀：笑点优先——谐音梗、双关、punchline 要译出笑果"
+        "而非字面；中文圈内已有等价梗可直接替换，起哄声与语气助词保留。"
+    ),
+    "anime": (
+        "本片为动漫/游戏：保留角色口癖与中二措辞；招式、技能、称号按圈内"
+        "习惯译法；感叹与情绪起伏（诶？！哈？！）完整保留。"
+    ),
+    "legal_med": (
+        "本片为医疗/律政剧：专业术语按行业准确译法（如 tension pneumothorax→"
+        "张力性气胸），行话缩写保留原文并按上下文意译；对白节奏紧凑不拖沓。"
+    ),
+}
+SCENARIO_DEFAULT = "general"
 
 # 各家模型泄漏的控制 token（aya 的 turn marker、HY-MT2 的 hy_ 系列等）
 JUNK_TOKENS = (
@@ -83,10 +133,12 @@ class Translator:
     """
 
     def __init__(self, endpoint: str, model: str, target: str = "zh",
-                 context_lines: int = 3, timeout: int = 120):
+                 context_lines: int = 3, timeout: int = 120,
+                 scenario: str = SCENARIO_DEFAULT):
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.target = target
+        self.scenario = scenario
         self.context_lines = max(0, context_lines)
         self.timeout = timeout
         self._recent: list[str] = []
@@ -107,7 +159,7 @@ class Translator:
             "options": {"temperature": 0.7, "top_p": 0.6, "top_k": 20,
                         "repeat_penalty": 1.05},
             "messages": [
-                {"role": "system", "content": system_prompt(self.target)},
+                {"role": "system", "content": system_prompt(self.target, self.scenario)},
                 {"role": "user", "content": user},
             ],
         }
@@ -196,8 +248,10 @@ class LlamaServerTranslator:
     接口与 Translator 一致（__call__/reset），SRT 任务可无缝替换。
     """
 
-    def __init__(self, target: str = "zh", context_lines: int = 3, timeout: int = 300):
+    def __init__(self, target: str = "zh", context_lines: int = 3, timeout: int = 300,
+                 scenario: str = SCENARIO_DEFAULT):
         self.target = target
+        self.scenario = scenario
         self.context_lines = max(0, context_lines)
         self.timeout = timeout
         self._recent: list[str] = []
@@ -217,7 +271,7 @@ class LlamaServerTranslator:
             user = header
         body = json.dumps({
             "messages": [
-                {"role": "system", "content": system_prompt(self.target)},
+                {"role": "system", "content": system_prompt(self.target, self.scenario)},
                 {"role": "user", "content": user},
             ],
             "temperature": 0.7, "top_p": 1.0, "top_k": 0,

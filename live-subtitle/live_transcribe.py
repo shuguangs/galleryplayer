@@ -182,6 +182,8 @@ def main() -> None:
                     help="从第 N 秒开始转写（音轨模式追播放进度）")
     ap.add_argument("--preload", action="store_true",
                     help="启动后仅加载模型并等待任务，不立即转写")
+    ap.add_argument("--scenario", default="general",
+                    help="内容场景提示词（translate_service.SCENARIO_HINTS 的键）")
     ap.add_argument("--target-lang", default="zh",
                     help="翻译目标语言: zh / zh-Hant / en（translate_service.TARGET_NAMES）")
     ap.add_argument("--idle-unload", type=float, default=0.0,
@@ -235,8 +237,9 @@ def main() -> None:
             "model": args.model,
             "model_dir": args.model_dir or "",
             "target": args.target_lang,
+            "scenario": args.scenario,
             "idle": int(args.idle_unload),
-            "engine": 5,
+            "engine": 6,
         }
         state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
@@ -388,7 +391,8 @@ def main() -> None:
     if args.preload:
         status("MODEL_READY")
 
-    translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang)
+    translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang,
+                             scenario=args.scenario)
                   if args.translate else None)
     # 降级只在"本任务"内生效：translator 置 None 后靠这个原始引用在下一个
     # 任务（新代次/新 SRT）恢复。原实现是终身降级——Ollama 抖动一次，此后
@@ -673,7 +677,8 @@ def main() -> None:
                 )
 
                 if ensure_llama_server(lambda m: _job_status(job, m)):
-                    job_translator = LlamaServerTranslator(target=args.target_lang)
+                    job_translator = LlamaServerTranslator(
+                        target=args.target_lang, scenario=args.scenario)
                     llama_used = True
                 else:
                     _job_status(job, "llama.cpp 不可用，回退 Ollama")
@@ -682,7 +687,8 @@ def main() -> None:
                 from translate_service import Translator
 
                 job_translator = Translator(args.ollama, job_model,
-                                            target=args.target_lang)
+                                            target=args.target_lang,
+                                            scenario=args.scenario)
         except Exception as exc:  # noqa: BLE001
             _job_status(job, f"翻译模型初始化失败: {str(exc)[:120]}")
             job_translator = translator

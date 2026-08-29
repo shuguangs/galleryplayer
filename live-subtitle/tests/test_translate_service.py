@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from translate_service import clean_output, system_prompt, write_srt_file
+from translate_service import SCENARIO_HINTS, clean_output, system_prompt, write_srt_file
 
 
 class SystemPromptTests(unittest.TestCase):
@@ -26,6 +26,35 @@ class SystemPromptTests(unittest.TestCase):
         prompt = system_prompt("ja")
         self.assertIn("ja", prompt)
         self.assertNotIn("{", prompt)  # 占位符全部填上，没有漏的 format 键
+
+
+class ScenarioPromptTests(unittest.TestCase):
+    """场景提示词组：general 不追加；nsfw 粗俗对等；各场景非空且可组装。"""
+
+    def test_general_has_no_extra_block(self):
+        base = system_prompt("zh")
+        self.assertNotIn("场景补充", base)
+        self.assertEqual(system_prompt("zh", "general"), base)
+
+    def test_nsfw_keeps_vulgar_register(self):
+        p = system_prompt("zh", "nsfw")
+        self.assertIn("场景补充", p)
+        self.assertIn("鸡巴", p)          # 粗俗对等，而非临床词
+        self.assertIn("禁止", p)
+
+    def test_all_scenarios_nonempty_and_distinct(self):
+        for key, hint in SCENARIO_HINTS.items():
+            self.assertTrue(hint.strip(), key)
+            self.assertIn("场景补充——" + hint, system_prompt("zh", key))
+
+    def test_translator_payload_carries_scenario(self):
+        import json as _json
+
+        from translate_service import Translator
+
+        tr = Translator("http://127.0.0.1:9", "test-model", scenario="nsfw")
+        payload = _json.loads(tr._payload("hello"))
+        self.assertIn("鸡巴", payload["messages"][0]["content"])
 
 
 class CleanOutputTests(unittest.TestCase):

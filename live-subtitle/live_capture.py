@@ -217,6 +217,8 @@ def main() -> None:
     ap.add_argument("--ollama", default="http://127.0.0.1:11434")
     ap.add_argument("--ollama-model", default="qwen2.5:7b")
     # 与 live_transcribe 共用播放器 common 参数；环路模式无模型卸载，idle 仅接受不生效
+    ap.add_argument("--scenario", default="general",
+                    help="内容场景提示词（与播放器公共参数一致）")
     ap.add_argument("--target-lang", default="zh",
                     help="翻译目标语言（zh / zh-Hant / en）")
     ap.add_argument("--idle-unload", type=float, default=0.0,
@@ -286,7 +288,8 @@ def main() -> None:
                              compute_type=compute)
     print(f"模型就绪 {time.perf_counter() - t0:.0f}s", flush=True)
 
-    translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang)
+    translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang,
+                             scenario=args.scenario)
                   if args.translate else None)
     if translator:
         status(f"翻译启用: {args.ollama_model} → {args.target_lang}")

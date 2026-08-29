@@ -14,7 +14,7 @@ from .config import (
     settings,
 )
 
-ENGINE_VERSION = 5
+ENGINE_VERSION = 6
 
 # 引擎拉起冷却：30s 内已 spawn 过就不再 kill+respawn（设置刚改过也等下一次
 # 调用再重建），防止多个启动入口把"加载中的引擎"反复杀掉造成重启循环
@@ -252,6 +252,7 @@ def matches() -> bool:
         and current.get("translate") == str(settings["live_ollama_model"])
         and current.get("target") == str(settings["live_translate_target"])
         and current.get("idle") == int(settings["live_caption_idle_unload"])
+        and current.get("scenario") == str(settings["translate_scenario"])
     )
 
 
@@ -344,6 +345,7 @@ def start_preload() -> bool:
         "--model", effective_model(),
         "--ollama-model", str(settings["live_ollama_model"]),
         "--target-lang", str(settings["live_translate_target"]),
+        "--scenario", str(settings["translate_scenario"]),
         "--idle-unload", str(int(settings["live_caption_idle_unload"])),
     ]
     if model_dir_arg():

@@ -1628,7 +1628,8 @@ class Viewer(QWidget):
         common = ["--log", log_path, "--lang", lang, "--model", asr_model,
                   "--ollama-model", tr_model,
                   "--target-lang", str(_settings["live_translate_target"]),
-                  "--idle-unload", str(int(_settings["live_caption_idle_unload"]))]
+                  "--idle-unload", str(int(_settings["live_caption_idle_unload"])),
+                  "--scenario", str(_settings["translate_scenario"])]
         # 本地模型目录只对 whisper 有意义（qwen/sensevoice 走引擎目录固定路径）
         if asr_dir and asr_model not in ("qwen", "sensevoice"):
             common += ["--model-dir", asr_dir]
