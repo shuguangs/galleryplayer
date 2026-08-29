@@ -527,7 +527,11 @@ class SettingsDialog(QDialog):
         gg.addWidget(self.cb_subtitle_save, 5, 3, 1, 2)
 
         self.cb_live_resident = QCheckBox(t("settings.live_resident_label"))
-        self.cb_live_resident.setToolTip(t("settings.live_resident_hint"))
+        # 显存占用随实际引擎变化，不写死数字
+        from .live_engine import model_label, vram_footprint_gb
+
+        self.cb_live_resident.setToolTip(t("settings.live_resident_hint").format(
+            model=model_label(), vram=f"{vram_footprint_gb():g}GB"))
         self.cb_live_resident.setChecked(bool(settings["live_caption_resident"]))
         self.cb_live_resident.toggled.connect(lambda v: self._set("live_caption_resident", v))
         gg.addWidget(self.cb_live_resident, 6, 0, 1, 5)

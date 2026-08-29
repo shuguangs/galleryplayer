@@ -6,7 +6,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from .config import PRESET_MODELS, find_subtitle_pipeline_dir, settings
+from .config import (
+    ASR_MODEL_SPECS,
+    PRESET_MODELS,
+    TRANSLATE_MODEL_SPECS,
+    find_subtitle_pipeline_dir,
+    settings,
+)
 
 ENGINE_VERSION = 5
 
@@ -115,6 +121,28 @@ def effective_model() -> str:
     if model == "qwen" and model_installed("sensevoice"):
         return "sensevoice"
     return whisper_fallback()
+
+
+def vram_footprint_gb(include_translate: bool = True) -> float:
+    """当前引擎组合的显存占用估计（GB）。
+
+    include_translate=True（设置提示）：识别模型 + 翻译模型合计，与设置界面
+    的合计占用行口径一致。
+    include_translate=False（退出确认）：只算识别模型——翻译走的是独立的
+    Ollama 服务进程，杀掉引擎进程不会释放它。
+    """
+    model = effective_model()
+    vram = ASR_MODEL_SPECS.get(model, {}).get("vram_gb", 0.0)
+    if include_translate:
+        tr = str(settings["live_ollama_model"])
+        vram += TRANSLATE_MODEL_SPECS.get(tr, {}).get("vram_gb", 0.0)
+    return vram
+
+
+def model_label() -> str:
+    """当前实际引擎的人类可读名称（Qwen3-ASR-1.7B / SenseVoice-small / …）。"""
+    return ASR_MODEL_SPECS.get(effective_model(), {}).get("label",
+                                                          effective_model())
 
 
 def control_job() -> dict:

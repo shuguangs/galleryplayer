@@ -2128,7 +2128,10 @@ class MainWindow(QMainWindow):
         if live_engine.alive():
             box = QMessageBox(self)
             box.setWindowTitle(t("viewer.live_caption_quit_title"))
-            box.setText(t("viewer.live_caption_quit_text"))
+            box.setText(t("viewer.live_caption_quit_text").format(
+                model=live_engine.model_label(),
+                vram=f"{live_engine.vram_footprint_gb(include_translate=False):g}GB",
+            ))
             box.setIcon(QMessageBox.Question)
             keep_btn = box.addButton(
                 t("viewer.live_caption_quit_keep"), QMessageBox.AcceptRole
