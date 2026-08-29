@@ -5,8 +5,9 @@ from pathlib import Path
 
 import sherpa_onnx
 
-MODEL_DIR = Path(r"G:\播放器\live-subtitle\models\sherpa\sherpa-onnx-streaming-zipformer-en-2023-06-26")
-AUDIO = Path(r"G:\播放器\live-subtitle\samples\pitt_s02e01_60s.wav")
+BASE = Path(__file__).resolve().parent
+MODEL_DIR = BASE / "models" / "sherpa" / "sherpa-onnx-streaming-zipformer-en-2023-06-26"
+AUDIO = BASE / "samples" / "pitt_s02e01_60s.wav"
 
 
 def main() -> None:

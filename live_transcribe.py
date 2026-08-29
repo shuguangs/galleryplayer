@@ -22,6 +22,7 @@ import urllib.request
 from pathlib import Path
 
 from ollama_service import ensure_ollama
+from translate_service import Translator
 
 
 def split_words_to_lines(words) -> list[tuple[float, float, str]]:
@@ -93,14 +94,10 @@ class _SafeOut:
 
 sys.stdout = _SafeOut(sys.stdout)
 
-# 自包含环境：venv nvidia 库 + 引擎目录模型缓存（强制覆盖，防止调用方
-# 环境里的 HF 缓存变量指向空间不足的盘导致模型下载失败）
+# 自包含环境：HF 缓存强制指到引擎目录（覆盖调用方环境里指向空间不足盘的变量）。
+# 注意：cu12 nvidia DLL 路径只对 whisper(ctranslate2) 注入（见 main）——
+# torch(cu13) 引擎注入会被旧 cuDNN 污染报 SUBLIBRARY_VERSION_MISMATCH。
 _BASE = Path(__file__).resolve().parent
-_NV = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
-if _NV.is_dir():
-    os.environ["PATH"] = (os.pathsep.join(str(_NV / d / "bin")
-                                          for d in ("cublas", "cudnn", "cuda_nvrtc"))
-                          + os.pathsep + os.environ.get("PATH", ""))
 _cache = _BASE / "models" / "hf" / "hub"
 if _cache.is_dir():
     os.environ["HUGGINGFACE_HUB_CACHE"] = str(_cache)
@@ -109,29 +106,57 @@ if _cache.is_dir():
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
+TORCH_ENGINES = ("qwen", "sensevoice")  # 走 asr_engines.py（torch 后端）
 
-class Translator:
-    def __init__(self, endpoint: str, model: str, target: str = "zh"):
-        self.endpoint, self.model, self.target = endpoint, model, target
 
-    def __call__(self, text: str) -> str:
-        body = json.dumps({
-            "model": self.model, "stream": False,
-            "messages": [
-                {"role": "system",
-                 "content": (f"You are a professional subtitle translator. Translate "
-                             f"into {self.target}. Output ONLY the translation, keep "
-                             f"names/numbers, no explanations.")},
-                {"role": "user", "content": text},
-            ],
-        }).encode("utf-8")
-        req = urllib.request.Request(f"{self.endpoint}/api/chat", data=body,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            out = json.loads(resp.read().decode("utf-8"))["message"]["content"]
-        for mark in ("<|END_OF_TURN_TOKEN|>", "<|end_of_turn|>", "<|im_end|>", "<|endoftext|>"):
-            out = out.replace(mark, "")
-        return out.strip()
+def _decode_audio_from(media: str, seek: float):
+    """从 seek 秒附近解码音频为 16kHz float32 mono（与 decode_audio 输出一致）。
+
+    av 容器 seek 直接到目标时间附近再解码，不再全量解码：37 分钟视频跳转到
+    30 分钟处，旧路径要把前 30 分钟全部解码（几十秒、受媒体盘速度拖累）。
+    实现仿 faster_whisper.audio.decode_audio（s16 → f32/32768），仅加容器 seek。
+    """
+    import gc
+    import io
+
+    import av
+    import numpy as np
+    from faster_whisper.audio import (
+        _group_frames,
+        _ignore_invalid_frames,
+        _resample_frames,
+    )
+
+    resampler = av.audio.resampler.AudioResampler(
+        format="s16", layout="mono", rate=16000,
+    )
+    raw = io.BytesIO()
+    dtype = None
+    container = av.open(media, mode="r", metadata_errors="ignore")
+    try:
+        audio_stream = container.streams.audio[0]
+        start_seconds = max(0.0, seek - 2.0)  # 早 2s 起解，给 VAD 留上下文
+        tb = float(audio_stream.time_base or av.time_base)
+        container.seek(int(start_seconds / tb), stream=audio_stream)
+        frames = container.decode(audio_stream)
+        frames = _ignore_invalid_frames(frames)
+        frames = _group_frames(frames, 500000)
+        frames = _resample_frames(frames, resampler)
+        for frame in frames:
+            array = frame.to_ndarray()
+            dtype = array.dtype
+            raw.write(array)
+    finally:
+        container.close()
+        del resampler
+        gc.collect()
+
+    audio = np.frombuffer(raw.getbuffer(), dtype=dtype or np.int16)
+    audio = audio.astype(np.float32) / 32768.0
+    keep_from = int((seek - start_seconds) * 16000)
+    if keep_from > 0:
+        audio = audio[keep_from:]
+    return audio
 
 
 def main() -> None:
@@ -153,6 +178,14 @@ def main() -> None:
     if not args.media and not args.preload:
         ap.error("必须提供媒体文件，或使用 --preload")
 
+    # cu12 nvidia DLL 仅 whisper(ctranslate2) 需要；qwen/sensevoice 用 torch 自带 cu13
+    if args.model not in TORCH_ENGINES:
+        _nv = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
+        if _nv.is_dir():
+            os.environ["PATH"] = (os.pathsep.join(str(_nv / d / "bin")
+                                                  for d in ("cublas", "cudnn", "cuda_nvrtc"))
+                                  + os.pathsep + os.environ.get("PATH", ""))
+
     # 单实例文件锁：加载/启动竞态曾经产生两个 large-v3 进程，互相抢 GPU。
     lock_fp = None
     lock_path = Path(str(args.log) + ".lock") if args.log else None
@@ -173,6 +206,8 @@ def main() -> None:
     log_fp = None
     if args.log:
         Path(args.log).parent.mkdir(parents=True, exist_ok=True)
+        # 截断重建：log 不再跨会话无限累积（viewer 有 size<pos 保护，安全）
+        open(args.log, "w", encoding="utf-8").close()
         log_fp = open(args.log, "a", encoding="utf-8")
         Path(args.log + ".pid").write_text(str(os.getpid()), encoding="utf-8")
 
@@ -187,7 +222,7 @@ def main() -> None:
             "translate": args.ollama_model if args.translate else "none",
             "model": args.model,
             "model_dir": args.model_dir or "",
-            "engine": 3,
+            "engine": 4,
         }
         state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
@@ -252,12 +287,22 @@ def main() -> None:
         status("MODEL_PRELOADING")
 
     t0 = time.perf_counter()
-    from faster_whisper import WhisperModel
-
-    compute = "int8"  # GPU/CPU 通用、占用低（缓解转写期掉帧）；精度足够字幕用途
-    model_name_or_dir = args.model_dir or args.model
+    vad = None
     try:
-        model = WhisperModel(model_name_or_dir, device=args.device, compute_type=compute)
+        if args.model in TORCH_ENGINES:
+            import asr_engines
+
+            if args.model == "qwen":
+                model = asr_engines.load_qwen(args.device, status)
+            else:
+                model = asr_engines.load_sensevoice(args.device, status)
+            vad = asr_engines.load_vad(status)
+        else:
+            from faster_whisper import WhisperModel
+
+            # int8：GPU/CPU 通用、占用低（缓解转写期掉帧）；精度足够字幕用途
+            model = WhisperModel(args.model_dir or args.model,
+                                 device=args.device, compute_type="int8")
     except Exception as exc:  # noqa: BLE001
         status(f"MODEL_ERROR {exc}")
         with pending_lock:
@@ -277,6 +322,43 @@ def main() -> None:
         status("MODEL_READY")
 
     translator = Translator(args.ollama, args.ollama_model) if args.translate else None
+    _translate_q: queue.Queue = queue.Queue()
+
+    def _translate_worker() -> None:
+        cur_gen = None
+        while True:
+            item = _translate_q.get()
+            if item is None:
+                return
+            gen, t0, t1, text = item
+            try:
+                if cancel_generation > gen:
+                    continue
+                if gen != cur_gen:
+                    if translator is not None:
+                        translator.reset()  # 换片/seek：上一段剧情不带过来
+                    cur_gen = gen
+                zh = ""
+                if translator:
+                    try:
+                        zh = translator(text)
+                    except Exception as exc:  # noqa: BLE001
+                        status(f"✗ 翻译失败（Ollama）: {exc}")
+                line = json.dumps({
+                    "g": gen,
+                    "t": round(t0, 2),
+                    "end": round(t1, 2),
+                    "text": text,
+                    "zh": zh,
+                }, ensure_ascii=False)
+                if log_fp is not None:
+                    log_fp.write(line + "\n")
+                    log_fp.flush()
+                print(line, flush=True)
+            finally:
+                _translate_q.task_done()
+
+    threading.Thread(target=_translate_worker, daemon=True).start()
     if translator:
         status(f"翻译启用: {args.ollama_model} → zh")
         ready, error = ensure_ollama(args.ollama, args.ollama_model, status)
@@ -316,20 +398,9 @@ def main() -> None:
             return ""
 
     def _write_srt(path: Path, rows: list[tuple[float, float, str, str]]) -> None:
-        def ts(value: float) -> str:
-            h, rest = divmod(int(value * 1000), 3600000)
-            m, rest = divmod(rest, 60000)
-            s, ms = divmod(rest, 1000)
-            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+        from translate_service import write_srt_file
 
-        parts: list[str] = []
-        for index, (start, end, original, translated) in enumerate(rows, 1):
-            parts.append(f"{index}\n{ts(start)} --> {ts(end)}\n{original}")
-            if translated:
-                parts.append(translated)
-            parts.append("")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("\n".join(parts), encoding="utf-8")
+        write_srt_file(path, rows)
 
     def _generate_srt(job: dict) -> None:
         media = job["media"]
@@ -344,40 +415,102 @@ def main() -> None:
 
         _job_status(job, f"SRT_STARTED {media.name}")
         started = time.perf_counter()
-        segments, info = model.transcribe(
-            str(media), language=args.lang or None, beam_size=5,
-            vad_filter=True, word_timestamps=True,
-        )
         raw_rows: list[tuple[float, float, str]] = []
-        for segment in segments:
-            if cancel_generation > generation:
-                _job_status(job, "SRT_CANCELLED")
-                return
-            text = (segment.text or "").strip()
-            if text:
-                raw_rows.append((segment.start, segment.end, text))
+        if args.model in TORCH_ENGINES:
+            # qwen / sensevoice：VAD 段时间戳天然真实（无压缩/比例估算）
+            import asr_engines
+
+            audio = decode_audio(str(media), sampling_rate=16000)
+            lang_note = args.lang or "auto"
+            for seg_start, seg_end, text in asr_engines.stream_transcribe(
+                    model, vad, args.model, audio, lang_note):
+                if cancel_generation > generation:
+                    _job_status(job, "SRT_CANCELLED")
+                    return
+                if text:
+                    raw_rows.append((seg_start, seg_end, text))
+        else:
+            segments, info = model.transcribe(
+                str(media), language=args.lang or None, beam_size=5,
+                vad_filter=True, word_timestamps=True,
+            )
+            for segment in segments:
+                if cancel_generation > generation:
+                    _job_status(job, "SRT_CANCELLED")
+                    return
+                text = (segment.text or "").strip()
+                if text:
+                    raw_rows.append((segment.start, segment.end, text))
+            lang_note = f"{info.language} (p={info.language_probability:.2f})"
         _job_status(
             job,
             f"识别完成 {time.perf_counter() - started:.0f}s，"
-            f"语言 {info.language}，{len(raw_rows)} 句",
+            f"语言 {lang_note}，{len(raw_rows)} 句",
         )
 
-        # Merge whisper fragments into readable subtitle lines.
+        # whisper 会把一句话切成碎片 → 合并成可读字幕行。
+        # qwen/sensevoice 已在 asr_engines 里按标点分好句，再合并会重新变成长行。
         rows: list[tuple[float, float, str]] = []
-        for start, end, text in raw_rows:
-            if rows and start - rows[-1][1] <= 1.5 and len(rows[-1][2]) + len(text) <= 120:
-                old_start, old_end, old_text = rows[-1]
-                rows[-1] = (old_start, max(old_end, end), (old_text + " " + text).strip())
-            else:
-                rows.append((start, end, text))
+        if args.model in TORCH_ENGINES:
+            rows = list(raw_rows)
+        else:
+            for start, end, text in raw_rows:
+                if rows and start - rows[-1][1] <= 1.5 \
+                        and len(rows[-1][2]) + len(text) <= 120:
+                    old_start, old_end, old_text = rows[-1]
+                    rows[-1] = (old_start, max(old_end, end),
+                                (old_text + " " + text).strip())
+                else:
+                    rows.append((start, end, text))
+
+        # SRT 翻译模型按任务指定（设置里与实时字幕分开）：hy-mt2-30b 走
+        # llama.cpp（按需启动、用完即关）；live=跟随实时字幕的 Ollama 模型
+        job_model = str(job.get("translate_model") or "live")
+        job_translator = translator
+        llama_used = False
+        try:
+            if job_model == "hy-mt2-30b":
+                from translate_service import (
+                    LlamaServerTranslator,
+                    ensure_llama_server,
+                    stop_llama_server,
+                )
+
+                if ensure_llama_server(lambda m: _job_status(job, m)):
+                    job_translator = LlamaServerTranslator()
+                    llama_used = True
+                else:
+                    _job_status(job, "llama.cpp 不可用，回退 Ollama")
+                    job_translator = translator
+            elif job_model not in ("", "live", args.ollama_model):
+                from translate_service import Translator
+
+                job_translator = Translator(args.ollama, job_model)
+        except Exception as exc:  # noqa: BLE001
+            _job_status(job, f"翻译模型初始化失败: {str(exc)[:120]}")
+            job_translator = translator
 
         translated_rows: list[tuple[float, float, str, str]] = []
-        for index, (start, end, original) in enumerate(rows, 1):
-            if cancel_generation > generation:
-                _job_status(job, "SRT_CANCELLED")
-                return
-            _job_status(job, f"翻译 {index}/{len(rows)} ...")
-            translated_rows.append((start, end, original, _translate(original, job)))
+        try:
+            if job_translator is not None:
+                job_translator.reset()
+            for index, (start, end, original) in enumerate(rows, 1):
+                if cancel_generation > generation:
+                    _job_status(job, "SRT_CANCELLED")
+                    return
+                _job_status(job, f"翻译 {index}/{len(rows)} ...")
+                zh = ""
+                if job_translator is not None:
+                    try:
+                        zh = job_translator(original)
+                    except Exception as exc:  # noqa: BLE001
+                        _job_status(job, f"翻译失败: {str(exc)[:120]}")
+                translated_rows.append((start, end, original, zh))
+        finally:
+            if llama_used:
+                from translate_service import stop_llama_server
+
+                stop_llama_server()
 
         _write_srt(output, translated_rows)
         _job_status(job, f"SRT_READY {output}")
@@ -391,6 +524,46 @@ def main() -> None:
             status("✗ 媒体文件不存在: %s" % media)
             return
         status(f"音轨模式：转写 {media.name} ...")
+
+        # 翻译异步化：转写行立即写 log（zh 为空），翻译 worker 按序译完再写
+        # "更新行"（同 g/t/end/text，zh=译文）——转写不再被 Ollama 延迟拖住，
+        # 播放器端按 (g,t,end,text) 匹配原地补译文
+
+        def _emit(piece_start: float, piece_end: float, piece_text: str) -> None:
+            line = json.dumps({
+                "g": generation,
+                "t": round(piece_start, 2),
+                "end": round(piece_end, 2),
+                "text": piece_text,
+                "zh": "",
+            }, ensure_ascii=False)
+            if log_fp is not None:
+                log_fp.write(line + "\n")
+                log_fp.flush()
+            print(line, flush=True)
+            if translator is not None:
+                _translate_q.put((generation, piece_start, piece_end, piece_text))
+
+        if args.model in TORCH_ENGINES:
+            # qwen / sensevoice：VAD 切段流式转写，时间戳为段落真实时间。
+            # seek 时从目标位置就近解码（av 容器 seek），不再全量解码整个
+            # 文件——跳转响应从几十秒（受媒体盘速度拖累）降到一两秒
+            import asr_engines
+
+            if seek > 0:
+                audio = _decode_audio_from(str(media), seek)
+            else:
+                audio = decode_audio(str(media), sampling_rate=16000)
+            status(f"{args.model} 引擎转写中 ...")
+            for piece_start, piece_end, piece_text in asr_engines.stream_transcribe(
+                    model, vad, args.model, audio, args.lang or "auto"):
+                if cancel_generation > generation:
+                    status("切换媒体，中断当前转写 ...")
+                    return
+                if piece_text:
+                    _emit(seek + piece_start, seek + piece_end, piece_text)
+            status(f"TASK_DONE {generation}")
+            return
 
         # seek 偏移则读全量后切片（decode_audio 快），并给时间戳加偏移
         if seek > 0:
@@ -421,24 +594,9 @@ def main() -> None:
             if not pieces:
                 pieces = [(float(seg.start), float(seg.end), text)]
             for piece_start, piece_end, piece_text in pieces:
-                zh = ""
-                if translator:
-                    try:
-                        zh = translator(piece_text)
-                    except Exception as exc:  # noqa: BLE001
-                        zh = ""
-                        status(f"✗ 翻译失败（Ollama）: {exc}")
-                line = json.dumps({
-                    "g": generation,
-                    "t": round(offset + piece_start, 2),
-                    "end": round(offset + piece_end, 2),
-                    "text": piece_text,
-                    "zh": zh,
-                }, ensure_ascii=False)
-                if log_fp is not None:
-                    log_fp.write(line + "\n")
-                    log_fp.flush()
-                print(line, flush=True)
+                _emit(offset + piece_start, offset + piece_end, piece_text)
+        if translator is not None:
+            _translate_q.join()  # 等译文全部写出
         status(f"TASK_DONE {generation}")
 
     initial_job: dict | None = None
@@ -465,10 +623,23 @@ def main() -> None:
         if job is None:
             _stop_hb.wait(0.25)
             continue
-        if job["mode"] == "srt":
-            _generate_srt(job)
-        else:
-            _transcribe(job["media"], job["seek"], job["generation"])
+        try:
+            if job["mode"] == "cancel":
+                # generation 已被 _watch_control 置为最新 → 进行中的任务会在
+                # 下一个检查点退出并写 SRT_CANCELLED/TASK_DONE；此处无事可做
+                status(f"CANCELLED {job['generation']}")
+                continue
+            if job["mode"] == "srt":
+                _generate_srt(job)
+            else:
+                _transcribe(job["media"], job["seek"], job["generation"])
+        except Exception as exc:  # noqa: BLE001
+            # 单个任务失败不让进程死掉（否则播放器反复判定追赶→重启→死循环）
+            status(f"✗ 任务异常: {exc}")
+            import traceback
+
+            traceback.print_exc()
+            status(f"TASK_DONE {job.get('generation', 0)}")
 
 
 if __name__ == "__main__":

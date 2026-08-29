@@ -1,17 +1,19 @@
 # Live Subtitle 配置
 # 复制为 config.yaml 后按需修改
 
-# ---- 识别（whisper）----
-# 档位选择（GPU 实测 The Pitt 60s，5060Ti）：
-#   small   ~460MB  转写 x4.2 实时率  最快最省，个别词有错
-#   medium  ~1.5GB  转写 x8.4 实时率  性价比之王（推荐）
-#   large-v3 ~3GB  转写 x6.3 实时率  最准，加载慢（38s）
+# ---- 识别引擎 ----
+# 引擎选择（本机实测：RTX 5060 Ti，TTS 中/日/英样本 + The Pitt 60s）：
+#   qwen        4.7GB  6GB 显存  52 语言+22 中文方言，自带语种识别，中/英零错误（推荐）
+#   sensevoice  0.9GB  2GB 显存  中日韩粤快而准（CPU 也可实时），英语明显较弱
+#   medium      1.5GB  4GB 显存  whisper 通用款，中文数字偶错
+#   large-v3    5.8GB  8GB 显存  whisper 语言覆盖最广，加载慢（约 40s）
+#   small/base/tiny        1-2GB 显存  低配机器兜底，识别较粗
 asr:
-  model: "medium"         # tiny/base/small/medium/large-v3（无独显 CPU 用 small）
+  model: "qwen"            # qwen/sensevoice/tiny/base/small/medium/large-v3
   device: "cuda"           # cuda = NVIDIA 显卡；cpu = 纯 CPU
-  compute: "float16"       # cuda 用 float16；cpu 用 int8
-  language: "en"           # 原声语言：en/ja/ko/fr/de/es...（留空=自动检测）
-  beam_size: 5             # 束搜索宽度（实时场景可降到 1 更快）
+  compute: "float16"       # 仅 whisper 用：cuda→float16，cpu→int8
+  language: "auto"         # auto=自动识别语种；或 zh/yue/en/ja/ko/fr/de/es...
+  beam_size: 5             # 仅 whisper 用：束搜索宽度（实时场景可降到 1 更快）
 
 # ---- 翻译（Ollama 本地大模型）----
 # 档位选择（本机实测）：

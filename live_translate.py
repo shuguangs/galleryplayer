@@ -25,16 +25,15 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-# 自包含环境：venv 自带 nvidia CUDA 库 + 引擎目录模型缓存，无需调用方注入
+# 自包含环境：引擎目录模型缓存，无需调用方注入。
+# cu12 nvidia DLL 只对 whisper(ctranslate2) 需要（main 里按引擎判断）——
+# torch(cu13) 引擎注入会被旧 cuDNN 污染报 SUBLIBRARY_VERSION_MISMATCH。
 _BASE = Path(__file__).resolve().parent
-_NV = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
-if _NV.is_dir():
-    _add = [os.pathsep.join(str(_NV / d / "bin") for d in ("cublas", "cudnn", "cuda_nvrtc"))]
-    # 防止极旧 FFI 库路径污染用 setdefault 而非覆盖
-    os.environ["PATH"] = _add[0] + os.pathsep + os.environ.get("PATH", "")
 _cache = _BASE / "models" / "hf" / "hub"
 if _cache.is_dir():
     os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(_cache))
+
+TORCH_ENGINES = ("qwen", "sensevoice")  # 走 asr_engines.py（torch 后端）
 
 import yaml
 
@@ -61,41 +60,19 @@ def load_cfg(path: Path) -> dict:
 # ------------------------------------------------------------------ translate
 
 def translate_text(text: str, endpoint: str, model: str, target: str) -> str:
-    """调用 Ollama 翻译一段文本（本地，免费，离线）。"""
-    body = json.dumps({
-        "model": model,
-        "stream": False,
-        "messages": [
-            {"role": "system",
-             "content": (f"You are a professional subtitle translator. "
-                         f"Translate the following text into {target}. "
-                         f"Output ONLY the translation, keep names/numbers unchanged, "
-                         f"no explanations.")},
-            {"role": "user", "content": text},
-        ],
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{endpoint}/api/chat", data=body,
-        headers={"Content-Type": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    out = data.get("message", {}).get("content", "").strip()
-    # Some models (e.g. aya-expanse) leak special tokens / turn markers.
-    out = out.replace("<|END_OF_TURN_TOKEN|>", "").replace("<|end_of_turn|>", "")
-    out = out.replace("<|im_end|>", "").replace("<|endoftext|>", "").strip()
-    return out
+    """单次翻译（无上下文）。批处理走 make_translator 的 Translator（带前文）。"""
+    from translate_service import Translator
+
+    return Translator(endpoint, model, target, context_lines=0, timeout=600)(text)
 
 
 def make_translator(cfg: dict):
     tr = cfg["translate"]
     if not tr["enabled"]:
         return None
+    from translate_service import Translator
 
-    def fn(text: str) -> str:
-        return translate_text(text, tr["endpoint"], tr["model"], tr["target_lang"])
-
-    return fn
+    return Translator(tr["endpoint"], tr["model"], tr["target_lang"], timeout=600)
 
 
 # --------------------------------------------------------------------- main
@@ -125,9 +102,28 @@ def main() -> None:
         print(f"文件不存在: {media}")
         sys.exit(1)
 
-    print(f"[1/2] 加载 whisper {asr['model']} ({asr['device']}/{asr['compute']}) ...", flush=True)
+    engine = str(asr["model"])
+    if engine not in TORCH_ENGINES:
+        # cu12 nvidia DLL 仅 whisper(ctranslate2) 需要
+        _nv = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
+        if _nv.is_dir():
+            os.environ["PATH"] = (
+                os.pathsep.join(str(_nv / d / "bin")
+                                for d in ("cublas", "cudnn", "cuda_nvrtc"))
+                + os.pathsep + os.environ.get("PATH", ""))
+    print(f"[1/2] 加载 {engine} ({asr['device']}) ...", flush=True)
     t0 = time.perf_counter()
-    model = WhisperModel(asr["model"], device=asr["device"], compute_type=asr["compute"])
+    if engine in ("qwen", "sensevoice"):
+        import asr_engines
+
+        if engine == "qwen":
+            model = asr_engines.load_qwen(asr["device"])
+        else:
+            model = asr_engines.load_sensevoice(asr["device"])
+        vad = asr_engines.load_vad()
+    else:
+        vad = None
+        model = WhisperModel(engine, device=asr["device"], compute_type=asr["compute"])
     print(f"      模型就绪 {time.perf_counter() - t0:.0f}s", flush=True)
 
     translator = make_translator(cfg)
@@ -140,62 +136,82 @@ def main() -> None:
 
     print("转写中 ...", flush=True)
     t1 = time.perf_counter()
-    segments, info = model.transcribe(
-        str(media), language=asr["language"] or None,
-        beam_size=int(asr["beam_size"]),
-        vad_filter=True,  # 跳过静音段
-    )
-    segs = list(segments)
-    print(f"      转写完成 {time.perf_counter() - t1:.0f}s，"
-          f"语言 {info.language} (p={info.language_probability:.2f})，{len(segs)} 句\n")
+    if engine in ("qwen", "sensevoice"):
+        # qwen / sensevoice：VAD 段时间戳真实（asr_engines 内已含标点分句）
+        from faster_whisper import decode_audio
 
-    # 超长段按标点二次断句——先过滤碎片、合并相邻短句、压缩静音跨度
+        audio = decode_audio(str(media), sampling_rate=16000)
+        rows = list(asr_engines.stream_transcribe(
+            model, vad, engine, audio, asr["language"] or "auto"))
+        lang_note = asr["language"] or "auto"
+        lines: list[tuple[float, float, str]] = list(rows)
+        print(f"      转写完成 {time.perf_counter() - t1:.0f}s，"
+              f"语言 {lang_note}，{len(lines)} 句\n")
+    else:
+        segments, info = model.transcribe(
+            str(media), language=asr["language"] or None,
+            beam_size=int(asr["beam_size"]),
+            vad_filter=True,  # 跳过静音段
+            word_timestamps=True,  # 词级时间戳：断句时用真实语音时间，不按字数估算
+        )
+        segs = list(segments)
+        print(f"      转写完成 {time.perf_counter() - t1:.0f}s，"
+              f"语言 {info.language} (p={info.language_probability:.2f})，{len(segs)} 句\n")
+
+    # 忠实模式断句：过滤碎片、合并相邻短句、按词级时间戳+标点切长句。
+    # 时间轴一律取自 whisper 真实时间（词级优先），绝不压缩/按字数比例估算——
+    # 否则长段被塞进固定窗口，越往后字幕偏得越早。
     def clean_rows(rows) -> list[tuple[float, float, str]]:
         import re as _re
 
         def has_words(t: str) -> bool:
             return bool(_re.search(r"[A-Za-z\u4e00-\u9fff0-9]", t))
 
-        # 1) 过滤纯标点碎片 + 合并相邻短句
-        merged: list[tuple[float, float, str]] = []
-        for start, end, text in rows:
+        # 1) 过滤纯标点碎片 + 合并相邻短句（span 用真实首尾时间）
+        merged: list[tuple[float, float, str, list]] = []
+        for start, end, text, words in rows:
             text = text.strip()
             if not has_words(text):
                 continue
+            words = list(words or [])
             if merged and start - merged[-1][1] <= 1.5 \
                     and len(merged[-1][2]) + len(text) <= 120:
-                s0, _e0, t0 = merged[-1]
-                merged[-1] = (s0, max(_e0, end), (t0 + " " + text).strip())
+                s0, _e0, t0, w0 = merged[-1]
+                merged[-1] = (s0, max(_e0, end), (t0 + " " + text).strip(), w0 + words)
             else:
-                merged.append((start, end, text))
+                merged.append((start, end, text, words))
 
         out: list[tuple[float, float, str]] = []
-        for start, end, text in merged:
-            # 2) 压缩静音跨度：显示时长 = 文本 × 0.5s/字，上限 10s（字幕阅读速度）
-            span = end - start
-            target = min(max(6.0, len(text) * 0.5), 10.0)
-            if span > target:
-                end = start + target
-                span = target
-            # 3) 长文本按标点切（时间按字数比例）
-            if span > 6.0 or len(text) > 60:
-                pieces = _re.split(r"(?<=[。！？.!?，,；;])", text)
-                pieces = [p.strip() for p in pieces if p.strip() and has_words(p)]
-                if not pieces:
-                    pieces = [text]
-                total_chars = max(1, sum(len(p) for p in pieces))
-                t = start
-                for p in pieces:
-                    seg_span = span * len(p) / total_chars
-                    out.append((t, min(end, t + seg_span), p))
-                    t += seg_span
-            else:
-                out.append((start, end, text))
+        for start, end, text, words in merged:
+            # 2) 长句按词级时间戳+标点切：句末标点所在词的真实 end 即断点
+            if words and len(words) > 1 and (end - start > 6.0 or len(text) > 60):
+                pieces: list[tuple[float, float, str]] = []
+                buf_text = ""
+                buf_start = None
+                buf_end = None
+                for w in words:
+                    if buf_start is None:
+                        buf_start = w.start
+                    buf_text += w.word
+                    buf_end = w.end
+                    if w.word.rstrip()[-1:] in "。！？.!?,，、；;" and has_words(buf_text):
+                        pieces.append((buf_start, buf_end, buf_text.strip()))
+                        buf_text = ""
+                        buf_start = None
+                if buf_text and has_words(buf_text):
+                    pieces.append((buf_start, buf_end, buf_text.strip()))
+                if pieces:
+                    out.extend(pieces)
+                    continue
+            # 3) 短句 / 无词级时间戳：直接用 whisper 原始时间（不压缩）
+            out.append((start, end, text))
         return out
 
-    lines: list[tuple[float, float, str]] = []
-    for s in segs:
-        lines.extend(clean_rows([(s.start, s.end, s.text or "")]))
+    if engine not in ("qwen", "sensevoice"):
+        lines = []
+        for s in segs:
+            lines.extend(clean_rows(
+                [(s.start, s.end, s.text or "", getattr(s, "words", None))]))
     print(f"      断句后 {len(lines)} 条\n")
 
     out_lines: list[tuple[float, float, str, str]] = []
@@ -237,19 +253,9 @@ def _ollama_ping(endpoint: str) -> bool:
 
 
 def _write_srt(path: Path, rows) -> None:
-    def ts(t: float) -> str:
-        h, r = divmod(int(t * 1000), 3600000)
-        m, r = divmod(r, 60000)
-        s, ms = divmod(r, 1000)
-        return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    from translate_service import write_srt_file
 
-    parts = []
-    for i, (start, end, orig, zh) in enumerate(rows, 1):
-        parts.append(f"{i}\n{ts(start)} --> {ts(end)}\n{orig}")
-        if zh:
-            parts.append(zh)
-        parts.append("")
-    path.write_text("\n".join(parts), encoding="utf-8")
+    write_srt_file(path, list(rows))
 
 
 if __name__ == "__main__":

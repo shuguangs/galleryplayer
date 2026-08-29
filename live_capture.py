@@ -23,7 +23,10 @@ import wave
 from pathlib import Path
 
 import numpy as np
-from faster_whisper import WhisperModel
+from faster_whisper import WhisperModel  # noqa: F401  #（whisper 引擎运行时才用）
+
+from ollama_service import ensure_ollama
+from translate_service import Translator
 
 # 子进程（播放器 QProcess）以 GBK 控制台运行时，print 中文/✓✗ 会 UnicodeEncodeError
 for _s in (sys.stdout, sys.stderr):
@@ -54,16 +57,15 @@ class _SafeOut:
 
 sys.stdout = _SafeOut(sys.stdout)
 
-# 自包含环境：venv 自带 nvidia CUDA 库 + 引擎目录模型缓存（强制覆盖调用方
-# 的 HF 缓存变量，防止指向空间不足的盘导致模型下载失败崩溃）
+# 自包含环境：HF 缓存强制指到引擎目录（防止调用方环境变量指向空间不足的盘）。
+# cu12 nvidia DLL 只对 whisper(ctranslate2) 注入（main 里按引擎判断）——
+# torch(cu13) 引擎注入会被旧 cuDNN 污染报 SUBLIBRARY_VERSION_MISMATCH。
 _BASE = Path(__file__).resolve().parent
-_NV = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
-if _NV.is_dir():
-    _add = [os.pathsep.join(str(_NV / d / "bin") for d in ("cublas", "cudnn", "cuda_nvrtc"))]
-    os.environ["PATH"] = _add[0] + os.pathsep + os.environ.get("PATH", "")
 _cache = _BASE / "models" / "hf" / "hub"
 if _cache.is_dir():
     os.environ["HUGGINGFACE_HUB_CACHE"] = str(_cache)
+
+TORCH_ENGINES = ("qwen", "sensevoice")  # 走 asr_engines.py（torch 后端）
 
 WINDOW_SECS = 5.0      # 滑动窗长度（每窗转写一次）
 OVERLAP_SECS = 1.0     # 窗口重叠（保证语句不切断）
@@ -72,52 +74,37 @@ SR = 16000
 
 # ------------------------------------------------------------------ translate
 
-class Translator:
-    def __init__(self, endpoint: str, model: str, target: str = "zh"):
-        self.endpoint, self.model, self.target = endpoint, model, target
-
-    def __call__(self, text: str) -> str:
-        body = json.dumps({
-            "model": self.model, "stream": False,
-            "messages": [
-                {"role": "system",
-                 "content": (f"You are a professional subtitle translator. Translate "
-                             f"into {self.target}. Output ONLY the translation, keep "
-                             f"names/numbers, no explanations.")},
-                {"role": "user", "content": text},
-            ],
-        }).encode("utf-8")
-        req = urllib.request.Request(f"{self.endpoint}/api/chat", data=body,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=600) as resp:
-            out = json.loads(resp.read().decode("utf-8"))["message"]["content"]
-        for mark in ("<|END_OF_TURN_TOKEN|>", "<|end_of_turn|>", "<|im_end|>", "<|endoftext|>"):
-            out = out.replace(mark, "")
-        return out.strip()
-
-
 # ------------------------------------------------------------------ workers
 
-def transcribe_worker(model: WhisperModel, jobs: queue.Queue, out: queue.Queue,
-                      language: str | None, translator) -> None:
+def transcribe_worker(model, engine: str, jobs: queue.Queue, out: queue.Queue,
+                      language: str | None, translator, status=print) -> None:
     """消费音频块，转写+翻译，结果放 out（音频块为 np.float32 16kHz）。"""
+    import asr_engines
+
     while True:
         item = jobs.get()
         if item is None:
             out.put(None)  # EOF：通知主循环结束（wav 模拟模式）
             return
         t0, samples = item
-        segments, info = model.transcribe(
-            samples, language=language, beam_size=1, vad_filter=False,
-        )
-        text = " ".join(s.text.strip() for s in segments).strip()
+        if engine in TORCH_ENGINES:
+            # qwen / sensevoice：窗口整段直推（窗口自带重叠，无需 VAD）
+            if engine == "qwen":
+                text, _det = asr_engines.qwen_transcribe(model, samples, language)
+            else:
+                text = asr_engines.sv_transcribe(model, samples, language)
+        else:
+            segments, info = model.transcribe(
+                samples, language=language, beam_size=1, vad_filter=False,
+            )
+            text = " ".join(s.text.strip() for s in segments).strip()
         zh = ""
         if text and translator is not None:
             try:
                 zh = translator(text)
             except Exception as exc:  # noqa: BLE001
                 zh = ""
-                print(f"✗ 翻译失败（Ollama）: {exc}", flush=True)
+                status(f"✗ 翻译失败（Ollama）: {exc}")
         out.put((t0, text, zh))
 
 
@@ -255,27 +242,51 @@ def main() -> None:
     if args.log:
         threading.Thread(target=_heartbeat, daemon=True).start()
 
-    print(f"加载 whisper {args.model} ({args.device}) ...", flush=True)
+    def status(msg: str) -> None:
+        if log_fp is not None:
+            log_fp.write("# " + msg + "\n")
+            log_fp.flush()
+        print(msg, flush=True)
+
+    print(f"加载 {args.model} ({args.device}) ...", flush=True)
     t0 = time.perf_counter()
-    compute = "float16" if args.device == "cuda" else "int8"
-    model = WhisperModel(args.model_dir or args.model, device=args.device,
-                         compute_type=compute)
+    if args.model in TORCH_ENGINES:
+        # cu12 nvidia DLL 仅 whisper(ctranslate2) 需要
+        import asr_engines
+
+        if args.model == "qwen":
+            model = asr_engines.load_qwen(args.device, status)
+        else:
+            model = asr_engines.load_sensevoice(args.device, status)
+    else:
+        _nv = _BASE / ".venv" / "Lib" / "site-packages" / "nvidia"
+        if _nv.is_dir():
+            os.environ["PATH"] = (
+                os.pathsep.join(str(_nv / d / "bin")
+                                for d in ("cublas", "cudnn", "cuda_nvrtc"))
+                + os.pathsep + os.environ.get("PATH", ""))
+        from faster_whisper import WhisperModel
+
+        compute = "float16" if args.device == "cuda" else "int8"
+        model = WhisperModel(args.model_dir or args.model, device=args.device,
+                             compute_type=compute)
     print(f"模型就绪 {time.perf_counter() - t0:.0f}s", flush=True)
 
     translator = Translator(args.ollama, args.ollama_model) if args.translate else None
     if translator:
-        print(f"翻译启用: {args.ollama_model} → zh", flush=True)
-        try:
-            urllib.request.urlopen(f"{args.ollama}/api/tags", timeout=5)
-        except Exception:
-            print("✗ Ollama 服务不可用（11434 未启动）——仅出原文字幕，翻译失败会提示",
-                  flush=True)
+        status(f"翻译启用: {args.ollama_model} → zh")
+        ready, error = ensure_ollama(args.ollama, args.ollama_model, status)
+        if ready:
+            status(f"TRANSLATE_READY {args.ollama_model}")
+        else:
+            status(f"TRANSLATE_ERROR {error}")
+            translator = None
 
     jobs: queue.Queue = queue.Queue()
     out: queue.Queue = queue.Queue()
     threading.Thread(
         target=transcribe_worker,
-        args=(model, jobs, out, args.lang or None, translator),
+        args=(model, args.model, jobs, out, args.lang or None, translator, status),
         daemon=True,
     ).start()
 
