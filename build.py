@@ -136,7 +136,7 @@ def main() -> int:
     vendor_out = target / "vendor"
     vendor_out.mkdir(parents=True, exist_ok=True)
     shutil.copy2(dll, vendor_out / dll.name)
-    shutil.copy2(ROOT / "README.md", target / "使用说明.md")
+    shutil.copy2(ROOT / "README.zh-CN.md", target / "使用说明.md")
     shutil.copy2(ROOT / "安装运行环境.bat", target / "安装运行环境.bat")
     shutil.copy2(ROOT / "清除后台字幕模型.bat", target / "清除后台字幕模型.bat")
 

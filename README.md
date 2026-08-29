@@ -1,121 +1,121 @@
-# 🎬 GalleryPlayer（媒体播放器）
+# 🎬 GalleryPlayer
 
-> 一个专门用来**看图、看视频**的本地播放器：把整个文件夹打开，图片和视频混在一个列表里，滚轮一滚就能挨个翻过去——还能给外语视频配上**实时双语字幕**。
+> A local player built for **browsing images and watching videos**: open a folder and every picture and video sits in one list — scroll and flip through them one by one. It also adds **real-time bilingual subtitles** to foreign-language videos.
 
-![Platform](https://img.shields.io/badge/平台-Windows-0078D6?logo=windows&logoColor=white)
-![Portable](https://img.shields.io/badge/便携-免安装-green)
-![实时字幕](https://img.shields.io/badge/实时字幕-AI双语-8A2BE2)
-![License](https://img.shields.io/badge/License-保留所有权利-lightgrey)
+![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
+![Portable](https://img.shields.io/badge/Portable-No%20Install-green)
+![Live%20Captions](https://img.shields.io/badge/Live_Captions-AI_Bilingual-8A2BE2)
+![License](https://img.shields.io/badge/License-All%20Rights%20Reserved-lightgrey)
 
-**English version: [README.en.md](README.en.md)**
-
----
-
-## ✨ 它能干什么
-
-- **看图 + 看视频，一个列表通吃**：不用在图片软件和播放器之间来回切换，文件夹里有什么就看什么
-- **三种看法任选**：方块格子墙、按原图比例的瀑布流、带所有信息的明细列表
-- **视频自动出封面**：每个视频自动截一张封面图，还标好时长，一眼认出是哪一集
-- **看到一半，下次接着看**：关掉视频再打开，自动从上次的位置继续
-- **字幕自动跟上**：视频旁边放个同名字幕文件就能显示，还能调字号、调快慢
-- **手机照片也能看**：iPhone 拍的照片、最新格式的图片，直接打开
-- **网盘 / 共享文件夹直接看**：局域网里的共享目录、挂载的网络盘符，照样浏览播放
-- **想怎么排就怎么排**：浏览列表和左侧文件树都能按名称 / 修改时间 / 大小排序，升序降序随意切；打开播放器时，播放列表自动沿用你选的排序方式
-- **外部双击，直接在当前窗口播放**：播放器开着的时候，在文件夹里双击视频 / 图片（或右键「打开方式」选它），不会再多开一个窗口，就在当前窗口里直接播放；双击文件夹、压缩包也是一样
-- **免安装，拷走即用**：整个文件夹复制到 U 盘带到任何电脑都能跑，不写注册表、不往系统里装东西
-- **界面简洁**：深色界面，鼠标不动时控制条自动藏起来，沉浸式观看
+**中文版：[README.zh-CN.md](README.zh-CN.md)**
 
 ---
 
-## 🎙️ 实时字幕与 AI 翻译
+## ✨ What it does
 
-全程**本地离线**运行，不上传任何音频。播放外语视频时，字幕随着语音即时滚出——原文一行，中文翻译一行。
+- **Images and videos in one list**: no switching between a photo viewer and a video player — whatever is in the folder, you just keep scrolling.
+- **Three ways to browse**: a uniform grid, a waterfall that keeps each image's real aspect ratio, and a detailed list with all the info.
+- **Auto covers for videos**: every video gets a thumbnail and its duration shown, so you can tell at a glance which episode is which.
+- **Resume playback**: close a video halfway and it continues from where you left off next time.
+- **Subtitles just work**: drop a same-name subtitle file next to the video; adjust the font size and timing on the fly.
+- **Phone photos included**: HEIC and other modern image formats open directly.
+- **Network folders work too**: browse and play from shared LAN folders and mapped network drives.
+- **Sort it your way**: sort the file browser and the left folder tree by name / modified time / size, ascending or descending; the playlist inherits your chosen order when the player opens.
+- **Open from outside, play in the current window**: while the player is running, double-click a video or image in Explorer (or pick it via "Open with") and it plays right in the current window — no second window. Folders and archives work the same way.
+- **Truly portable**: copy the whole folder to a USB stick and it runs on any PC — no install, no registry, nothing left behind.
+- **Clean, immersive UI**: dark theme; the controls fade out when the mouse is idle.
 
-- **实时双语字幕**：本地语音识别 + 本地大模型翻译，原文先出、译文紧跟其后
-- **进度条看得见**：已转写的区间在进度条上以青色标出，悬停可看到「转写至 XX」
-- **一键后台出 SRT**：右键视频即可后台生成完整 SRT 字幕（识别 + 翻译），完成或失败都会弹系统通知，中途可取消；支持多选视频批量生成
-- **三引擎可选**：设置里切换识别引擎，每个引擎都标好磁盘占用和显存需求，并有合计占用参考；显存不够时自动回退到更小的引擎
-- **一键安装**：设置界面点一下即可自动装好引擎（自动探测显卡，选对 CUDA 版 PyTorch，从国内源拉模型）
-- **稳定可靠**：识别引擎崩溃自动恢复；生成 SRT 时与实时字幕自动错开，互不打架
+---
 
-### 识别引擎怎么选（均为本机实测）
+## 🎙️ Live captions & AI translation
 
-| 引擎 | 磁盘 / 显存 | 特点 |
+Everything runs **locally and offline** — no audio ever leaves your machine. While watching a foreign-language video, captions roll out as people speak: one line in the original language, one line translated to Chinese.
+
+- **Real-time bilingual captions**: local speech recognition plus a local LLM for translation — the original line appears first, the translation follows right after.
+- **Visible progress**: transcribed ranges are drawn in teal on the seekbar; hover to see "transcribed up to …".
+- **One-click background SRT**: right-click a video to generate a full SRT subtitle (recognition + translation) in the background. A system notification pops up when it finishes or fails, and it can be cancelled midway; select multiple videos to batch-generate.
+- **Three ASR engines**: switch engines in Settings — each one is labelled with its disk footprint and VRAM needs, plus a combined-usage readout. If VRAM runs short, the app falls back to a smaller engine automatically.
+- **One-click setup**: the Settings dialog installs everything for you — detects your GPU, picks the right CUDA-enabled PyTorch build, and pulls models from a fast mirror.
+- **Resilient**: the recognition engine auto-recovers after a crash; SRT generation and live captions coordinate so they never fight over the engine.
+
+### Which engine to pick (measured on this machine)
+
+| Engine | Disk / VRAM | Notes |
 | --- | --- | --- |
-| **Qwen3-ASR-1.7B**（默认） | 4.7GB / ~6GB | 52 种语言自带语种识别，中英零错误率，质量最好 |
-| SenseVoice-small | 0.9GB / ~2GB | 中日韩粤快而准，CPU 也能跑；英文较弱 |
-| faster-whisper（tiny~large-v3） | 0.5–5.8GB / 1–8GB | 语言覆盖最广，低配兜底 |
+| **Qwen3-ASR-1.7B** (default) | 4.7GB / ~6GB | 52 languages with auto language ID; best quality |
+| SenseVoice-small | 0.9GB / ~2GB | Fast and accurate for zh/ja/ko/yue, runs on CPU; weaker on English |
+| faster-whisper (tiny–large-v3) | 0.5–5.8GB / 1–8GB | Widest language coverage, low-end fallback |
 
-翻译默认用本地 **qwen3:8b**（Ollama，口语化自然）；显存充裕的话，SRT 生成还可选 **HY-MT2-30B**（llama.cpp 后端，翻译质量更佳，用完即关）。
+Translation defaults to local **qwen3:8b** (via Ollama, natural colloquial output); with VRAM to spare, SRT generation can also use **HY-MT2-30B** (llama.cpp backend, better quality, started on demand and shut down afterwards).
 
 > [!NOTE]
-> 实时字幕的默认引擎需要一台 **NVIDIA 显卡（建议显存 8GB 以上）**。没有独显或显存偏小也没关系——设置里改用 SenseVoice 或 whisper 小档位即可。
+> The default live-caption engine needs an **NVIDIA GPU (8GB+ VRAM recommended)**. No discrete GPU or little VRAM? Just switch to SenseVoice or a small whisper tier in Settings.
 
 > [!TIP]
-> 首次使用：`Ctrl+,` 打开设置 → 「实时字幕」区 → 点「一键安装」，装完选好引擎和语言就能用。详细说明按 `F1`。
+> First time: `Ctrl+,` to open Settings → "Live captions" section → click one-click install. Pick an engine and language and you're set. Press `F1` for details.
 
 ---
 
-## 🚀 怎么开始用
+## 🚀 Getting started
 
-1. 下载解压，得到整个文件夹（**不要只把 exe 拖出来**，旁边那些文件都是它的一部分）
-2. 全新电脑第一次用，先双击运行一下 `安装运行环境.bat`（自动装好系统组件，以后就不用再装）
-3. 双击 `媒体播放器.exe`
+1. Download and unzip — keep the **whole folder** (don't drag out just the .exe; the files beside it are part of the app).
+2. On a fresh PC, run `安装运行环境.bat` once (installs the required system component).
+3. Double-click `媒体播放器.exe`.
 
-**首次打开**会让你选择界面语言（中文 / English），之后随时可以在 **设置 → 界面语言** 里切换。
+**On first launch** you'll be asked to pick the interface language (中文 / English). You can switch anytime in **Settings → Language**.
 
-### 最常用的几个操作
+### The essentials
 
-| 操作 | 怎么做 |
+| Action | How |
 | --- | --- |
-| 打开文件夹 | `Ctrl+O`，或直接把文件夹拖进窗口 |
-| 翻看上一个 / 下一个 | 滚轮（看图看视频都是） |
-| 播放 / 暂停 | 点画面，或按空格 |
-| 全屏 | 按 `F`，或双击画面 |
-| 快进快退 | `←` `→`（5 秒），`Ctrl+←→` 大步 60 秒 |
-| 音量 | `↑` `↓`，或 `Ctrl+滚轮` |
-| 上一集 / 下一集 | 查看器里按 `PageUp` / `PageDown` |
-| 字幕 | 按 `V` 显示/隐藏，`J` 切换字幕轨 |
-| 截图 / 录 GIF | 按 `S` 存一张图，按 `G` 录一段小动画 |
-| 设置 | `Ctrl+,` |
+| Open a folder | `Ctrl+O`, or just drag a folder into the window |
+| Previous / next | Mouse wheel (images and videos alike) |
+| Play / pause | Click the picture, or press Space |
+| Fullscreen | Press `F`, or double-click |
+| Seek | `←` `→` (5 s), `Ctrl+←→` (60 s) |
+| Volume | `↑` `↓`, or `Ctrl+Wheel` |
+| Prev / next episode | `PageUp` / `PageDown` in the viewer |
+| Subtitles | `V` to toggle, `J` to switch track |
+| Screenshot / GIF | `S` saves a still, `G` records a short clip |
+| Settings | `Ctrl+,` |
 
-完整的快捷键表在程序里按 **`F1`** 就能看到。
-
----
-
-## 💡 常见问题
-
-**视频打不开 / 很卡？**
-打开播放器后按 `Ctrl+,` 进设置，把「默认解码模式」换一种试试（比如从自动换成纯软解）。某些老显卡对特定视频格式支持不好，换一种模式通常就好。
-
-**实时字幕 / 生成 SRT 在哪开？**
-实时字幕：播放视频时右键画面 → 字幕菜单；生成 SRT：在文件列表右键视频（可多选）。两者共用同一个识别引擎，第一次用需要先在设置里「一键安装」。
-
-**提示显存不够？**
-设置里换个更小的识别引擎（SenseVoice 只需约 2GB 显存），翻译模型也可以在设置里降到 `qwen2.5:3b`。程序检测到显存不足时会自动回退。
-
-**界面变英文了怎么改回来？**
-`Ctrl+,` 打开设置 → 界面语言 → 选「中文」，按提示重启即可。
-
-**看完的视频忘了看到哪？**
-不用记——超过 1 分钟的视频都会记住进度，下次打开自动接着放。
-
-**图片 / 视频不见了？**
-试试按 `F5` 重新扫描当前文件夹；新增、删除、移动过的文件都会被检测出来。
+Press **`F1`** inside the app for the full shortcut reference.
 
 ---
 
-## 🗂️ 文件都在哪
+## 💡 FAQ
 
-- 程序目录下的 `userdata` 文件夹存放你的所有私人数据：设置、播放进度、缩略图缓存。想彻底重置，把这个文件夹删掉即可（不影响程序本身）。
-- 源码运行时，`live-subtitle/` 是字幕引擎的完整源码（独立 Python 环境，由安装脚本自动搭建）；模型文件下载到 `live-subtitle/models/`，不随程序打包。
+**A video won't play / stutters?**
+Open Settings (`Ctrl+,`) and try a different "Decode mode" — e.g. switch from auto to software. Old GPUs sometimes choke on certain formats; another mode usually fixes it.
+
+**Where do I turn on live captions / generate an SRT?**
+Live captions: right-click the video while playing → subtitle menu. SRT generation: right-click one or more videos in the file list. Both share the same recognition engine — run the one-click install in Settings first.
+
+**It says there's not enough VRAM?**
+Pick a smaller engine in Settings (SenseVoice needs only ~2GB), and lower the translation model to `qwen2.5:3b`. The app also falls back automatically when VRAM runs short.
+
+**The interface switched to another language — how do I change it back?**
+`Ctrl+,` → Language → pick your language, then restart as prompted.
+
+**Lost track of where you were in a video?**
+No need to remember — videos longer than a minute keep their position automatically.
+
+**Files disappeared?**
+Press `F5` to rescan the current folder; new, deleted and moved files are all picked up.
 
 ---
 
-## 🤖 关于本项目
+## 🗂️ Where your data lives
 
-本项目由 AI 协作完成编写：**Claude 5 Opus**、**DeepSeek 4 Pro Preview**、**Qoder** 与 **GLM**。
+- Everything personal lives in the `userdata` folder next to the program: settings, playback positions, thumbnail cache. Delete that folder to fully reset — the app itself is untouched.
+- When running from source, `live-subtitle/` holds the full caption-engine source (a separate Python environment set up automatically by the install script); models are downloaded into `live-subtitle/models/` and are not bundled with the app.
 
-## 📄 版权
+---
 
-本项目**未选择开源许可证**，保留所有权利。© 2026 shuguangs
+## 🤖 About
+
+This project was co-written by AI: **Claude 5 Opus**, **DeepSeek 4 Pro Preview**, **Qoder** and **GLM**.
+
+## 📄 License
+
+This project is **not open source licensed** — all rights reserved. © 2026 shuguangs
