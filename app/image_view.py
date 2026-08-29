@@ -124,6 +124,7 @@ class ImageView(QWidget):
         self._frames = []
         self._frame_index = 0
         self._rotation = 0
+        self._source_size = (0, 0)  # 大图异步期间不得残留上一张的尺寸
         self._load_seq += 1
         seq = self._load_seq
 

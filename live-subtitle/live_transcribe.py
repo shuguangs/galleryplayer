@@ -669,10 +669,12 @@ def main() -> None:
             _ensure_model()
         except Exception as exc:  # noqa: BLE001
             status(f"✗ 模型重载失败: {str(exc)[:120]}")
+            status(f"TASK_DONE {generation}")  # 不发会让播放器的补洞/重启调度停摆
             return
         write_state(media)
         if not media.is_file():
             status("✗ 媒体文件不存在: %s" % media)
+            status(f"TASK_DONE {generation}")
             return
         status(f"音轨模式：转写 {media.name} ...")
 
@@ -726,6 +728,8 @@ def main() -> None:
                             status("切换媒体，中断当前转写 ...")
                             return
                         _emit(seek + piece_start, seek + piece_end, piece_text)
+                    if translator is not None:
+                        _translate_q.join()  # 尾部译文随任务收尾写完，不留给下一代次
                     status(f"TASK_DONE {generation}")
                     return
 
@@ -741,6 +745,8 @@ def main() -> None:
                     return
                 if piece_text:
                     _emit(seek + piece_start, seek + piece_end, piece_text)
+            if translator is not None:
+                _translate_q.join()  # 同 whisper 路径：收尾前等译文全部写出
             status(f"TASK_DONE {generation}")
             return
 
@@ -827,6 +833,15 @@ def main() -> None:
             import traceback
 
             traceback.print_exc()
+            if job.get("mode") == "srt" and job.get("log"):
+                # 播放器的 SRT 进度窗只认 job log 里的终止标记（live log 的
+                # TASK_DONE 它不读）——漏写会让对话框永久挂起、srt_busy 卡死
+                try:
+                    job["log"].parent.mkdir(parents=True, exist_ok=True)
+                    with open(job["log"], "a", encoding="utf-8") as fp:
+                        fp.write(f"# SRT_ERROR 任务异常: {str(exc)[:150]}\n")
+                except Exception:
+                    pass
             status(f"TASK_DONE {job.get('generation', 0)}")
         finally:
             last_task_end = time.monotonic()

@@ -524,6 +524,7 @@ _TR: dict[str, dict[str, str]] = {
     "settings.install_done": {"zh": "安装完成 ✓ 现在可以右键视频生成字幕了", "en": "Install done ✓ generate subtitles from the right-click menu now"},
     "settings.install_failed": {"zh": "安装失败（看日志；可换镜像源或重试）", "en": "Install failed (see log; try another mirror)"},
     "settings.install_no_script": {"zh": "未找到 install_engine.py（请先把 live-subtitle 放到项目旁或手动指定引擎目录）", "en": "install_engine.py not found (place live-subtitle next to the project or set the engine dir)"},
+    "settings.install_no_python": {"zh": "未在系统中找到 Python：打包版安装字幕引擎需要电脑上装有 Python（python.org 或 Microsoft Store 均可），装好后再点一次安装。", "en": "Python not found: installing the caption engine from the packaged build requires Python on this machine (python.org or Microsoft Store), then click install again."},
     "settings.assoc_register": {"zh": "注册到「打开方式」", "en": "Register in \"Open with\""},
     "settings.assoc_unregister": {"zh": "取消关联", "en": "Unregister"},
     "settings.assoc_windows_only": {"zh": "文件关联仅在 Windows 上可用。", "en": "File association is only available on Windows."},

@@ -1,6 +1,7 @@
 """Main browser window: toolbar, folder tree, and the three media views."""
 from __future__ import annotations
 
+import json
 import secrets
 import threading
 import time
@@ -687,6 +688,12 @@ class MainWindow(QMainWindow):
 
         if self._archive_mode:
             return
+        # 作废进行中的目录扫描：否则后台 done 批次落地时会用文件夹内容
+        # 覆盖压缩包视图（token 匹配 + 无 stop_check 双重失效）
+        self._scan_token += 1
+        self._streaming = False
+        self._stream_items = []
+        self._stream_timer.stop()
         password: str | None = None
         entries, err = list_archive(path, None)
         while err == "password":
@@ -869,7 +876,8 @@ class MainWindow(QMainWindow):
         from .config import settings
         from .runtime import APP_DIR
 
-        if self._srt_active:
+        if self._srt_active or getattr(self, "_batch_srt_jobs", None):
+            # 引擎的 control 槽只保留最新任务：单文件与批量混发会互相覆盖
             QMessageBox.information(self, t("main_window.gen_srt"), t("main_window.gen_srt_busy"))
             return
 
@@ -954,6 +962,9 @@ class MainWindow(QMainWindow):
 
             live_engine.submit({"mode": "cancel", "media": "", "output": "",
                                 "log": "", "seek": 0.0})
+            # 轮询者已停，引擎之后写出的 CANCELLED 无人读取——必须在这里
+            # 解除互斥，否则实时字幕被 srt_busy 永久卡住
+            live_engine.srt_busy = False
         self._srt_active = False
 
     def _poll_srt_job(self) -> None:
@@ -1102,7 +1113,8 @@ class MainWindow(QMainWindow):
         from .config import settings
         from .runtime import APP_DIR
 
-        if self._batch_srt_jobs:
+        if self._batch_srt_jobs or getattr(self, "_srt_active", False):
+            # 同上：批量与单文件互斥，避免 control 槽互相覆盖导致先者永久挂起
             QMessageBox.information(self, t("main_window.gen_srt"), t("main_window.gen_srt_busy"))
             return
         if videos is None:
@@ -1174,6 +1186,7 @@ class MainWindow(QMainWindow):
             live_engine.submit({"mode": "cancel", "media": "", "output": "",
                                 "log": "", "seek": 0.0})
         live_engine.srt_busy = False
+        self._batch_srt_jobs = []  # 清队列，否则下次批量永远被"已有任务"守卫拒绝
         self._batch_srt_status.setText(t("main_window.gen_srt_cancelled"))
         btn = getattr(self, "_batch_cancel_btn", None)
         if btn is not None:
@@ -1243,6 +1256,7 @@ class MainWindow(QMainWindow):
         if done == total:
             self._batch_srt_timer.stop()
             live_engine.srt_busy = False
+            self._batch_srt_jobs = []  # 同上：清队列允许下一次批量
             btn = getattr(self, "_batch_cancel_btn", None)
             if btn is not None:
                 btn.setEnabled(False)
@@ -1994,7 +2008,7 @@ class MainWindow(QMainWindow):
             self.set_folder(p)
         elif kind == "media":
             self.set_folder(p.parent)
-            QTimer.singleShot(400, lambda target=p: self._open_path(target))
+            QTimer.singleShot(400, lambda target=p: self._open_path_when_listed(target))
         elif kind == "archive":
             self._open_archive(p)
 
@@ -2004,12 +2018,23 @@ class MainWindow(QMainWindow):
                 self._open_viewer(i)
                 return
 
+    def _open_path_when_listed(self, path: Path, attempts: int = 20) -> None:
+        """等待文件夹扫描列出目标文件再播放（冷文件夹/网络盘首批要数秒，
+        固定 400ms 的单次重试会静默丢弃）。"""
+        for i, it in enumerate(self.model.items):
+            if it.path == path:
+                self._open_viewer(i)
+                return
+        if attempts > 0:
+            QTimer.singleShot(
+                400, lambda: self._open_path_when_listed(path, attempts - 1))
+
     def _open_recent_file(self, path) -> None:
         p = Path(path)
         if not p.is_file():
             return
         self.set_folder(p.parent)
-        QTimer.singleShot(400, lambda target=p: self._open_path(target))
+        QTimer.singleShot(400, lambda target=p: self._open_path_when_listed(target))
 
     # ------------------------------------------------------- navigation history
 

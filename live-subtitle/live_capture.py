@@ -280,9 +280,7 @@ def main() -> None:
     translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang)
                   if args.translate else None)
     if translator:
-        print(f"翻译启用: {args.ollama_model} → {args.target_lang}", flush=True)
-    if translator:
-        status(f"翻译启用: {args.ollama_model} → zh")
+        status(f"翻译启用: {args.ollama_model} → {args.target_lang}")
         ready, error = ensure_ollama(args.ollama, args.ollama_model, status)
         if ready:
             status(f"TRANSLATE_READY {args.ollama_model}")
@@ -302,7 +300,19 @@ def main() -> None:
         rec_target = lambda: record_from_wav(args.input, jobs)  # noqa: E731
     else:
         rec_target = lambda: record_loopback(args.loopback, jobs)  # noqa: E731
-    threading.Thread(target=rec_target, daemon=True).start()
+
+    def _guarded_record() -> None:
+        """录音线程死亡绝不能静默：心跳仍在 touch log，播放器会永远判"存活"，
+        字幕无声消失。设备拔出等异常直接退出进程，由播放器自动重启重建设备。"""
+        try:
+            rec_target()
+        except Exception as exc:  # noqa: BLE001
+            status(f"✗ 录音线程崩溃，退出以触发自动重启: {exc}")
+            import os
+
+            os._exit(1)
+
+    threading.Thread(target=_guarded_record, daemon=True).start()
 
     srt_rows: list[tuple[float, float, str, str]] = []
     print("开始监听（Ctrl+C 停止）...\n", flush=True)

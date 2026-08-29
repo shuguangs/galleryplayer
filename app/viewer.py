@@ -491,6 +491,7 @@ class Viewer(QWidget):
             self.image_view.clear()
             self.stack.setCurrentWidget(self.video_view)
             self.previewer.set_media(item.path)
+            self._loaded_media_path = item.path
             self.controls.set_duration(item.duration or 0.0)
             self.controls.set_cache_end(0.0)
             # A new clip starts without the previous one's A-B loop marks.
@@ -506,6 +507,7 @@ class Viewer(QWidget):
                 self._switch_live_media(item.path, start or 0.0)
         else:
             self.video_view.stop()
+            self._loaded_media_path = None  # 防止旧片进度写进下一部片
             self.previewer.set_media(None)
             self.stack.setCurrentWidget(self.image_view)
             if self.image_view.load(item.path):
@@ -520,6 +522,11 @@ class Viewer(QWidget):
             return
         item = self.items[self.index]
         if not item.is_video or not settings["resume_enabled"]:
+            return
+        # mpv 里加载的必须是同一个文件：从播放列表删除正在播放的项后 index
+        # 会先指向下一项，而 mpv 的 position 还是旧片的——不校验会把旧片
+        # 进度写进新片的断点
+        if item.path != getattr(self, "_loaded_media_path", None):
             return
         try:
             pos, dur = self.video_view.position, self.video_view.duration
@@ -596,9 +603,9 @@ class Viewer(QWidget):
         then a `截图` folder next to the app (network shares are often read-only)."""
         from datetime import datetime
 
-        item = self.items[self.index]
+        item = self.items[self.index] if 0 <= self.index < len(self.items) else None
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        stem = Path(item.name).stem or "capture"
+        stem = Path(item.name).stem if item is not None else "capture"
         name = f"{stem}_{stamp}.{ext}"
 
         # 1) user-configured path
@@ -613,7 +620,8 @@ class Viewer(QWidget):
 
         # 2) beside the source video
         # 3) app-level fallback
-        for d in (Path(item.path).parent, APP_DIR / "截图"):
+        for d in (Path(item.path).parent if item is not None else APP_DIR / "截图",
+                  APP_DIR / "截图"):
             try:
                 d.mkdir(parents=True, exist_ok=True)
                 return d / name
@@ -654,29 +662,37 @@ class Viewer(QWidget):
         self._gif_max = fps * secs
         self._gif_w = max(120, min(1920, int(settings["gif_max_width"])))
         self._gif_recording = True
-        self._gif_frames = []
         self._gif_finishing = False
-        self._gif_stop = threading.Event()
+        # stop 事件与帧列表按次传参给线程：停止后立刻重录时，旧 worker 返回
+        # 不会误用新一次录制的 Event/列表（原先经 self 共享，重录竞态交错）
+        frames: list = []
+        self._gif_frames = frames
+        gif_max = self._gif_max
+        stop = threading.Event()
+        self._gif_stop = stop
         self._gif_thread = threading.Thread(
-            target=self._gif_capture_loop, args=(self._gif_interval,), daemon=True
+            target=self._gif_capture_loop,
+            args=(self._gif_interval, stop, frames, gif_max),
+            daemon=True,
         )
         self._gif_thread.start()
         self.controls.set_gif_recording(True)
         self._show_toast(t("viewer.gif_recording"))
 
-    def _gif_capture_loop(self, interval_ms: int) -> None:
+    def _gif_capture_loop(self, interval_ms: int, stop: threading.Event,
+                          frames: list, max_frames: int) -> None:
         """worker 线程自定速采样：抓帧间隔自行补偿，不占 UI 线程。"""
         import time as _t
 
-        while not self._gif_stop.is_set() and len(self._gif_frames) < self._gif_max:
+        while not stop.is_set() and len(frames) < max_frames:
             started = _t.perf_counter()
             frame = self.video_view.grab_frame()
-            if self._gif_stop.is_set():
+            if stop.is_set():
                 return  # 用户中途停止/窗口关闭
             if frame is not None:
-                self._gif_frames.append(frame)
+                frames.append(frame)
             elapsed_ms = (_t.perf_counter() - started) * 1000.0
-            self._gif_stop.wait(max(0.0, interval_ms - elapsed_ms) / 1000.0)
+            stop.wait(max(0.0, interval_ms - elapsed_ms) / 1000.0)
         if self._gif_recording:
             self._gif_done.emit()  # 采样够数 → UI 线程收尾
 
@@ -1052,7 +1068,8 @@ class Viewer(QWidget):
         ch = self.controls.sizeHint().height()
         self.controls.setGeometry(0, self.height() - ch, video_w, ch)
         self.error_label.setGeometry(0, 0, video_w, self.height())
-        if self._live_label.isVisible():
+        if self._live_label.isVisible() or True:  # 隐藏时也更新几何：否则行间隙
+            # 期间拉伸窗口，下一行字幕会按旧尺寸/旧位置显示
             width_pct = self._live_caption_display_value("width")
             height_pct = self._live_caption_display_value("height")
             w = max(240, int(video_w * width_pct / 100))
@@ -1229,8 +1246,13 @@ class Viewer(QWidget):
             self._show_toast(t("viewer.sub_loaded"))
 
     def _toggle_live_caption(self) -> None:
-        if self._live_on or self._live_paused:
+        if self._live_on:
             self._stop_live_caption()
+        elif getattr(self, "_live_paused", False):
+            # 常驻模式停止后是"暂停"而非"关闭"：菜单显示的是「开启实时字幕」，
+            # 必须恢复而不是再次停止（否则永远停在 paused，单向门）
+            self._live_paused = False
+            self._start_live_caption()
         else:
             self._start_live_caption()
 
@@ -1321,6 +1343,33 @@ class Viewer(QWidget):
         self._live_on = bool(item.is_video)
         return self._live_on
 
+    def _pause_live_for_srt(self) -> None:
+        """SRT 生成占用引擎：暂停实时字幕，并在互斥解除后自动恢复。"""
+        from . import live_engine as _le
+
+        self._live_on = False
+        self._live_paused = True
+        self._stop_live_poll()
+        self._live_label.hide()
+        self._show_toast(t("viewer.live_caption_paused_for_srt"))
+        if getattr(self, "_srt_resume_timer", None) is None:
+            timer = QTimer(self)
+            timer.setInterval(2000)
+
+            def _check() -> None:
+                if _le.srt_busy:
+                    return
+                timer.stop()
+                # 用户在此期间手动停止（菜单变「开启」后又被点开）则不再抢跑
+                if not self._live_on and self.isVisible():
+                    self._start_live_caption()
+
+            timer.timeout.connect(_check)
+            timer.start()
+            self._srt_resume_timer = timer
+        else:
+            self._srt_resume_timer.start()
+
     def _switch_live_media(self, media: Path, seek: float = 0.0,
                            catching: bool = False) -> None:
         """Tell the resident engine to transcribe another file without reloading."""
@@ -1329,8 +1378,10 @@ class Viewer(QWidget):
         from . import live_engine
 
         if live_engine.srt_busy:
-            # SRT 生成中：seek/换片会 cancel 掉 SRT 任务——暂停实时转写
-            self._show_toast(t("viewer.live_caption_paused_for_srt"))
+            # SRT 生成中：seek/换片会 cancel 掉 SRT 任务——暂停实时转写，
+            # 互斥解除后自动恢复（原先只弹提示返回，会留下有 _live_on 无轮询
+            # 的悬挂状态，SRT 结束后也没人恢复）
+            self._pause_live_for_srt()
             return
         old_log_size = self._live_log.stat().st_size if self._live_log.is_file() else 0
         if self._live_media_path != media:
@@ -1494,7 +1545,7 @@ class Viewer(QWidget):
         from . import live_engine as _le
 
         if _le.srt_busy:
-            self._show_toast(t("viewer.live_caption_paused_for_srt"))
+            self._pause_live_for_srt()
             return
         source = str(_settings["live_caption_source"])
         self._live_source = source
@@ -1641,6 +1692,17 @@ class Viewer(QWidget):
         self._live_ctl.reset_for_media(True)
         self._live_generation = 0
         self._live_log_pos = 0
+        # spawn 分支也要登记任务区间：漏了 begin_media 会让 task_spans 无条目
+        # （首个任务的青色覆盖区全程缺失、span_covered 恒 False、自动恢复无 media）
+        if source == "audio" and current_media is not None:
+            start = 0.0
+            try:
+                pos = float(self.video_view.position or 0.0)
+            except Exception:
+                pos = 0.0
+            if pos > 10:
+                start = max(0.0, pos - 5.0)
+            self._live_ctl.begin_media(current_media, start, 0, False)
         self._live_label.setText(t("viewer.live_caption_starting"))
         self._live_label.show()
         self._live_label.raise_()
@@ -1938,10 +2000,18 @@ class Viewer(QWidget):
                     self._live_label.setText(t("viewer.live_caption_catching_status"))
                     self._live_label.show()
                     self._live_label.raise_()
-                # 播放位置远超已转写前沿（seek 跳转/转写未追上）→ 自动重转
+                # 播放位置远超已转写前沿（seek 跳转/转写未追上）→ 自动重转。
+                # 前沿停滞 8 秒才发一次：引擎落后播放时 pos 每秒前移，去重
+                # 条件会频繁失效，原实现约 3 秒就 cancel 在途任务重提一次，
+                # 反而永远追不上，toast 也全程常驻
                 if rows and pos > front + 5.0:
-                    self._show_toast(t("viewer.live_caption_catching"))
-                    self._request_live_restart(pos, catching=True)
+                    if front != getattr(self, "_live_catch_front", None):
+                        self._live_catch_front = front
+                        self._live_catch_since = _time.time()
+                    elif _time.time() - getattr(self, "_live_catch_since", 0.0) >= 8.0:
+                        self._live_catch_front = None  # 提交后重新计时
+                        self._show_toast(t("viewer.live_caption_catching"))
+                        self._request_live_restart(pos, catching=True)
             else:
                 _t0, _t1, seg, zh = self._live_rows[-1]
                 glossary = settings["caption_glossary"] or {}

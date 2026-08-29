@@ -1059,6 +1059,26 @@ class SettingsDialog(QDialog):
             parts.append(f"⚠ 引擎所在盘仅剩 {free_gb:.1f}GB，不足本次下载量。")
         self.install_hint.setText(" · ".join(p for p in parts if p))
 
+    @staticmethod
+    def _installer_python():
+        """install_engine.py 需要真 Python 解释器来搭建引擎 venv。
+
+        源码运行时就是 sys.executable；打包版里 sys.executable 是播放器
+        自己（拿它启动等于再开一个播放器，安装永远不执行），改从 PATH 找。
+        返回 (程序, 参数前缀) 或 None。
+        """
+        import os
+        import shutil
+        import sys
+
+        if not getattr(sys, "frozen", False):
+            return sys.executable, []
+        for cand in (shutil.which("python"), shutil.which("python3"),
+                     shutil.which("py")):
+            if cand and os.path.basename(cand).lower().startswith(("python", "py")):
+                return cand, ["-3"] if cand.lower().endswith("py.exe") else []
+        return None, []
+
     def _start_install(self) -> None:
         from PySide6.QtCore import QProcess
 
@@ -1105,8 +1125,13 @@ class SettingsDialog(QDialog):
         proc.readyReadStandardError.connect(on_stderr)
         proc.finished.connect(on_finished)
 
-        exe = sys.executable  # system python builds the venv
-        args = [str(script), "--dir", str(pipe),
+        exe, prefix = self._installer_python()
+        if exe is None:
+            self.install_status.setText(
+                t("settings.install_no_python"))
+            self.install_status.setStyleSheet("color:#e0653f;")
+            return
+        args = [*prefix, str(script), "--dir", str(pipe),
                 "--model", str(self.install_model.currentData() or "qwen"),
                 "--mirror", self.install_mirror.currentData() or "huggingface",
                 "--translate", str(self.install_translate.currentData() or "none")]
@@ -1157,7 +1182,12 @@ class SettingsDialog(QDialog):
         proc.readyReadStandardOutput.connect(on_stdout)
         proc.readyReadStandardError.connect(on_stderr)
         proc.finished.connect(on_finished)
-        proc.start(sys.executable, [str(script), "--dir", str(pipe), "--llamacpp-only"])
+        exe, prefix = self._installer_python()
+        if exe is None:
+            self.install_status.setText(t("settings.install_no_python"))
+            self.install_status.setStyleSheet("color:#e0653f;")
+            return
+        proc.start(exe, [*prefix, str(script), "--dir", str(pipe), "--llamacpp-only"])
 
     def _browse_archive_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog

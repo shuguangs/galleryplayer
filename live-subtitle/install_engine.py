@@ -156,6 +156,12 @@ def install_llamacpp(root: Path, mirror: str) -> None:
         import zipfile
 
         for z in zips:
+            # 下载中断可能留下够大但损坏的半截 zip：不校验会在解压时崩溃，
+            # 且下次运行因"文件够大"跳过下载，反复失败
+            if not zipfile.is_zipfile(z):
+                z.unlink(missing_ok=True)
+                log("✗ 下载的压缩包损坏（已删除），请重试安装")
+                sys.exit(1)
             log(f"解压 {z.name} ...")
             with zipfile.ZipFile(z) as zf:
                 zf.extractall(llamacpp)

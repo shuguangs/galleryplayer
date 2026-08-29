@@ -109,18 +109,34 @@ def recommended_model() -> str:
     return "tiny"
 
 
+_em_cache: dict = {"key": None, "value": None}
+
+
 def effective_model() -> str:
-    """实际启动引擎用的模型。未安装的新引擎自动回退，避免升级后直接崩。"""
-    if bool(settings["hardware_aware_model"]):
+    """实际启动引擎用的模型。未安装的新引擎自动回退，避免升级后直接崩。
+
+    按输入（档位/模型/硬件感知开关/monkeypatch）缓存：model_installed 的
+    rglob 与 hardware_snapshot 的 nvidia-smi 都不便宜，而本函数在 matches()
+    等热路径被频繁调用；设置项一变 key 即失效，行为与不缓存完全一致。
+    """
+    key = (bool(settings["hardware_aware_model"]),
+           str(settings["live_model_preset"]),
+           str(settings["live_asr_model"]),
+           str(model_installed))
+    if _em_cache["key"] == key:
+        return _em_cache["value"]
+    if key[0]:
         model = recommended_model()
     else:
-        preset = str(settings["live_model_preset"])
-        model = PRESET_MODELS.get(preset, str(settings["live_asr_model"]))
-    if model_installed(model):
-        return model
-    if model == "qwen" and model_installed("sensevoice"):
-        return "sensevoice"
-    return whisper_fallback()
+        model = PRESET_MODELS.get(key[1], key[2])
+    if not model_installed(model):
+        if model == "qwen" and model_installed("sensevoice"):
+            model = "sensevoice"
+        else:
+            model = whisper_fallback()
+    _em_cache["key"] = key
+    _em_cache["value"] = model
+    return model
 
 
 def vram_footprint_gb(include_translate: bool = True) -> float:
@@ -318,7 +334,7 @@ def next_generation(control: Path) -> int:
 def submit(job: dict) -> int | None:
     found = paths()
     if found is None:
-        return False
+        return None  # 调用方按 `if not generation`/`is None` 判断，勿返回 False
     _log, _pid, control, _state = found
     job["generation"] = next_generation(control)
     tmp = control.with_suffix(control.suffix + ".tmp")

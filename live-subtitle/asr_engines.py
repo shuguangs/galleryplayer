@@ -103,7 +103,10 @@ def _ascii_junction(path: Path) -> Path:
     if probe is not None and link_probe is None:
         try:
             link.parent.mkdir(parents=True, exist_ok=True)
-            if link.exists():
+            # exists() 对悬空 junction（盘符变化后指向不存在目标）返回 False，
+            # 必须按链接本身判断存在（os.path.islink 认 junction），否则旧的
+            # 删不掉、mklink 又报已存在，回退中文路径后 SenseVoice 永久加载失败
+            if link.exists() or os.path.islink(link):
                 link.rmdir()
             subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(path)],
                            capture_output=True, timeout=15,

@@ -288,6 +288,14 @@ class SeekBar(QWidget):
         self._hide_bubble()
         self.update()
 
+    def hideEvent(self, e) -> None:  # noqa: N802
+        super().hideEvent(e)
+        # 拖动中被隐藏（如滚轮切到图片收起视频控件）收不到 mouseRelease，
+        # 不复位会让 _scrubbing 永久卡死、进度条与字幕 seek 检测全部失效
+        if self._scrubbing:
+            self._scrubbing = False
+            self.scrub_finished.emit()
+
     def wheelEvent(self, e):
         # let the viewer handle wheel (media switching) rather than scrubbing
         e.ignore()

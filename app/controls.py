@@ -593,19 +593,24 @@ class ControlBar(QWidget):
         """Fold the least-used video buttons into the "more" menu when narrow."""
         if not hasattr(self, "_flex"):
             return
+        # 图片模式下视频按钮必须保持隐藏：这里原先无条件 re-show，会把
+        # set_media_kind(False) 刚藏掉的全套视频控件在宽窗口下全部复活
+        pool = [(w, top) for w, top in self._flex
+                if self._is_video or w not in self.vid_widgets]
         # start fully expanded
-        for w, _ in self._flex:
+        for w, _ in pool:
             w.show()
         self._more_btn.hide()
         # reserve room for the more button itself (icon ~30px) + margins
         avail = self.width() - 28 - 34
         if self._row_width() <= avail:
+            self._more_btn.setVisible(False)
             return
-        for w, _ in self._flex:
+        for w, _ in pool:
             if self._row_width() <= avail:
                 break
             w.hide()
-        hidden = [w for w, _ in self._flex if w.isHidden()]
+        hidden = [w for w, _ in pool if w.isHidden()]
         self._more_btn.setVisible(bool(hidden))
 
     def _rebuild_more_menu(self) -> None:
