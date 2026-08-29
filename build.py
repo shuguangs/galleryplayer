@@ -70,6 +70,27 @@ def _prune(target: Path) -> None:
     print(f"精简掉 {freed / 1024 / 1024:.0f} MB 未使用的组件")
 
 
+def _copy_public_scenarios(target: Path) -> None:
+    """Copy only tracked scenario JSONs; ignored local/private scenarios stay out."""
+    result = subprocess.run(
+        ["git", "ls-files", "--", "live-subtitle/scenarios/*.json"],
+        cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    files = []
+    if result.returncode == 0:
+        for name in result.stdout.splitlines():
+            source = ROOT / name
+            if source.is_file():
+                files.append(source)
+    if not files:
+        print("警告：没有找到已跟踪的公共场景 JSON，跳过场景文件打包", file=sys.stderr)
+        return
+    out = target / "live-subtitle" / "scenarios"
+    out.mkdir(parents=True, exist_ok=True)
+    for source in files:
+        shutil.copy2(source, out / source.name)
+    print(f"已复制 {len(files)} 个公共场景 JSON")
+
 def main() -> int:
     dll = ROOT / "vendor" / "libmpv-2.dll"
     if not dll.exists():
@@ -139,6 +160,7 @@ def main() -> int:
     shutil.copy2(ROOT / "README.zh-CN.md", target / "使用说明.md")
     shutil.copy2(ROOT / "安装运行环境.bat", target / "安装运行环境.bat")
     shutil.copy2(ROOT / "清除后台字幕模型.bat", target / "清除后台字幕模型.bat")
+    _copy_public_scenarios(target)
 
     total = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
     print(f"\n完成：{target}")
