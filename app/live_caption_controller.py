@@ -121,6 +121,15 @@ class LiveCaptionController(QObject):
         return any(start - 0.2 <= pos <= end + 0.3
                    for start, end, _seg, _zh in self.rows)
 
+    def span_covered(self, pos: float) -> bool:
+        """pos 是否落在某个任务的 [起点, 前沿] 内（进度条青色区间的语义）。
+
+        行级 is_covered 会被 VAD 静音间隙误判：区间已推进到前沿，中间无语音
+        的位置本就没有行，不应触发重转（曾致青色已覆盖区反复弹"追赶中"）。
+        """
+        return any(start - 0.2 <= pos <= end + 0.3
+                   for start, end in self.display_ranges())
+
     def display_ranges(self) -> list[tuple[float, float]]:
         """seekbar 显示用：每个任务的真实覆盖 [起点, 前沿]，合并相邻段。
 
@@ -175,7 +184,7 @@ class LiveCaptionController(QObject):
             return "normal"
         if abs(pos - self._last_restart_pos) < 2:
             return "normal"
-        if self.is_covered(pos):
+        if self.span_covered(pos):
             self.restart_timer.stop()
             self._pending_restart = None
             self.catching = False

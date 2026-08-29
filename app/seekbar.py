@@ -38,12 +38,16 @@ class PreviewBubble(QWidget):
 
     def _resize_to_content(self) -> None:
         fm = QFontMetrics(self._text_font())
-        text_h = fm.height() + 6
+        # 标签可能两行（时间 + "转写至 XX"）：高度按行数算足，避免内容加载后
+        # 气泡尺寸突变、位置上下跳动（原先在 paintEvent 里现场加高导致下坠）
+        lines = self._label.split("\n")
+        text_h = fm.height() * len(lines) + 6
+        text_w = max(fm.horizontalAdvance(line) for line in lines)
         if self._pix is not None:
-            w = max(self._pix.width() + self.MARGIN, fm.horizontalAdvance(self._label) + 20)
+            w = max(self._pix.width() + self.MARGIN, text_w + 20)
             h = self._pix.height() + text_h + self.MARGIN
         else:
-            w = fm.horizontalAdvance(self._label) + 20
+            w = text_w + 20
             h = text_h + 4
         self.resize(int(w), int(h))
 
@@ -85,10 +89,9 @@ class PreviewBubble(QWidget):
             p.restore()
             text_rect = QRect(0, y + self._pix.height(), self.width(), fm.height() + 4)
         else:
+            # 两行标签的高度已在 _resize_to_content 算足（paintEvent 里改尺寸
+            # 会从左上角向下长，把气泡压到进度条上再跳回）
             text_rect = self.rect()
-            has_two_lines = chr(10) in self._label
-            if has_two_lines:
-                self.resize(self.width(), self.height() + fm.height() + 2)
         p.setFont(self._text_font())
         p.setPen(QColor(theme.TEXT))
         p.drawText(text_rect, Qt.AlignCenter, self._label)
@@ -151,6 +154,10 @@ class SeekBar(QWidget):
         if text != self._caption_front_text:
             self._caption_front_text = text
             self.update()
+            # 行数变化会改气泡高度，可见时立即按新尺寸重新锚定到进度条上方
+            if self._hover_x is not None and self._bubble is not None \
+                    and self._bubble.isVisible():
+                self._show_bubble(self._hover_x)
 
     def set_ab_range(self, ab_range: tuple[float, float] | None) -> None:
         """A-B 循环区间可视化（琥珀色段 + 两端刻度）。None 清除。"""

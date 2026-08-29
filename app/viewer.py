@@ -1904,17 +1904,21 @@ class Viewer(QWidget):
                     pos = 0.0
                 self._update_live_caption_for_position(pos)
                 rows = sorted(self._live_rows, key=lambda r: r[0])
+                # 前沿 = 所有行的最大终点。按起点排序的 rows[-1] 在"回跳转写"
+                # 后会把前沿算小（新任务行起点小、终点也小），大片青色已覆盖
+                # 区域会被误报"追赶中"
+                front = max((r[1] for r in rows), default=0.0)
                 outside_rows = (
                     not rows
                     or pos < rows[0][0] - 0.2
-                    or pos > rows[-1][1] + 5.0
+                    or pos > front + 5.0
                 )
                 if outside_rows and getattr(self, "_live_catching", False):
                     self._live_label.setText(t("viewer.live_caption_catching_status"))
                     self._live_label.show()
                     self._live_label.raise_()
-                # 播放位置远超已转写末尾（seek 跳转/转写未追上）→ 自动重转
-                if rows and pos > rows[-1][1] + 5.0:
+                # 播放位置远超已转写前沿（seek 跳转/转写未追上）→ 自动重转
+                if rows and pos > front + 5.0:
                     self._show_toast(t("viewer.live_caption_catching"))
                     self._request_live_restart(pos, catching=True)
             else:

@@ -145,5 +145,21 @@ class LiveCaptionTests(unittest.TestCase):
         self.assertEqual(len(ctl.rows), 4)
 
 
+    def test_silence_gap_inside_span_does_not_restart(self) -> None:
+        """青色区间（任务起点→前沿）内的 VAD 静音间隙不应触发重转。"""
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=False)
+        # 同一任务两行，中间 100 秒无语音（前沿已推进到 140）
+        ctl.accept_line({"g": 1, "t": 30, "end": 35, "text": "A.", "zh": ""})
+        ctl.accept_line({"g": 1, "t": 135, "end": 140, "text": "B.", "zh": ""})
+        # 行级未覆盖，但任务区间已覆盖 → covered，不请求重转
+        self.assertTrue(ctl.span_covered(80.0))
+        self.assertFalse(ctl.is_covered(80.0))
+        self.assertEqual(ctl.handle_position(80.0, audio_mode=True), "covered")
+        # 超出前沿才算需要追赶
+        self.assertFalse(ctl.span_covered(200.0))
+        self.assertEqual(ctl.handle_position(200.0, audio_mode=True), "restart")
+
+
 if __name__ == "__main__":
     unittest.main()
