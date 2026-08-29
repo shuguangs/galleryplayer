@@ -109,12 +109,16 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 TORCH_ENGINES = ("qwen", "sensevoice")  # 走 asr_engines.py（torch 后端）
 
 
-def _decode_audio_from(media: str, seek: float):
+def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0):
     """从 seek 秒附近解码音频为 16kHz float32 mono（与 decode_audio 输出一致）。
 
     av 容器 seek 直接到目标时间附近再解码，不再全量解码：37 分钟视频跳转到
     30 分钟处，旧路径要把前 30 分钟全部解码（几十秒、受媒体盘速度拖累）。
     实现仿 faster_whisper.audio.decode_audio（s16 → f32/32768），仅加容器 seek。
+
+    max_seconds 封顶解码窗口：旧实现会一路解到文件尾——2 小时片子跳到
+    30 分钟处 ≈ 350MB 音频常驻内存。转写用不到尾部，15 分钟窗口足够覆盖
+    一次连续播放（用完后由下一次 seek 触发重新就近解码）。
     """
     import gc
     import io
@@ -142,10 +146,14 @@ def _decode_audio_from(media: str, seek: float):
         frames = _ignore_invalid_frames(frames)
         frames = _group_frames(frames, 500000)
         frames = _resample_frames(frames, resampler)
+        decoded_seconds = 0.0
         for frame in frames:
             array = frame.to_ndarray()
             dtype = array.dtype
             raw.write(array)
+            decoded_seconds += array.shape[-1] / 16000.0
+            if decoded_seconds >= max_seconds:
+                break
     finally:
         container.close()
         del resampler
@@ -259,15 +267,16 @@ def main() -> None:
                     generation = int(job.get("generation", 0))
                     if generation > last_generation:
                         last_generation = generation
+                        # 透传整个 job：translate_model 等字段由下游按需读取，
+                        # 白名单裁剪曾把 SRT 的翻译模型选择静默丢弃
+                        entry = dict(job)
+                        entry["seek"] = max(0.0, float(entry.get("seek", 0.0)))
+                        entry["mode"] = str(entry.get("mode", "live"))
+                        for key in ("media", "output", "log"):
+                            if key in entry:
+                                entry[key] = Path(str(entry[key]))
                         with pending_lock:
-                            pending_job = {
-                                "media": Path(str(job.get("media", ""))),
-                                "seek": max(0.0, float(job.get("seek", 0.0))),
-                                "generation": generation,
-                                "mode": str(job.get("mode", "live")),
-                                "output": Path(str(job.get("output", ""))),
-                                "log": Path(str(job.get("log", ""))),
-                            }
+                            pending_job = entry
                         cancel_generation = generation
                 except Exception:
                     pass
@@ -322,7 +331,13 @@ def main() -> None:
         status("MODEL_READY")
 
     translator = Translator(args.ollama, args.ollama_model) if args.translate else None
-    _translate_q: queue.Queue = queue.Queue()
+    # 有界翻译队列：Ollama 卡顿时旧实现无限积压（内存膨胀 + 拖住 join）；
+    # 满了丢最旧一条的译文（字幕跟手优先，丢的只是后补的翻译）
+    _translate_q: queue.Queue = queue.Queue(maxsize=64)
+    # 预转写缓存：prefetch 任务把下一集的完整转写结果留在内存，切到该媒体
+    # （seek≈0 且文件未变）时直接复用，省掉整片重复转写。缓存只存一行一句
+    # 的 (start, end, text)，体量可忽略；文件被修改/换片即失效
+    _prefetch: dict = {"key": None, "rows": []}
 
     def _translate_worker() -> None:
         cur_gen = None
@@ -401,6 +416,47 @@ def main() -> None:
         from translate_service import write_srt_file
 
         write_srt_file(path, rows)
+
+    def _prefetch_key(media: Path):
+        try:
+            stat = media.stat()
+        except OSError:
+            return None
+        return (str(media), stat.st_size, stat.st_mtime)
+
+    def _prefetch_job(job: dict) -> None:
+        """转写下一集并缓存结果（不写 log、不排队翻译）。"""
+        media = job["media"]
+        if not media.is_file():
+            return
+        key = _prefetch_key(media)
+        if key is None:
+            return
+        if _prefetch["key"] == key:
+            status(f"PREFETCH_CACHED {media.name}")
+            return
+        if args.model not in TORCH_ENGINES:
+            status("PREFETCH_SKIP（预转写仅支持 qwen/sensevoice）")
+            return
+        generation = job["generation"]
+        status(f"PREFETCH_START {media.name}")
+        started = time.perf_counter()
+        import asr_engines
+
+        audio = decode_audio(str(media), sampling_rate=16000)
+        rows: list[tuple[float, float, str]] = []
+        for seg_start, seg_end, text in asr_engines.stream_transcribe(
+                model, vad, args.model, audio, args.lang or "auto"):
+            # 新任务到来（cancel_generation 前进）即放弃，不缓存半成品
+            if cancel_generation > generation:
+                status("PREFETCH_CANCELLED")
+                return
+            if text:
+                rows.append((seg_start, seg_end, text))
+        _prefetch["key"] = key
+        _prefetch["rows"] = rows
+        status(f"PREFETCH_DONE {media.name} {len(rows)} 句 "
+               f"{time.perf_counter() - started:.0f}s")
 
     def _generate_srt(job: dict) -> None:
         media = job["media"]
@@ -542,13 +598,41 @@ def main() -> None:
                 log_fp.flush()
             print(line, flush=True)
             if translator is not None:
-                _translate_q.put((generation, piece_start, piece_end, piece_text))
+                item = (generation, piece_start, piece_end, piece_text)
+                try:
+                    _translate_q.put_nowait(item)
+                except queue.Full:
+                    try:
+                        _translate_q.get_nowait()
+                        _translate_q.task_done()
+                    except queue.Empty:
+                        pass
+                    try:
+                        _translate_q.put_nowait(item)
+                    except queue.Full:
+                        pass
 
         if args.model in TORCH_ENGINES:
             # qwen / sensevoice：VAD 切段流式转写，时间戳为段落真实时间。
             # seek 时从目标位置就近解码（av 容器 seek），不再全量解码整个
             # 文件——跳转响应从几十秒（受媒体盘速度拖累）降到一两秒
             import asr_engines
+
+            # 预转写缓存命中（从片头开始播且文件未变）：直接出结果
+            if seek <= 0.5:
+                key = _prefetch_key(media)
+                if key is not None and _prefetch["key"] == key:
+                    cached = _prefetch["rows"]
+                    _prefetch["key"] = None
+                    _prefetch["rows"] = []
+                    status(f"{args.model} 命中预转写缓存（{len(cached)} 句）")
+                    for piece_start, piece_end, piece_text in cached:
+                        if cancel_generation > generation:
+                            status("切换媒体，中断当前转写 ...")
+                            return
+                        _emit(seek + piece_start, seek + piece_end, piece_text)
+                    status(f"TASK_DONE {generation}")
+                    return
 
             if seek > 0:
                 audio = _decode_audio_from(str(media), seek)
@@ -565,10 +649,9 @@ def main() -> None:
             status(f"TASK_DONE {generation}")
             return
 
-        # seek 偏移则读全量后切片（decode_audio 快），并给时间戳加偏移
+        # seek 就近解码（同 torch 引擎路径，带解码窗口封顶），时间戳加偏移
         if seek > 0:
-            audio = decode_audio(str(media), sampling_rate=16000)
-            audio = audio[int(seek * 16000):]
+            audio = _decode_audio_from(str(media), seek)
             seg_iter, info = model.transcribe(
                 audio, language=args.lang or None, beam_size=1, vad_filter=True,
                 word_timestamps=True,
@@ -628,6 +711,9 @@ def main() -> None:
                 # generation 已被 _watch_control 置为最新 → 进行中的任务会在
                 # 下一个检查点退出并写 SRT_CANCELLED/TASK_DONE；此处无事可做
                 status(f"CANCELLED {job['generation']}")
+                continue
+            if job["mode"] == "prefetch":
+                _prefetch_job(job)
                 continue
             if job["mode"] == "srt":
                 _generate_srt(job)
