@@ -207,6 +207,11 @@ def main() -> None:
     ap.add_argument("--translate", action="store_true", help="启用 Ollama 中译")
     ap.add_argument("--ollama", default="http://127.0.0.1:11434")
     ap.add_argument("--ollama-model", default="qwen2.5:7b")
+    # 与 live_transcribe 共用播放器 common 参数；环路模式无模型卸载，idle 仅接受不生效
+    ap.add_argument("--target-lang", default="zh",
+                    help="翻译目标语言（zh / zh-Hant / en）")
+    ap.add_argument("--idle-unload", type=float, default=0.0,
+                    help="仅兼容播放器公共参数；环路录音模式不卸载模型")
     ap.add_argument("--srt", default=None, help="同时写入 srt 文件")
     ap.add_argument("--out-dir", default=None,
                     help="srt 保存目录（默认与 --srt 路径相同）")
@@ -272,7 +277,8 @@ def main() -> None:
                              compute_type=compute)
     print(f"模型就绪 {time.perf_counter() - t0:.0f}s", flush=True)
 
-    translator = Translator(args.ollama, args.ollama_model) if args.translate else None
+    translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang)
+                  if args.translate else None)
     if translator:
         status(f"翻译启用: {args.ollama_model} → zh")
         ready, error = ensure_ollama(args.ollama, args.ollama_model, status)

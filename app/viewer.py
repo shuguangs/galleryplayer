@@ -9,6 +9,7 @@ import os
 import json
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QProcess, QProcessEnvironment, QTimer, Qt, Signal
@@ -1498,8 +1499,15 @@ class Viewer(QWidget):
                 return
             current_media = self.items[self.index].path
         tr_model = str(_settings["live_ollama_model"])
-        # 1) 常驻/复用：相同来源/媒体/翻译模型的活跃进程 → 直接开始监视，秒出
-        if source == "audio" and self._check_live_alive() and live_engine_matches():
+        # 1) 常驻/复用：相同来源/媒体/翻译模型的活跃进程 → 直接开始监视，秒出。
+        #    双保险：健康检查刚失败的 60s 冷却期内，只要进程活着且配置匹配
+        #    仍复用——加载中的引擎（心跳正常）曾被误判后反复杀重启，卡死字幕
+        import time as _t0
+
+        engine_alive = live_engine_matches() and _le.alive()
+        if source == "audio" and engine_alive and (
+                self._check_live_alive()
+                or _t0.time() - getattr(self, "_live_spawn_at", 0.0) < 60):
             self._live_paused = False
             self._live_on = True
             self._live_ctl.reset_for_media(True)
@@ -1567,9 +1575,12 @@ class Viewer(QWidget):
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         si.wShowWindow = 0  # SW_HIDE：双保险，绝不弹 .venv 命令行窗口
         # stderr 落盘：崩溃 Traceback（CUDA OOM/模型加载失败）不再被 DEVNULL 吞掉
-        self._live_log.unlink(missing_ok=True)
-        self._live_pid.unlink(missing_ok=True)
-        Path(str(self._live_log) + ".control").unlink(missing_ok=True)
+        for stale in (self._live_log, self._live_pid,
+                      Path(str(self._live_log) + ".control")):
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass  # 旧引擎句柄未释放等竞态：新引擎自己会截断重建
         err_path = pipe / "live-caption.err"
         try:
             self._live_err_fh = open(err_path, "w", encoding="utf-8", errors="replace")
@@ -1599,6 +1610,8 @@ class Viewer(QWidget):
         self._live_si = si
         # 新进程刚起，作废旧的健康缓存
         self._live_alive_cache = None
+        self._live_spawn_at = _t0.time()
+        self._log_engine_restart(pipe)
 
         import time as _time
 
@@ -1614,6 +1627,20 @@ class Viewer(QWidget):
         self._live_on = True
         self._start_live_poll()
         self._show_toast(t("viewer.live_caption_running"))
+
+    def _log_engine_restart(self, pipe, limit: int = 40) -> None:
+        """每次拉起引擎记一条原因（带历史计数），重启循环可在日志里直接看出。"""
+        try:
+            path = pipe / "live-caption-restart.log"
+            lines = []
+            if path.is_file():
+                lines = path.read_text(encoding="utf-8",
+                                       errors="replace").splitlines()[-(limit - 1):]
+            lines.append(time.strftime(
+                "%Y-%m-%d %H:%M:%S", time.localtime()) + " spawn")
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ log watch
 
@@ -1666,12 +1693,23 @@ class Viewer(QWidget):
         create_time = None
         try:
             import psutil
-
-            proc = psutil.Process(pid)
-            if not (proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE):
-                return False
-            create_time = proc.create_time()
         except ImportError:
+            psutil = None
+        if psutil is not None:
+            try:
+                proc = psutil.Process(pid)
+                if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                    return False
+                create_time = proc.create_time()
+            except psutil.NoSuchProcess:
+                return False  # 进程确实不在 → 判死，由启动逻辑重建
+            except psutil.AccessDenied:
+                create_time = None  # 进程在但查不到详情 → 乐观放行
+            except Exception:
+                # 查询竞态/其他异常：宁可放行也不误杀（误杀健康引擎会触发
+                # "杀→重启→再误判"死循环）
+                return bool(psutil.pid_exists(pid))
+        else:
             # psutil 缺席（旧包）：退回 tasklist 只判存在性
             import subprocess as _sp
 
@@ -1684,8 +1722,6 @@ class Viewer(QWidget):
                     return False
             except Exception:
                 return False
-        except Exception:
-            return False
         # 健康检查：log 在 60s 内有产出 = 正常工作；log 尚无但进程启动 <90s = 加载中
         log = self._live_log_path()
         if log is not None and log.is_file() and log.stat().st_mtime > _time.time() - 60:

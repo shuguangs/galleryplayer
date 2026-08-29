@@ -10,6 +10,10 @@ from .config import PRESET_MODELS, find_subtitle_pipeline_dir, settings
 
 ENGINE_VERSION = 5
 
+# 引擎拉起冷却：30s 内已 spawn 过就不再 kill+respawn（设置刚改过也等下一次
+# 调用再重建），防止多个启动入口把"加载中的引擎"反复杀掉造成重启循环
+_last_spawn_at = 0.0
+
 # SRT 生成进行中（含批量）：viewer 暂停提交实时字幕任务（UI 层互斥，
 # 引擎串行队列本身没问题，防的是 seek/换片误 cancel 掉 SRT 任务）
 srt_busy = False
@@ -209,6 +213,7 @@ def kill() -> None:
 
 def start_preload() -> bool:
     """Start one background engine; the UI never waits for the model."""
+    global _last_spawn_at
     pipe = find_subtitle_pipeline_dir()
     if pipe is None:
         return False
@@ -217,6 +222,10 @@ def start_preload() -> bool:
     if alive():
         # A just-launched engine may not have written its state file yet.
         if not state():
+            return True
+        # 冷却期内不动刚拉起的引擎（即使配置不匹配——那多半是设置刚变更，
+        # 让下一次调用再重建，也别在它加载模型的 20-60s 里反复杀）
+        if time.time() - _last_spawn_at < 30:
             return True
         kill()
 
@@ -257,6 +266,7 @@ def start_preload() -> bool:
             stdout=subprocess.DEVNULL, stderr=err_fp,
             creationflags=flags, startupinfo=startupinfo,
         )
+        _last_spawn_at = time.time()
         time.sleep(0.2)
         if proc.poll() is not None:
             # Another engine may have won the single-instance lock race.
