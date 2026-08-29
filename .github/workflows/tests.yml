@@ -1,0 +1,23 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit-tests:
+    # 主仓库单测（controller/media 纯逻辑）+ 引擎仓库单测（翻译服务/分句）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install test deps
+        run: |
+          pip install PySide6 natsort pillow psutil
+      - name: Run main repo tests
+        run: python -m unittest discover -s tests -v
+      - name: Run engine repo tests
+        run: python -m unittest discover -s live-subtitle/tests -v
