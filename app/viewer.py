@@ -112,6 +112,8 @@ class Viewer(QWidget):
         self._live_on = False
         self._live_paused = False
         self._live_ctl = LiveCaptionController(self)
+        # 译文后补/新行到达时立即刷新字幕显示与进度条（不等 600ms 轮询）
+        self._live_ctl.rows_changed.connect(self._on_live_rows_changed)
         self._live_ctl.restart_requested.connect(
             lambda pos, catching: self._restart_live_for_seek(int(pos), catching=catching)
         )
@@ -1243,14 +1245,22 @@ class Viewer(QWidget):
         """Tell the resident engine to transcribe another file without reloading."""
         if not getattr(self, "_live_on", False) or getattr(self, "_live_log", None) is None:
             return
+        from . import live_engine
 
+        if live_engine.srt_busy:
+            # SRT 生成中：seek/换片会 cancel 掉 SRT 任务——暂停实时转写
+            self._show_toast(t("viewer.live_caption_paused_for_srt"))
+            return
         old_log_size = self._live_log.stat().st_size if self._live_log.is_file() else 0
         if self._live_media_path != media:
             self.controls.set_caption_ranges([])
         self._live_log_pos = old_log_size
+        # 跳转转写起点：跳转位置前 5 秒（不足 5 秒则从 0 开始），避免起点
+        # 正好切在一句话中间；补洞任务（full_pass）有自己的起点，不走这里
+        start = max(0.0, float(seek) - 5.0)
         payload = {
             "media": str(media),
-            "seek": max(0.0, float(seek) - 0.5),
+            "seek": start,
             "mode": "live",
         }
         generation = submit_live_engine_job(payload)
@@ -1260,7 +1270,7 @@ class Viewer(QWidget):
         import time as _time
 
         self._live_started_at = _time.time()
-        self._live_ctl.begin_media(media, seek, generation, catching)
+        self._live_ctl.begin_media(media, start, generation, catching)
         self._live_alive_cache = None
         self._live_label.setText(
             t("viewer.live_caption_catching_status") if catching
@@ -1340,8 +1350,39 @@ class Viewer(QWidget):
         self._live_label.show()
         self._live_label.raise_()
 
+    def _on_live_rows_changed(self) -> None:
+        """译文后补/新行：立即刷新当前字幕与进度条，不等 600ms 轮询。"""
+        if not self._live_on or self._live_paused:
+            return
+        try:
+            pos = float(self.video_view.position or 0.0)
+        except Exception:
+            pos = 0.0
+        if str(getattr(self, "_live_source", "audio")) == "audio":
+            self._update_live_caption_for_position(pos)
+        elif self._live_rows:
+            _t0, _t1, seg, zh = self._live_rows[-1]
+            glossary = settings["caption_glossary"] or {}
+            self._live_label.setText(format_bilingual(
+                apply_glossary(seg, glossary),
+                apply_glossary(zh, glossary),
+                float(settings["caption_bilingual_ratio"])))
+            self._live_label.show()
+            self._live_label.raise_()
+        self._sync_caption_ranges()
+
     def _sync_caption_ranges(self) -> None:
-        self.controls.set_caption_ranges(self._live_ctl.caption_ranges())
+        ranges = self._live_ctl.display_ranges()
+        self.controls.set_caption_ranges(ranges)
+        # hover 气泡的"转写至"提示（前沿 = 最远已转写点）
+        if ranges and self._live_on and not self._live_paused:
+            from .media import format_duration
+
+            self.controls.seek.set_caption_front_text(
+                t("viewer.live_caption_front").format(
+                    time=format_duration(ranges[-1][1])))
+        else:
+            self.controls.seek.set_caption_front_text("")
 
     def _find_pipeline(self):
         from .config import find_subtitle_pipeline_dir
@@ -1368,6 +1409,11 @@ class Viewer(QWidget):
         self._live_log = pipe / "live-caption.log"
         self._live_pid = pipe / "live-caption.log.pid"
 
+        from . import live_engine as _le
+
+        if _le.srt_busy:
+            self._show_toast(t("viewer.live_caption_paused_for_srt"))
+            return
         source = str(_settings["live_caption_source"])
         self._live_source = source
         current_media = None
@@ -1404,12 +1450,13 @@ class Viewer(QWidget):
         log_path = str(self._live_log)
         log_path = str(_Path(log_path))
         lang = str(_settings["live_caption_lang"])
-        asr_model = effective_model() or "medium"
+        asr_model = effective_model() or "qwen"
         asr_dir = str(_settings["live_asr_dir"] or "").strip()
         translate_on = tr_model != "none"
         common = ["--log", log_path, "--lang", lang, "--model", asr_model,
                   "--ollama-model", tr_model]
-        if asr_dir:
+        # 本地模型目录只对 whisper 有意义（qwen/sensevoice 走引擎目录固定路径）
+        if asr_dir and asr_model not in ("qwen", "sensevoice"):
             common += ["--model-dir", asr_dir]
         if source == "audio":
             media = self.items[self.index].path
@@ -1427,11 +1474,15 @@ class Viewer(QWidget):
             script = pipe / "live_capture.py"
             args = [str(script), "--json"] + common + (["--translate"] if translate_on else [])
         env = {k: v for k, v in os.environ.items()}
-        nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
-        for d in ("cublas", "cudnn", "cuda_nvrtc"):
-            p = str(nv / d / "bin")
-            if p not in env.get("PATH", ""):
-                env["PATH"] = p + os.pathsep + env.get("PATH", "")
+        # cu12 nvidia DLL 只对 whisper(ctranslate2) 注入；qwen/sensevoice 用 torch
+        # 自带 cu13，混入旧 cuDNN 会报 SUBLIBRARY_VERSION_MISMATCH 直接崩（与
+        # live_transcribe.py 内部的按引擎注入保持一致）
+        if asr_model not in ("qwen", "sensevoice"):
+            nv = pipe / ".venv" / "Lib" / "site-packages" / "nvidia"
+            for d in ("cublas", "cudnn", "cuda_nvrtc"):
+                p = str(nv / d / "bin")
+                if p not in env.get("PATH", ""):
+                    env["PATH"] = p + os.pathsep + env.get("PATH", "")
         # 强制 HF 缓存到引擎目录（覆盖用户环境的 E 盘变量，防止模型下载失败崩溃）
         env["HUGGINGFACE_HUB_CACHE"] = str(pipe / "models" / "hf" / "hub")
         flags = subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS \
@@ -1746,15 +1797,36 @@ class Viewer(QWidget):
                 self._live_label.show()
                 self._live_label.raise_()
         self._sync_caption_ranges()
-        # 进程死掉（非用户主动停止）——显式提示，不再静默复位
+        # 进程死掉（非用户主动停止）——先自动恢复一次，再失败才报错
         if self._live_on and not in_grace and not self._is_live_alive():
+            if self._try_auto_restart_live():
+                return
             self._live_on = False
             self._live_label.hide()
             tail = self._live_err_tail()
             msg = t("viewer.live_caption_exited")
             if tail:
-                msg += f"\n{tail}"
+                msg += "\n" + tail
             self._show_toast(msg)
+
+    def _try_auto_restart_live(self) -> bool:
+        """引擎意外退出时自动重启一次（限 1 次/10 分钟，防循环重启）。"""
+        import time as _time
+
+        now = _time.time()
+        if now - getattr(self, "_live_auto_restart_at", -1e9) < 600:
+            return False
+        media = getattr(self, "_live_media_path", None)
+        if media is None or not Path(str(media)).is_file():
+            return False
+        self._live_auto_restart_at = now
+        try:
+            pos = float(self.video_view.position or 0.0)
+        except Exception:
+            pos = 0.0
+        self._show_toast(t("viewer.live_caption_auto_restart"))
+        self._switch_live_media(Path(str(media)), max(0.0, pos), catching=True)
+        return True
 
     def _live_err_tail(self, limit: int = 3) -> str:
         """读 live-caption.err 最后几行（子进程崩溃原因），供退出提示展示。"""

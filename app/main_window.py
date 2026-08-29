@@ -1,7 +1,7 @@
 """Main browser window: toolbar, folder tree, and the three media views."""
 from __future__ import annotations
 
-import random
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -199,7 +199,7 @@ class MainWindow(QMainWindow):
         self._scroll_positions: dict[str, int] = {}  # 文件夹路径 -> 滚动位置
         self._load_scroll_positions()
         self._scan_token = 0
-        self._random_seed = random.randrange(1 << 30)
+        self._random_seed = secrets.randbits(30)  # 扫描去重种子（非安全用途）
         self._pool = QThreadPool.globalInstance()
         self._scan_signals = _ScanSignals()
         self._scan_signals.batch.connect(self._on_scan_batch)
@@ -839,9 +839,15 @@ class MainWindow(QMainWindow):
     def _gen_srt_for(self, path: Path) -> None:
         """后台生成 SRT 字幕：复用常驻模型，不打开播放器。
 
-        弹出进度窗口实时显示识别/翻译日志；完成后可一键打开字幕文件夹。
+        弹出进度窗口实时显示识别/翻译日志；完成后系统通知 + 可一键打开文件夹。
         """
-        from PySide6.QtWidgets import QDialog, QMessageBox, QPlainTextEdit, QVBoxLayout
+        from PySide6.QtWidgets import (
+            QDialog,
+            QMessageBox,
+            QPlainTextEdit,
+            QPushButton,
+            QVBoxLayout,
+        )
 
         from . import live_engine
         from .config import settings
@@ -882,6 +888,9 @@ class MainWindow(QMainWindow):
         lay.addWidget(self._srt_log)
         self._srt_status = QLabel(t("main_window.gen_srt_running"), dlg)
         lay.addWidget(self._srt_status)
+        self._srt_cancel_btn = QPushButton(t("main_window.gen_srt_cancel"), dlg)
+        self._srt_cancel_btn.clicked.connect(self._cancel_srt_job)
+        lay.addWidget(self._srt_cancel_btn)
         dlg.setModal(False)
         dlg.rejected.connect(self._srt_dialog_closed)
         dlg.show()
@@ -890,26 +899,42 @@ class MainWindow(QMainWindow):
         if not live_engine.start_preload():
             self._finish_srt_job(srt, t("main_window.gen_srt_no_pipeline"))
             return
-        submitted = live_engine.submit({
+        generation = live_engine.submit({
             "mode": "srt",
             "media": str(path),
             "output": str(srt),
             "log": str(job_log),
             "seek": 0.0,
+            "translate_model": str(settings["srt_translate_model"] or "live"),
         })
-        if not submitted:
+        if not generation:
             self._finish_srt_job(srt, t("main_window.gen_srt_no_pipeline"))
             return
 
         self._srt_active = True
+        live_engine.srt_busy = True  # 实时字幕暂停提交（互斥）
+        self._srt_generation = generation
         self._srt_output = srt
         self._srt_job_log = job_log
         self._srt_job_log_pos = 0
         self._srt_timer.start()
 
+    def _cancel_srt_job(self) -> None:
+        """取消进行中的 SRT 任务（引擎在检查点退出，写 SRT_CANCELLED）。"""
+        from . import live_engine
+
+        if getattr(self, "_srt_active", False):
+            live_engine.submit({"mode": "cancel", "media": "", "output": "",
+                                "log": "", "seek": 0.0})
+
     def _srt_dialog_closed(self) -> None:
-        """Closing the dialog stops monitoring; the background engine job continues."""
+        """关闭窗口即取消后台任务（否则没有轮询者收尾 srt_busy 互斥）。"""
         self._srt_timer.stop()
+        if getattr(self, "_srt_active", False):
+            from . import live_engine
+
+            live_engine.submit({"mode": "cancel", "media": "", "output": "",
+                                "log": "", "seek": 0.0})
         self._srt_active = False
 
     def _poll_srt_job(self) -> None:
@@ -933,38 +958,123 @@ class MainWindow(QMainWindow):
             if line.startswith("# SRT_READY "):
                 self._finish_srt_job(getattr(self, "_srt_output", Path()))
                 return
-            if line.startswith("# SRT_ERROR ") or line == "# SRT_CANCELLED":
+            if line == "# SRT_CANCELLED":
+                self._finish_srt_job(getattr(self, "_srt_output", Path()),
+                                     error=t("main_window.gen_srt_cancelled"),
+                                     cancelled=True)
+                return
+            if line.startswith("# SRT_ERROR "):
                 error = line.removeprefix("# SRT_ERROR ").strip() or t("main_window.gen_srt_fail").format(error="")
                 self._finish_srt_job(getattr(self, "_srt_output", Path()), error)
                 return
 
-    def _finish_srt_job(self, srt: Path, error: str = "") -> None:
+    def _finish_srt_job(self, srt: Path, error: str = "",
+                        cancelled: bool = False) -> None:
         from PySide6.QtWidgets import QDialogButtonBox
 
+        from . import live_engine
         from .fileops import reveal
 
         self._srt_timer.stop()
         self._srt_active = False
+        live_engine.srt_busy = False  # 解除互斥，实时字幕恢复提交
         dlg = getattr(self, "_srt_dialog", None)
         if dlg is None:
             return
 
+        btn = dlg.findChild(QPushButton)
+        if btn is not None:
+            btn.setEnabled(False)  # 取消按钮失效（任务已结束）
         bb = QDialogButtonBox(dlg)
-        if not error and srt.is_file():
+        if cancelled:
+            self._srt_status.setText(t("main_window.gen_srt_cancelled"))
+            self._srt_status.setStyleSheet(f"color:{theme.TEXT_DIM if False else '#5dc0f0'};")
+            self._notify(t("main_window.gen_srt"), t("main_window.gen_srt_cancelled"))
+        elif not error and srt.is_file():
             self._srt_status.setText(t("main_window.gen_srt_done").format(path=srt.name))
             self._srt_status.setStyleSheet("color:#5dc0f0;")
             open_btn = bb.addButton(t("main_window.gen_srt_open_folder"), QDialogButtonBox.ActionRole)
             open_btn.clicked.connect(lambda: reveal(srt))
+            self._notify(t("main_window.gen_srt"),
+                         t("main_window.gen_srt_notify_done").format(path=srt.name))
         else:
             self._srt_status.setText(t("main_window.gen_srt_fail").format(error=error[:300]))
             self._srt_status.setStyleSheet("color:#e0653f;")
+            self._notify(t("main_window.gen_srt"),
+                         t("main_window.gen_srt_notify_fail").format(error=error[:120]))
         bb.addButton(QDialogButtonBox.Close).clicked.connect(dlg.accept)
         dlg.layout().addWidget(bb)
         dlg.adjustSize()
 
-    def _batch_generate_srt(self) -> None:
-        """Queue every video in the current folder through the resident engine."""
-        from PySide6.QtWidgets import QDialog, QMessageBox, QPlainTextEdit, QVBoxLayout
+    def _notify(self, title: str, text: str) -> None:
+        """Windows 系统通知（隐藏托盘图标承载；失败静默）。"""
+        try:
+            from PySide6.QtWidgets import QSystemTrayIcon
+
+            if not hasattr(self, "_tray"):
+                self._tray = QSystemTrayIcon(self)  # 无专属图标资源，用系统默认
+                self._tray.show()
+            self._tray.showMessage(title, text, QSystemTrayIcon.Information, 6000)
+        except Exception:
+            pass
+
+    def _pick_videos_for_srt(self) -> None:
+        """勾选多个视频 → 走批量生成队列。"""
+        from PySide6.QtWidgets import (
+            QDialog,
+            QListWidget,
+            QListWidgetItem,
+            QPushButton,
+            QVBoxLayout,
+        )
+
+        videos = [item for item in self.all_items if item.is_video]
+        if not videos:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(t("main_window.gen_srt_pick"))
+        dlg.resize(460, 480)
+        lay = QVBoxLayout(dlg)
+        lst = QListWidget(dlg)
+        for item in videos:
+            wi = QListWidgetItem(item.name)
+            wi.setCheckState(Qt.Unchecked)
+            wi.setData(Qt.UserRole, item)
+            lst.addItem(wi)
+        lay.addWidget(lst)
+
+        btns = QHBoxLayout()
+        all_btn = QPushButton(t("main_window.gen_srt_pick_all"), dlg)
+        all_btn.clicked.connect(lambda: [lst.item(i).setCheckState(Qt.Checked)
+                                         for i in range(lst.count())])
+        none_btn = QPushButton(t("main_window.gen_srt_pick_none"), dlg)
+        none_btn.clicked.connect(lambda: [lst.item(i).setCheckState(Qt.Unchecked)
+                                          for i in range(lst.count())])
+        btns.addWidget(all_btn)
+        btns.addWidget(none_btn)
+        btns.addStretch(1)
+        ok_btn = QPushButton(t("settings.done"), dlg)
+        btns.addWidget(ok_btn)
+        lay.addLayout(btns)
+
+        def _confirm() -> None:
+            picked = [lst.item(i).data(Qt.UserRole)
+                      for i in range(lst.count())
+                      if lst.item(i).checkState() == Qt.Checked]
+            dlg.accept()
+            if picked:
+                self._batch_generate_srt(picked)
+
+        ok_btn.clicked.connect(_confirm)
+        dlg.exec()
+
+    def _batch_generate_srt(self, videos: list | None = None) -> None:
+        """Queue videos through the resident engine（默认当前文件夹全部）。
+
+        引擎的 control 槽只保留最新 generation——逐个懒提交（完成一个再提交
+        下一个），否则前面的任务会被覆盖，实际只转写最后一个视频。
+        """
+        from PySide6.QtWidgets import QDialog, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout
 
         from . import live_engine
         from .config import settings
@@ -973,7 +1083,8 @@ class MainWindow(QMainWindow):
         if self._batch_srt_jobs:
             QMessageBox.information(self, t("main_window.gen_srt"), t("main_window.gen_srt_busy"))
             return
-        videos = [item for item in self.all_items if item.is_video]
+        if videos is None:
+            videos = [item for item in self.all_items if item.is_video]
         if not videos:
             return
         if live_engine.paths() is None or not live_engine.start_preload():
@@ -987,20 +1098,14 @@ class MainWindow(QMainWindow):
                       else item.path.parent) / f"{item.path.stem}.zh.srt"
             job_log = engine_dir / f"srt-batch-{index}.log"
             job_log.unlink(missing_ok=True)
-            generation = live_engine.submit({
-                "mode": "srt",
-                "media": str(item.path),
-                "output": str(output),
-                "log": str(job_log),
-                "seek": 0.0,
-            })
             jobs.append({
                 "name": item.name,
+                "path": item.path,
                 "output": output,
                 "log": job_log,
                 "pos": 0,
                 "done": False,
-                "generation": generation,
+                "generation": 0,  # 懒提交：轮到它时才 submit
             })
 
         dlg = QDialog(self)
@@ -1021,18 +1126,61 @@ class MainWindow(QMainWindow):
             f" font-family:Consolas; font-size:11px; }}"
         )
         lay.addWidget(self._batch_srt_log)
+        batch_cancel = QPushButton(t("main_window.gen_srt_cancel"), dlg)
+        batch_cancel.clicked.connect(self._batch_cancel_srt)
+        lay.addWidget(batch_cancel)
+        self._batch_cancel_btn = batch_cancel
         dlg.setModal(False)
+        dlg.rejected.connect(self._batch_cancel_srt)  # 关窗=取消（保留已完成的）
         dlg.show()
         self._batch_srt_dialog = dlg
         self._batch_srt_jobs = jobs
+        live_engine.srt_busy = True
         self._batch_srt_timer.start()
 
+    def _batch_cancel_srt(self) -> None:
+        """取消批量：终止当前任务并丢弃队列剩余。"""
+        from . import live_engine
+
+        for job in getattr(self, "_batch_srt_jobs", []):
+            if not job["done"]:
+                job["done"] = True  # 队列剩余不再提交
+        if getattr(self, "_batch_active_gen", 0):
+            live_engine.submit({"mode": "cancel", "media": "", "output": "",
+                                "log": "", "seek": 0.0})
+        live_engine.srt_busy = False
+        self._batch_srt_status.setText(t("main_window.gen_srt_cancelled"))
+        btn = getattr(self, "_batch_cancel_btn", None)
+        if btn is not None:
+            btn.setEnabled(False)
+
     def _poll_batch_srt(self) -> None:
-        if not self._batch_srt_jobs:
+        jobs = getattr(self, "_batch_srt_jobs", [])
+        if not jobs:
             self._batch_srt_timer.stop()
             return
-        for job in self._batch_srt_jobs:
-            if job["done"] or not job["log"].is_file():
+        from . import live_engine
+
+        # 懒提交：无进行中任务且队列还有 → 提交下一个
+        active_gen = getattr(self, "_batch_active_gen", 0)
+        if not active_gen:
+            nxt = next((j for j in jobs if not j["done"] and not j["generation"]), None)
+            if nxt is not None:
+                generation = live_engine.submit({
+                    "mode": "srt",
+                    "media": str(nxt["path"]),
+                    "output": str(nxt["output"]),
+                    "log": str(nxt["log"]),
+                    "seek": 0.0,
+                    "translate_model": str(settings["srt_translate_model"] or "live"),
+                })
+                if generation:
+                    nxt["generation"] = generation
+                    self._batch_active_gen = generation
+                    nxt["pos"] = 0
+
+        for job in jobs:
+            if not job["generation"] or job["done"] or not job["log"].is_file():
                 continue
             try:
                 with open(job["log"], "r", encoding="utf-8") as fp:
@@ -1044,16 +1192,32 @@ class MainWindow(QMainWindow):
             if new:
                 self._batch_srt_log.appendPlainText(f"{job['name']}\n{new.strip()}")
             text = job["log"].read_text(encoding="utf-8", errors="replace")
-            if "# SRT_READY " in text or "# SRT_ERROR " in text or "# SRT_CANCELLED" in text:
+            finished = ("# SRT_READY " in text or "# SRT_ERROR " in text
+                        or "# SRT_CANCELLED" in text)
+            if finished:
                 job["done"] = True
+                if self._batch_active_gen == job["generation"]:
+                    self._batch_active_gen = 0
+                if "# SRT_READY " in text:
+                    self._notify(t("main_window.gen_srt"),
+                                 t("main_window.gen_srt_notify_done").format(path=job["output"].name))
+                elif "# SRT_ERROR " in text:
+                    self._notify(t("main_window.gen_srt"),
+                                 t("main_window.gen_srt_notify_fail").format(error=job["name"]))
 
-        done = sum(1 for job in self._batch_srt_jobs if job["done"])
-        total = len(self._batch_srt_jobs)
+        done = sum(1 for job in jobs if job["done"])
+        total = len(jobs)
         self._batch_srt_status.setText(
             t("main_window.gen_srt_batch_running").format(done=done, total=total)
         )
         if done == total:
             self._batch_srt_timer.stop()
+            live_engine.srt_busy = False
+            btn = getattr(self, "_batch_cancel_btn", None)
+            if btn is not None:
+                btn.setEnabled(False)
+            self._notify(t("main_window.gen_srt"),
+                         t("main_window.gen_srt_batch_done").format(done=done, total=total))
 
     def _go_up(self) -> None:
         if self.folder and self.folder.parent != self.folder:
@@ -1169,7 +1333,7 @@ class MainWindow(QMainWindow):
     def _on_sort_changed(self) -> None:
         self._update_desc_icon()
         if self.sort_combo.currentData() == "random":
-            self._random_seed = random.randrange(1 << 30)
+            self._random_seed = secrets.randbits(30)
         self._apply_view()
 
     def _update_desc_icon(self) -> None:
@@ -1285,6 +1449,9 @@ class MainWindow(QMainWindow):
                 )
                 menu.addAction(t("main_window.gen_srt_batch")).triggered.connect(
                     lambda _=False: self._batch_generate_srt()
+                )
+                menu.addAction(t("main_window.gen_srt_pick")).triggered.connect(
+                    lambda _=False: self._pick_videos_for_srt()
                 )
                 menu.addSeparator()
             if not item.is_video and not item.is_archive:
@@ -1494,7 +1661,7 @@ class MainWindow(QMainWindow):
             # each of them twice when that pass lands.
             self._stream_items = []
             self.all_items = items
-            self._random_seed = random.randrange(1 << 30)
+            self._random_seed = secrets.randbits(30)
             if not self._quiet_scan:
                 self._apply_view(count_suffix=t("main_window.verifying_suffix"))
             return
@@ -1517,7 +1684,7 @@ class MainWindow(QMainWindow):
         self.all_items = self._stream_items
         self._stream_items = []
         self._streaming = False
-        self._random_seed = random.randrange(1 << 30)
+        self._random_seed = secrets.randbits(30)
         suffix = ""
         if stats is not None and stats.dirs_reused:
             suffix = t("main_window.cache_hit_suffix").format(

@@ -22,6 +22,10 @@ class LiveCaptionController(QObject):
         super().__init__(parent)
         self.rows: list[tuple[float, float, str, str]] = []
         self._row_keys: set[tuple[float, float, str, str]] = set()
+        # 每个任务（generation）的转写覆盖 [起点, 前沿]，供 seekbar 显示：
+        # 跳转后旧任务的区间保留、新任务从跳转点另行延伸，空洞如实显示，
+        # 回头补洞的任务再补上空缺（UI 语义，与补转调度解耦）
+        self.task_spans: dict[int, list[float]] = {}
         self.generation = 0
         self.catching = False
         self.media_path: Path | None = None
@@ -43,6 +47,7 @@ class LiveCaptionController(QObject):
     def reset_for_media(self, item_is_video: bool) -> bool:
         self.rows = []
         self._row_keys = set()
+        self.task_spans.clear()
         self.media_path = None
         self.full_pass_running = False
         self.full_pass_done = False
@@ -61,7 +66,9 @@ class LiveCaptionController(QObject):
             self.rows_changed.emit()
         self.media_path = media
         self.generation = generation
-        self.task_start_seek = max(0.0, float(seek))
+        start = max(0.0, float(seek))
+        self.task_spans[generation] = [start, start]
+        self.task_start_seek = start
         self.full_pass_running = self.task_start_seek <= 0.5
         self.full_pass_done = False
         self.catching = catching
@@ -78,18 +85,54 @@ class LiveCaptionController(QObject):
         zh = str(obj.get("zh", "")).strip()
         if not seg or t1 <= t0:
             return False
-        row = (t0, t1, seg, zh)
-        key = (round(t0, 2), round(t1, 2), seg, zh)
+        # 翻译异步化：引擎先发原文行（zh 空），译文就绪后发同 (t0,t1,seg)
+        # 的更新行 → 原地补译文，不产生重复段
+        rt0, rt1 = round(t0, 2), round(t1, 2)
+        for i, (r0, r1, rseg, rzh) in enumerate(self.rows):
+            if round(r0, 2) == rt0 and round(r1, 2) == rt1 and rseg == seg:
+                if zh == rzh:
+                    return False  # 完全相同的重复行
+                if zh:  # 译文后补：原地更新
+                    self.rows[i] = (r0, r1, rseg, zh)
+                    self._row_keys.discard((rt0, rt1, seg, rzh))
+                    self._row_keys.add((rt0, rt1, seg, zh))
+                    self.rows_changed.emit()
+                    return True
+                return False  # 重复的原文行
+        key = (rt0, rt1, seg, zh)
         if key in self._row_keys:
             return False
         self._row_keys.add(key)
-        self.rows.append(row)
+        self.rows.append((t0, t1, seg, zh))
+        span = self.task_spans.get(self.generation)
+        if span is not None:
+            span[1] = max(span[1], t1)
         self.rows_changed.emit()
         return True
 
     def is_covered(self, pos: float) -> bool:
         return any(start - 0.2 <= pos <= end + 0.3
                    for start, end, _seg, _zh in self.rows)
+
+    def display_ranges(self) -> list[tuple[float, float]]:
+        """seekbar 显示用：每个任务的真实覆盖 [起点, 前沿]，合并相邻段。
+
+        与 caption_ranges()（逐句精确，供补洞决策）不同：任务内部用前沿
+        平滑（转写顺序推进，前沿前的语音都已处理），任务之间空洞如实保留。
+        """
+        spans = sorted(
+            (values[0], max(values[0], values[1]))
+            for values in self.task_spans.values()
+        )
+        merged: list[list[float]] = []
+        for start, end in spans:
+            if end <= start:
+                continue
+            if merged and start <= merged[-1][1] + 0.5:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        return [(start, end) for start, end in merged]
 
     def caption_ranges(self) -> list[tuple[float, float]]:
         merged: list[list[float]] = []
@@ -164,6 +207,8 @@ class LiveCaptionController(QObject):
 
     def begin_full_pass(self, generation: int, seek: float = 0.0) -> None:
         self.generation = generation
-        self.task_start_seek = max(0.0, float(seek))
+        start = max(0.0, float(seek))
+        self.task_spans[generation] = [start, start]
+        self.task_start_seek = start
         self.full_pass_running = True
         self.catching = False

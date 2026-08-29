@@ -86,6 +86,9 @@ class PreviewBubble(QWidget):
             text_rect = QRect(0, y + self._pix.height(), self.width(), fm.height() + 4)
         else:
             text_rect = self.rect()
+            has_two_lines = chr(10) in self._label
+            if has_two_lines:
+                self.resize(self.width(), self.height() + fm.height() + 2)
         p.setFont(self._text_font())
         p.setPen(QColor(theme.TEXT))
         p.drawText(text_rect, Qt.AlignCenter, self._label)
@@ -105,6 +108,7 @@ class SeekBar(QWidget):
         self._position = 0.0
         self._cache_end = 0.0
         self._caption_ranges: list[tuple[float, float]] = []
+        self._caption_front_text = ""
         self._hover_x: int | None = None
         self._scrubbing = False
         self._enabled = True
@@ -133,13 +137,19 @@ class SeekBar(QWidget):
         self.update()
 
     def set_caption_ranges(self, ranges: list[tuple[float, float]]) -> None:
-        """Caption coverage is shown as a subtle second track while hovered."""
+        """已转写覆盖（控制器已按任务合并为 [起点, 前沿] 区间），直接显示。"""
         self._caption_ranges = [
             (max(0.0, float(start)), max(0.0, float(end)))
             for start, end in ranges
             if end > start
         ]
         self.update()
+
+    def set_caption_front_text(self, text: str) -> None:
+        """实时字幕转写前沿提示（显示在 hover 气泡的时间下方）。"""
+        if text != self._caption_front_text:
+            self._caption_front_text = text
+            self.update()
 
     def set_active(self, active: bool) -> None:
         self._enabled = active
@@ -179,25 +189,24 @@ class SeekBar(QWidget):
         base.addRoundedRect(tr, radius, radius)
         p.fillPath(base, QColor(255, 255, 255, 46))
 
-        if hovered and self._caption_ranges:
-            caption_track = QRect(
-                tr.left(), max(0, tr.top() - 8), tr.width(), 2
-            )
+        if not self._enabled or self._duration <= 0:
+            return
+
+        # 已转写范围（实时字幕）：主轨道内的亮青色段，三段分明——
+        # 灰=未转写、青=已转写未播放、蓝=已播放。原先画在轨道上方的
+        # 3px 暗色细线叠在视频画面上完全看不出来（用户反馈"进度条不更新"）。
+        if self._caption_ranges:
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 42))
-            p.drawRoundedRect(caption_track, 1, 1)
-            p.setBrush(QColor(theme.ACCENT_DIM))
+            cap_path = QPainterPath()
             for start, end in self._caption_ranges:
                 x0 = self._x_at_time(start, hovered)
                 x1 = self._x_at_time(end, hovered)
                 if x1 <= x0:
                     continue
-                p.drawRoundedRect(
-                    QRect(caption_track.left(), caption_track.top(), max(1, x1 - x0), 2), 1, 1
-                )
-
-        if not self._enabled or self._duration <= 0:
-            return
+                seg = QRect(tr.left(), tr.top(), min(tr.width(), x1 - tr.left()), tr.height())
+                cap_path.addRoundedRect(seg, radius, radius)
+            if not cap_path.isEmpty():
+                p.fillPath(cap_path, QColor(72, 209, 183, 185))
 
         if self._cache_end > self._position:
             cr = QRect(tr.left(), tr.top(), self._x_at_time(self._cache_end, hovered) - tr.left(), tr.height())
@@ -263,7 +272,10 @@ class SeekBar(QWidget):
     def _show_bubble(self, x: int) -> None:
         t = self._time_at_x(x)
         bubble = self._ensure_bubble()
-        bubble.set_content(self.previewer.cached(t), format_duration(t))
+        label = format_duration(t)
+        if self._caption_front_text:
+            label += chr(10) + self._caption_front_text
+        bubble.set_content(self.previewer.cached(t), label)
         top_left_global = self.mapToGlobal(QPoint(0, 0))
         bubble.show_above(self.mapToGlobal(QPoint(x, 0)).x(), top_left_global.y())
 

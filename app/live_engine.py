@@ -6,9 +6,13 @@ import subprocess
 import time
 from pathlib import Path
 
-from .config import find_subtitle_pipeline_dir, settings
+from .config import PRESET_MODELS, find_subtitle_pipeline_dir, settings
 
-ENGINE_VERSION = 3
+ENGINE_VERSION = 4
+
+# SRT 生成进行中（含批量）：viewer 暂停提交实时字幕任务（UI 层互斥，
+# 引擎串行队列本身没问题，防的是 seek/换片误 cancel 掉 SRT 任务）
+srt_busy = False
 
 
 def paths() -> tuple[Path, Path, Path, Path] | None:
@@ -57,7 +61,22 @@ def hardware_snapshot() -> dict:
         return {"gpu": first[0].strip(), "vram_mb": 0, "used_mb": 0}
 
 
-def recommended_model() -> str:
+def model_installed(model: str) -> bool:
+    """qwen/sensevoice 需要引擎目录里的模型文件；whisper 走 HF 缓存自行下载。"""
+    if model not in ("qwen", "sensevoice"):
+        return True
+    pipe = find_subtitle_pipeline_dir()
+    if pipe is None:
+        return False
+    folder = "Qwen3-ASR-1.7B" if model == "qwen" else "iic--SenseVoiceSmall"
+    base = pipe / "models" / "models" / folder
+    if not base.is_dir():
+        return False
+    return any(base.rglob("*.pt")) or any(base.rglob("*.safetensors"))
+
+
+def whisper_fallback() -> str:
+    """按显存挑一个 whisper 档位（qwen/sensevoice 未安装时的兜底）。"""
     vram = hardware_snapshot().get("vram_mb", 0)
     if vram >= 8000:
         return "large-v3"
@@ -68,15 +87,30 @@ def recommended_model() -> str:
     return "tiny"
 
 
+def recommended_model() -> str:
+    """按显存推荐引擎。Qwen3-ASR 实测最准但需 ~6GB；不足则退 SenseVoice/whisper。"""
+    vram = hardware_snapshot().get("vram_mb", 0)
+    if vram >= 7000:
+        return "qwen"
+    if vram >= 4000:
+        return "medium"
+    if vram >= 2000:
+        return "sensevoice"
+    return "tiny"
+
+
 def effective_model() -> str:
-    if not bool(settings["hardware_aware_model"]):
+    """实际启动引擎用的模型。未安装的新引擎自动回退，避免升级后直接崩。"""
+    if bool(settings["hardware_aware_model"]):
+        model = recommended_model()
+    else:
         preset = str(settings["live_model_preset"])
-        return {
-            "fast": "small",
-            "balanced": "medium",
-            "accurate": "large-v3",
-        }.get(preset, str(settings["live_asr_model"]))
-    return recommended_model()
+        model = PRESET_MODELS.get(preset, str(settings["live_asr_model"]))
+    if model_installed(model):
+        return model
+    if model == "qwen" and model_installed("sensevoice"):
+        return "sensevoice"
+    return whisper_fallback()
 
 
 def control_job() -> dict:
@@ -120,13 +154,20 @@ def alive() -> bool:
         return False
 
 
+def model_dir_arg() -> str:
+    """本地模型目录只对 whisper 有意义；qwen/sensevoice 用引擎目录固定路径。"""
+    if effective_model() in ("qwen", "sensevoice"):
+        return ""
+    return str(settings["live_asr_dir"] or "").strip()
+
+
 def matches() -> bool:
     current = state()
     return (
         current.get("engine") == ENGINE_VERSION
         and current.get("source") == "audio"
         and current.get("model") == effective_model()
-        and current.get("model_dir") == str(settings["live_asr_dir"] or "")
+        and current.get("model_dir") == model_dir_arg()
         and current.get("translate") == str(settings["live_ollama_model"])
     )
 
@@ -193,8 +234,8 @@ def start_preload() -> bool:
         "--model", effective_model(),
         "--ollama-model", str(settings["live_ollama_model"]),
     ]
-    if str(settings["live_asr_dir"] or "").strip():
-        args += ["--model-dir", str(settings["live_asr_dir"]).strip()]
+    if model_dir_arg():
+        args += ["--model-dir", model_dir_arg()]
     if str(settings["live_ollama_model"]) != "none":
         args.append("--translate")
     err_path = log.parent / "live-caption.err"

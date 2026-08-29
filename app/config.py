@@ -47,9 +47,10 @@ DEFAULTS: dict[str, Any] = {
     "tree_sort_key": "name",           # 左侧目录树排序: name | mtime | size
     "tree_sort_desc": False,
     "archive_cache": "",               # 压缩包解压缓存目录（空=系统临时目录）
-    "subtitle_pipeline_dir": "",       # live-subtitle 字幕引擎目录（空=自动探测 G:\播放器\live-subtitle）
+    "subtitle_pipeline_dir": "",       # 字幕引擎目录（空=自动探测：工程同级 live-subtitle/）
     "subtitle_save_dir": "media",      # 字幕保存位置: media=视频所在文件夹 / player=播放器所在文件夹
-    "live_ollama_model": "qwen2.5:7b",  # 实时字幕翻译模型（Ollama）
+    "live_ollama_model": "qwen3:8b",    # 实时字幕翻译模型（Ollama）；none=不翻译
+    "srt_translate_model": "live",     # 生成 SRT 的翻译模型: live=跟随实时字幕 / Ollama 名 / hy-mt2-30b（llama.cpp）
     "live_caption_font_size": 32,       # 实时字幕覆盖层字号（px）
     "live_caption_width": 84,           # 实时字幕水平覆盖范围（%）
     "live_caption_height": 16,          # 实时字幕垂直覆盖范围（%）
@@ -57,9 +58,9 @@ DEFAULTS: dict[str, Any] = {
     "caption_glossary": {},             # 人名/术语替换表
     "live_caption_resident": True,     # 实时字幕常驻：停止时保留模型进程（重开秒出）
     "live_caption_source": "audio",    # 字幕来源: audio=文件音轨（本地播放，推荐）/ loopback=系统声音
-    "live_caption_lang": "en",         # 字幕识别语言: en/ja/ko/fr/de/es/auto
-    "live_asr_model": "medium",        # 字幕识别模型档位: tiny/base/small/medium/large-v3
-    "live_model_preset": "balanced",   # fast/balanced/accurate
+    "live_caption_lang": "auto",        # 字幕识别语言: zh/yue/en/ja/ko/fr/de/es/auto
+    "live_asr_model": "qwen",          # 识别引擎: qwen/sensevoice/tiny/base/small/medium/large-v3
+    "live_model_preset": "accurate",   # fast/balanced/accurate/custom
     "live_asr_dir": "",                # 字幕模型目录（空=HF 缓存下载；可指向本地 faster-whisper 模型文件夹）
     "live_model_preload": True,        # 启动播放器时后台预载字幕模型（不阻塞界面）
     "hardware_aware_model": False,     # 根据显存自动选择合适识别模型
@@ -100,6 +101,44 @@ class _JsonStore:
             self._dirty = False
 
 
+# 识别档位 → 引擎/模型。fast=SenseVoice（最快，中日韩粤好、英语弱）、
+# balanced=whisper medium（通用、显存小）、accurate=Qwen3-ASR（52 语言，实测最准）
+PRESET_MODELS = {
+    "fast": "sensevoice",
+    "balanced": "medium",
+    "accurate": "qwen",
+}
+
+# 识别引擎资源需求（安装界面/设置界面提示用）
+ASR_MODEL_SPECS = {
+    "qwen": {"size_gb": 4.7, "vram_gb": 6.0, "label": "Qwen3-ASR-1.7B"},
+    "sensevoice": {"size_gb": 0.9, "vram_gb": 2.0, "label": "SenseVoice-small"},
+    "large-v3": {"size_gb": 5.8, "vram_gb": 8.0, "label": "Whisper large-v3"},
+    "medium": {"size_gb": 1.5, "vram_gb": 4.0, "label": "Whisper medium"},
+    "small": {"size_gb": 0.5, "vram_gb": 2.0, "label": "Whisper small"},
+    "base": {"size_gb": 0.15, "vram_gb": 1.0, "label": "Whisper base"},
+    "tiny": {"size_gb": 0.08, "vram_gb": 1.0, "label": "Whisper tiny"},
+}
+
+
+# 翻译模型（Ollama）资源需求与实测评语。体积按 Ollama 官方库的量化版计。
+# 实测（2026-08-28，见 live-subtitle/bench_translate.py）：
+#   qwen3:8b        口语化最自然，习语意译到位——推荐
+#   translategemma:4b  谷歌翻译专精，日译稳，英语习语偏直译，体积最小
+#   qwen2.5:7b      旧默认，换中文 prompt 后可用，仍有错译
+#   aya-expanse:8b  偏直译（"I need an attending"→"我需要关注"）
+#   HY-MT2 系列     实测会编造内容（把台词当对话回答），已排除
+TRANSLATE_MODEL_SPECS = {
+    "none": {"size_gb": 0.0, "vram_gb": 0.0, "label": "不翻译（仅原语）"},
+    "qwen3:8b": {"size_gb": 5.2, "vram_gb": 5.5, "label": "qwen3:8b（推荐，最自然）"},
+    "translategemma:4b": {"size_gb": 3.3, "vram_gb": 3.5,
+                          "label": "translategemma:4b（轻量，翻译专精）"},
+    "qwen2.5:7b": {"size_gb": 3.8, "vram_gb": 4.5, "label": "qwen2.5:7b（旧默认）"},
+    "qwen2.5:3b": {"size_gb": 2.1, "vram_gb": 2.5, "label": "qwen2.5:3b（最省）"},
+    "aya-expanse:8b": {"size_gb": 5.1, "vram_gb": 5.5, "label": "aya-expanse:8b（多语）"},
+}
+
+
 class Settings(_JsonStore):
     def __init__(self) -> None:
         super().__init__(USERDATA_DIR / "config.json", DEFAULTS)
@@ -107,14 +146,10 @@ class Settings(_JsonStore):
             self._data.setdefault(k, v)
         # Older configs could carry a preset plus a stale explicit model. The
         # preset is the user-facing choice, so reconcile it once at startup.
-        preset_models = {
-            "fast": "small",
-            "balanced": "medium",
-            "accurate": "large-v3",
-        }
         preset = self._data.get("live_model_preset")
-        if preset in preset_models and self._data.get("live_asr_model") != preset_models[preset]:
-            self._data["live_asr_model"] = preset_models[preset]
+        if preset in PRESET_MODELS \
+                and self._data.get("live_asr_model") != PRESET_MODELS[preset]:
+            self._data["live_asr_model"] = PRESET_MODELS[preset]
             self._dirty = True
 
     def __getitem__(self, key: str) -> Any:
@@ -183,18 +218,18 @@ def flush() -> None:
 def find_subtitle_pipeline_dir() -> Path | None:
     """Locate the live-subtitle engine dir (venv with faster-whisper).
 
-    Search order: user-configured path → project folder (source build) →
-    G:\\播放器\\live-subtitle (conventional dev location) → %LIVE_SUBTITLE_DIR%.
+    Search order: user-configured path → project folder (source build or
+    portable install, resolved relative to this file) → %LIVE_SUBTITLE_DIR%.
+    No machine-specific absolute path is ever hardcoded, so the project runs
+    from any drive/folder after cloning or moving.
     Returns None when not found.
     """
     candidates: list[Path] = []
     custom = str(settings["subtitle_pipeline_dir"] or "").strip()
     if custom:
         candidates.append(Path(custom).expanduser())
-    # source tree: <project>/live-subtitle (this file lives in <project>/app/)
+    # source tree / portable layout: <project>/live-subtitle next to <project>/app/
     candidates.append(Path(__file__).resolve().parent.parent / "live-subtitle")
-    # conventional dev location on the user's machine
-    candidates.append(Path(r"G:\播放器\live-subtitle"))
     env_dir = os.environ.get("LIVE_SUBTITLE_DIR")
     if env_dir:
         candidates.append(Path(env_dir).expanduser())

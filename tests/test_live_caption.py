@@ -8,6 +8,8 @@ from app.caption_text import (
     format_bilingual,
     merge_short_rows,
 )
+from pathlib import Path
+
 from app.live_caption_controller import LiveCaptionController
 from app.live_engine_state import EngineEvent, parse_engine_line
 
@@ -82,6 +84,41 @@ class LiveCaptionTests(unittest.TestCase):
         finally:
             for key, value in old.items():
                 settings[key] = value
+
+    def test_display_ranges_jump_and_backfill(self) -> None:
+        """用户场景：0-1min 转写 → 跳 2min 续转 → 补洞连成一片。"""
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=False)
+        ctl.accept_line({"g": 1, "t": 0, "end": 60, "text": "a", "zh": ""})
+        self.assertEqual(ctl.display_ranges(), [(0.0, 60.0)])
+
+        # 跳到 2 分钟：新任务区间，1-2 分钟空洞如实保留
+        ctl.begin_media(Path("a.mp4"), 120.0, 2, catching=True)
+        ctl.accept_line({"g": 2, "t": 120, "end": 240, "text": "b", "zh": ""})
+        self.assertEqual(ctl.display_ranges(), [(0.0, 60.0), (120.0, 240.0)])
+
+        # 回头补 60-120：三段相接连成一片
+        ctl.begin_full_pass(3, 60.0)
+        ctl.accept_line({"g": 3, "t": 60, "end": 90, "text": "c", "zh": ""})
+        ctl.accept_line({"g": 3, "t": 90, "end": 120, "text": "d", "zh": ""})
+        self.assertEqual(ctl.display_ranges(), [(0.0, 240.0)])
+
+    def test_translation_backfill_updates_row_in_place(self) -> None:
+        """异步翻译：原文行先到（zh 空），译文更新行原地补齐、不产生重复。"""
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=False)
+        self.assertTrue(ctl.accept_line(
+            {"g": 1, "t": 0, "end": 5, "text": "Hello.", "zh": ""}))
+        self.assertEqual(ctl.rows[0][3], "")
+        # 译文更新行：同 (t0,t1,seg)，zh 有值
+        self.assertTrue(ctl.accept_line(
+            {"g": 1, "t": 0, "end": 5, "text": "Hello.", "zh": "你好。"}))
+        self.assertEqual(len(ctl.rows), 1)
+        self.assertEqual(ctl.rows[0][3], "你好。")
+        # 相同的更新行再来一次（重复投递）：拒绝且不产生重复
+        self.assertFalse(ctl.accept_line(
+            {"g": 1, "t": 0, "end": 5, "text": "Hello.", "zh": "你好。"}))
+        self.assertEqual(len(ctl.rows), 1)
 
 
 if __name__ == "__main__":

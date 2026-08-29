@@ -30,9 +30,24 @@ from PySide6.QtWidgets import (
 )
 
 from . import assoc, theme
-from .config import flush, settings
+from .config import (
+    ASR_MODEL_SPECS,
+    PRESET_MODELS,
+    TRANSLATE_MODEL_SPECS,
+    flush,
+    settings,
+)
 from .i18n import LANGUAGES, current_language, set_language, t
 from .runtime import APP_DIR
+
+
+def _asr_model_label(key: str) -> str:
+    """下拉项文字：模型名 + 磁盘/显存需求，选择时即可看到资源代价。"""
+    spec = ASR_MODEL_SPECS.get(key)
+    if spec is None:
+        return key
+    return (f"{spec['label']}（{spec['size_gb']:g}GB 磁盘 / "
+            f"{spec['vram_gb']:g}GB 显存）")
 
 _HWDEC_CHOICES = [
     ("auto-safe", "settings.hwdec_auto_safe"),
@@ -309,10 +324,10 @@ class SettingsDialog(QDialog):
         gg.addWidget(self.sub_status, 1, 0, 1, 5)
         self._refresh_subtitle_status()
 
-        # 模型档位（下拉）
+        # 识别引擎（下拉）：Qwen3-ASR / SenseVoice / whisper 各档位
         self.cb_live_asr = QComboBox()
-        for m in ("tiny", "base", "small", "medium", "large-v3"):
-            self.cb_live_asr.addItem(m, m)
+        for m in ("qwen", "sensevoice", "large-v3", "medium", "small", "base", "tiny"):
+            self.cb_live_asr.addItem(_asr_model_label(m), m)
         idx = self.cb_live_asr.findData(settings["live_asr_model"])
         self.cb_live_asr.setCurrentIndex(max(0, idx))
         self.cb_live_asr.currentIndexChanged.connect(
@@ -330,11 +345,7 @@ class SettingsDialog(QDialog):
         self.cb_live_preset.setToolTip(t("settings.live_model_preset_hint"))
         self.cb_live_preset.currentIndexChanged.connect(self._on_live_preset_changed)
         if str(settings["live_model_preset"]) != "custom":
-            mapped = {
-                "fast": "small",
-                "balanced": "medium",
-                "accurate": "large-v3",
-            }[str(settings["live_model_preset"])]
+            mapped = PRESET_MODELS[str(settings["live_model_preset"])]
             idx = self.cb_live_asr.findData(mapped)
             if idx >= 0:
                 self.cb_live_asr.blockSignals(True)
@@ -342,19 +353,56 @@ class SettingsDialog(QDialog):
                 self.cb_live_asr.blockSignals(False)
             settings["live_asr_model"] = mapped
         self.cb_live_translate = QComboBox()
-        for m in ("none", "qwen2.5:3b", "qwen2.5:7b", "aya-expanse:8b"):
-            self.cb_live_translate.addItem("无（仅原语）" if m == "none" else m, m)
+        for m, spec in TRANSLATE_MODEL_SPECS.items():
+            suffix = "" if m == "none" else f"　{spec['size_gb']:g}GB"
+            self.cb_live_translate.addItem(f"{spec['label']}{suffix}", m)
         idx = self.cb_live_translate.findData(settings["live_ollama_model"])
-        self.cb_live_translate.setCurrentIndex(max(0, idx))
+        if idx < 0:  # 用户配了清单外的模型名：保留它，不要静默改掉
+            self.cb_live_translate.addItem(str(settings["live_ollama_model"]),
+                                           settings["live_ollama_model"])
+            idx = self.cb_live_translate.count() - 1
+        self.cb_live_translate.setCurrentIndex(idx)
+        self.cb_live_translate.setToolTip(t("settings.live_translate_hint"))
         self.cb_live_translate.currentIndexChanged.connect(
-            lambda _i: self._set("live_ollama_model", self.cb_live_translate.currentData()))
+            lambda _i: (self._set("live_ollama_model", self.cb_live_translate.currentData()),
+                        self._update_combo_resources()))
+        # 识别 + 翻译两个选择的合计资源占用（随任一下拉变化即时更新）
+        self.combo_res_label = QLabel("")
+        self.combo_res_label.setWordWrap(True)
+        self.combo_res_label.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        gg.addWidget(self.combo_res_label, 3, 0, 1, 5)
+        self.cb_live_asr.currentIndexChanged.connect(
+            lambda _i: self._update_combo_resources())
         self.cb_live_lang = QComboBox()
-        for lang in ("en", "ja", "ko", "fr", "de", "es", "auto"):
-            self.cb_live_lang.addItem(lang, lang)
+        for lang in ("auto", "zh", "yue", "en", "ja", "ko", "fr", "de", "es"):
+            self.cb_live_lang.addItem(f"{t('settings.live_lang_' + lang)}（{lang}）", lang)
         idx = self.cb_live_lang.findData(settings["live_caption_lang"])
         self.cb_live_lang.setCurrentIndex(max(0, idx))
         self.cb_live_lang.currentIndexChanged.connect(
             lambda _i: self._set("live_caption_lang", self.cb_live_lang.currentData()))
+
+        # 生成 SRT 的翻译模型：与实时字幕分开；可选用 llama.cpp 大模型（仅 SRT 时启动）
+        self.cb_srt_translate = QComboBox()
+        self.cb_srt_translate.addItem(t("settings.srt_follow_live"), "live")
+        for m, spec in TRANSLATE_MODEL_SPECS.items():
+            if m == "none":
+                continue
+            self.cb_srt_translate.addItem(f"{spec['label']}　{spec['size_gb']:g}GB", m)
+        self.cb_srt_translate.addItem(
+            t("settings.srt_hymt2_label"), "hy-mt2-30b")
+        idx = self.cb_srt_translate.findData(settings["srt_translate_model"])
+        if idx < 0:
+            idx = 0
+        self.cb_srt_translate.setCurrentIndex(idx)
+        self.cb_srt_translate.setToolTip(t("settings.srt_translate_hint"))
+        self.cb_srt_translate.currentIndexChanged.connect(
+            lambda _i: self._set("srt_translate_model", self.cb_srt_translate.currentData()))
+        gg.addWidget(QLabel(t("settings.srt_translate_label")), 14, 0)
+        gg.addWidget(self.cb_srt_translate, 14, 1, 1, 2)
+        srt_hint = QLabel(t("settings.srt_translate_hint"))
+        srt_hint.setWordWrap(True)
+        srt_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        gg.addWidget(srt_hint, 15, 0, 1, 5)
 
         # 实时字幕覆盖层：字号 + 覆盖范围（按播放区域百分比）
         self.spin_live_font = QSpinBox()
@@ -383,17 +431,24 @@ class SettingsDialog(QDialog):
 
         gg.addWidget(QLabel(t("settings.live_asr_label")), 2, 0)
         gg.addWidget(self.cb_live_asr, 2, 1)
-        gg.addWidget(QLabel(t("settings.live_model_preset_label")), 12, 0)
-        gg.addWidget(self.cb_live_preset, 12, 1)
+        gg.addWidget(QLabel(t("settings.live_model_preset_label")), 13, 0)
+        gg.addWidget(self.cb_live_preset, 13, 1)
         self.cb_hardware_model = QCheckBox(t("settings.hardware_aware_model_label"))
         self.cb_hardware_model.setToolTip(t("settings.hardware_aware_model_hint"))
         self.cb_hardware_model.setChecked(bool(settings["hardware_aware_model"]))
         self.cb_hardware_model.toggled.connect(
             lambda value: self._set("hardware_aware_model", value)
         )
-        gg.addWidget(self.cb_hardware_model, 12, 2, 1, 3)
+        gg.addWidget(self.cb_hardware_model, 13, 2, 1, 3)
         gg.addWidget(QLabel(t("settings.live_translate_label")), 2, 2)
         gg.addWidget(self.cb_live_translate, 2, 3, 1, 2)
+        # 所选引擎的资源需求 / 本机是否够（选择时即时更新）
+        self.asr_hint = QLabel("")
+        self.asr_hint.setWordWrap(True)
+        self.asr_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        gg.addWidget(self.asr_hint, 14, 0, 1, 5)
+        self._warn_model_resources(str(settings["live_asr_model"]))
+        self._update_combo_resources()
 
         # 模型目录（读取本地模型文件夹）
         self.edit_asr_dir = QLineEdit()
@@ -408,10 +463,10 @@ class SettingsDialog(QDialog):
         btn_ac.setFocusPolicy(Qt.NoFocus)
         btn_ac.clicked.connect(lambda: (self.edit_asr_dir.clear(),
                                         self._set("live_asr_dir", "")))
-        gg.addWidget(QLabel(t("settings.live_asr_dir_label")), 3, 0)
-        gg.addWidget(self.edit_asr_dir, 3, 1, 1, 2)
-        gg.addWidget(btn_ad, 3, 3)
-        gg.addWidget(btn_ac, 3, 4)
+        gg.addWidget(QLabel(t("settings.live_asr_dir_label")), 4, 0)
+        gg.addWidget(self.edit_asr_dir, 4, 1, 1, 2)
+        gg.addWidget(btn_ad, 4, 3)
+        gg.addWidget(btn_ac, 4, 4)
 
         # 来源 + 保存位置（下拉）
         self.cb_live_source = QComboBox()
@@ -430,36 +485,36 @@ class SettingsDialog(QDialog):
         self.cb_subtitle_save.setCurrentIndex(max(0, idx))
         self.cb_subtitle_save.currentIndexChanged.connect(
             lambda _i: self._set("subtitle_save_dir", self.cb_subtitle_save.currentData()))
-        gg.addWidget(QLabel(t("settings.live_source_label")), 4, 0)
-        gg.addWidget(self.cb_live_source, 4, 1)
-        gg.addWidget(QLabel(t("settings.subtitle_save_label")), 4, 2)
-        gg.addWidget(self.cb_subtitle_save, 4, 3, 1, 2)
+        gg.addWidget(QLabel(t("settings.live_source_label")), 5, 0)
+        gg.addWidget(self.cb_live_source, 5, 1)
+        gg.addWidget(QLabel(t("settings.subtitle_save_label")), 5, 2)
+        gg.addWidget(self.cb_subtitle_save, 5, 3, 1, 2)
 
         self.cb_live_resident = QCheckBox(t("settings.live_resident_label"))
         self.cb_live_resident.setToolTip(t("settings.live_resident_hint"))
         self.cb_live_resident.setChecked(bool(settings["live_caption_resident"]))
         self.cb_live_resident.toggled.connect(lambda v: self._set("live_caption_resident", v))
-        gg.addWidget(self.cb_live_resident, 5, 0, 1, 5)
+        gg.addWidget(self.cb_live_resident, 6, 0, 1, 5)
 
         self.cb_live_preload = QCheckBox(t("settings.live_model_preload_label"))
         self.cb_live_preload.setToolTip(t("settings.live_model_preload_hint"))
         self.cb_live_preload.setChecked(bool(settings["live_model_preload"]))
         self.cb_live_preload.toggled.connect(lambda v: self._set("live_model_preload", v))
-        gg.addWidget(self.cb_live_preload, 8, 0, 1, 5)
+        gg.addWidget(self.cb_live_preload, 9, 0, 1, 5)
         preload_hint = QLabel(t("settings.live_model_preload_hint"))
         preload_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         preload_hint.setWordWrap(True)
-        gg.addWidget(preload_hint, 9, 0, 1, 5)
-        gg.addWidget(QLabel(t("settings.live_caption_display_label")), 6, 0)
-        gg.addWidget(self.spin_live_font, 6, 1)
-        gg.addWidget(QLabel(t("settings.live_caption_width_label")), 6, 2)
-        gg.addWidget(self.spin_live_width, 6, 3)
-        gg.addWidget(QLabel(t("settings.live_caption_height_label")), 7, 2)
-        gg.addWidget(self.spin_live_height, 7, 3)
+        gg.addWidget(preload_hint, 10, 0, 1, 5)
+        gg.addWidget(QLabel(t("settings.live_caption_display_label")), 7, 0)
+        gg.addWidget(self.spin_live_font, 7, 1)
+        gg.addWidget(QLabel(t("settings.live_caption_width_label")), 7, 2)
+        gg.addWidget(self.spin_live_width, 7, 3)
+        gg.addWidget(QLabel(t("settings.live_caption_height_label")), 8, 2)
+        gg.addWidget(self.spin_live_height, 8, 3)
         display_hint = QLabel(t("settings.live_caption_display_hint"))
         display_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         display_hint.setWordWrap(True)
-        gg.addWidget(display_hint, 7, 0, 1, 2)
+        gg.addWidget(display_hint, 8, 0, 1, 2)
 
         self.slider_bilingual = QSlider(Qt.Horizontal)
         self.slider_bilingual.setRange(0, 100)
@@ -468,15 +523,15 @@ class SettingsDialog(QDialog):
         self.slider_bilingual.valueChanged.connect(
             lambda v: self._set("caption_bilingual_ratio", v / 100.0)
         )
-        gg.addWidget(QLabel(t("settings.caption_bilingual_label")), 10, 0)
-        gg.addWidget(self.slider_bilingual, 10, 1, 1, 4)
+        gg.addWidget(QLabel(t("settings.caption_bilingual_label")), 11, 0)
+        gg.addWidget(self.slider_bilingual, 11, 1, 1, 4)
 
         self.edit_glossary = QLineEdit()
         self.edit_glossary.setPlaceholderText(t("settings.caption_glossary_hint"))
         self.edit_glossary.setText(self._format_glossary(settings["caption_glossary"]))
         self.edit_glossary.editingFinished.connect(self._save_glossary)
-        gg.addWidget(QLabel(t("settings.caption_glossary_label")), 11, 0)
-        gg.addWidget(self.edit_glossary, 11, 1, 1, 4)
+        gg.addWidget(QLabel(t("settings.caption_glossary_label")), 12, 0)
+        gg.addWidget(self.edit_glossary, 12, 1, 1, 4)
         root.addWidget(grp)
 
         # ---- 一键安装（分组）
@@ -486,18 +541,20 @@ class SettingsDialog(QDialog):
         ig.setContentsMargins(8, 6, 8, 6)
         ig.setSpacing(4)
         self.install_model = QComboBox()
-        for m in ("small", "medium", "large-v3"):
-            self.install_model.addItem(m)
-        self.install_model.setCurrentText("medium")
+        for m in ("qwen", "sensevoice", "large-v3", "medium", "small"):
+            self.install_model.addItem(_asr_model_label(m), m)
+        self.install_model.setCurrentIndex(0)  # 默认 Qwen3-ASR（实测最准）
         self.install_model.currentTextChanged.connect(self._update_install_hint)
         self.install_translate = QComboBox()
-        for m in ("none", "qwen2.5:3b", "qwen2.5:7b", "aya-expanse:8b"):
-            self.install_translate.addItem(m, m)
-        self.install_translate.setCurrentIndex(2)  # 默认 qwen2.5:7b
+        for m, spec in TRANSLATE_MODEL_SPECS.items():
+            suffix = "" if m == "none" else f"　{spec['size_gb']:g}GB"
+            self.install_translate.addItem(f"{spec['label']}{suffix}", m)
+        self.install_translate.setCurrentIndex(1)  # 默认 qwen3:8b
         self.install_translate.currentTextChanged.connect(self._update_install_hint)
         self.install_mirror = QComboBox()
         self.install_mirror.addItem("huggingface.co", "huggingface")
         self.install_mirror.addItem("hf-mirror.com（国内快）", "hf-mirror")
+        self.install_mirror.setToolTip(t("settings.install_mirror_hint"))
         ig.addWidget(QLabel(t("settings.install_model_label")), 0, 0)
         ig.addWidget(self.install_model, 0, 1)
         ig.addWidget(QLabel(t("settings.install_translate_label")), 0, 2)
@@ -513,10 +570,15 @@ class SettingsDialog(QDialog):
         self.btn_install = QPushButton(t("settings.install_start"))
         self.btn_install.setFocusPolicy(Qt.NoFocus)
         self.btn_install.clicked.connect(self._start_install)
+        self.btn_install_llama = QPushButton(t("settings.install_llama"))
+        self.btn_install_llama.setFocusPolicy(Qt.NoFocus)
+        self.btn_install_llama.setToolTip(t("settings.install_llama_hint"))
+        self.btn_install_llama.clicked.connect(self._start_install_llama)
         self.install_status = QLabel("")
         self.install_status.setStyleSheet(f"color:{theme.TEXT_DIM};")
         ig.addWidget(self.btn_install, 2, 0)
-        ig.addWidget(self.install_status, 2, 1, 1, 5)
+        ig.addWidget(self.btn_install_llama, 2, 2)
+        ig.addWidget(self.install_status, 2, 3, 1, 3)
 
         self.install_log = QPlainTextEdit()
         self.install_log.setReadOnly(True)
@@ -602,6 +664,18 @@ class SettingsDialog(QDialog):
         scroll.setWidget(content)
         root_outer.addLayout(footer)
 
+        # 悬停在下拉框/滑动条上滚轮会误改设置并卡住界面滚动——统一禁用，
+        # 滚轮事件转发给父级（滚动区域照常滚）
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+
+        for cls in (QComboBox, QSlider, QSpinBox):
+            for widget in self.findChildren(cls):
+                widget.setFocusPolicy(Qt.StrongFocus)
+                widget.installEventFilter(self)
+        self._wheel_types = (QEvent.Wheel,)
+        self._qapp = QApplication
+
         screen = self.screen()
         if screen is not None:
             max_h = screen.availableGeometry().height() - 80
@@ -633,28 +707,89 @@ class SettingsDialog(QDialog):
         self._set("live_model_preset", preset)
         if preset == "custom":
             return
-        model = {"fast": "small", "balanced": "medium", "accurate": "large-v3"}[preset]
+        model = PRESET_MODELS[preset]
         idx = self.cb_live_asr.findData(model)
         if idx >= 0:
             self.cb_live_asr.blockSignals(True)
             self.cb_live_asr.setCurrentIndex(idx)
             self.cb_live_asr.blockSignals(False)
         self._set("live_asr_model", model)
+        self._warn_model_resources(model)
 
     def _on_live_asr_model_changed(self, _index: int) -> None:
         model = self.cb_live_asr.currentData()
         self._set("live_asr_model", model)
-        preset = {
-            "small": "fast",
-            "medium": "balanced",
-            "large-v3": "accurate",
-        }.get(str(model), "custom")
+        preset = {v: k for k, v in PRESET_MODELS.items()}.get(str(model), "custom")
         idx = self.cb_live_preset.findData(preset)
         if idx >= 0:
             self.cb_live_preset.blockSignals(True)
             self.cb_live_preset.setCurrentIndex(idx)
             self.cb_live_preset.blockSignals(False)
         self._set("live_model_preset", preset)
+        self._warn_model_resources(model)
+
+    def _update_combo_resources(self) -> None:
+        """当前「识别 + 翻译」两个选择的合计磁盘/显存，并对本机显存给出判断。"""
+        from . import live_engine
+
+        asr = str(self.cb_live_asr.currentData() or "")
+        tr = str(self.cb_live_translate.currentData() or "none")
+        spec = ASR_MODEL_SPECS.get(asr)
+        # hy-mt2-30b 是 SRT 专用（llama.cpp），不参与实时字幕合计
+        tr_spec = TRANSLATE_MODEL_SPECS.get(tr) if tr != "hy-mt2-30b" else None
+        if spec is None or not hasattr(self, "combo_res_label"):
+            return
+        disk = spec["size_gb"] + (tr_spec["size_gb"] if tr_spec else 0.0)
+        vram = spec["vram_gb"] + (tr_spec["vram_gb"] if tr_spec else 0.0)
+        hardware = live_engine.hardware_snapshot()
+        vram_gb = hardware.get("vram_mb", 0) / 1024.0
+        parts = [t("settings.combo_res").format(
+            disk=f"{disk:g}", vram=f"{vram:g}")]
+        if vram_gb <= 0:
+            parts.append(t("settings.combo_res_cpu"))
+        elif vram_gb + 0.4 < vram:
+            parts.append(t("settings.combo_res_low").format(
+                have=f"{vram_gb:.1f}", need=f"{vram:g}"))
+        else:
+            parts.append(t("settings.combo_res_ok").format(have=f"{vram_gb:.1f}"))
+        self.combo_res_label.setText(" ".join(parts))
+
+    def _warn_model_resources(self, model: str) -> None:
+        """所选引擎的资源需求 + 本机是否够（显存/磁盘不足时给出明确提示）。"""
+        from . import live_engine
+
+        spec = ASR_MODEL_SPECS.get(str(model))
+        if spec is None or not hasattr(self, "asr_hint"):
+            return
+        hardware = live_engine.hardware_snapshot()
+        vram_gb = hardware.get("vram_mb", 0) / 1024.0
+        parts = [t("settings.model_need").format(
+            name=spec["label"], disk=f"{spec['size_gb']:g}", vram=f"{spec['vram_gb']:g}")]
+        if not live_engine.model_installed(str(model)):
+            parts.append(t("settings.model_not_installed"))
+        if vram_gb <= 0:
+            parts.append(t("settings.model_need_cpu"))
+        elif vram_gb + 0.4 < spec["vram_gb"]:
+            parts.append(t("settings.model_need_low_vram").format(
+                have=f"{vram_gb:.1f}", need=f"{spec['vram_gb']:g}"))
+        free_gb = self._pipeline_free_gb()
+        if free_gb is not None and free_gb < spec["size_gb"] * 1.3:
+            parts.append(t("settings.model_need_low_disk").format(
+                free=f"{free_gb:.1f}", need=f"{spec['size_gb']:g}"))
+        self.asr_hint.setText(" ".join(parts))
+
+    @staticmethod
+    def _pipeline_free_gb() -> float | None:
+        """引擎目录所在盘剩余空间（GB）；拿不到返回 None。"""
+        import shutil as _shutil
+
+        from .config import find_subtitle_pipeline_dir
+
+        target = find_subtitle_pipeline_dir() or APP_DIR
+        try:
+            return _shutil.disk_usage(str(target)).free / (1024 ** 3)
+        except Exception:
+            return None
 
     def _refresh_live_diagnostics(self) -> None:
         from . import live_engine
@@ -785,25 +920,72 @@ class SettingsDialog(QDialog):
             self.sub_status.setText(t("settings.subtitle_dir_missing"))
             self.sub_status.setStyleSheet("color:#e0653f;")
 
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QApplication
+
+        if event.type() == QEvent.Wheel and isinstance(
+                watched, (QComboBox, QSlider, QSpinBox)):
+            event.ignore()  # 标记未处理，控件自身的滚轮改值被跳过
+            QApplication.sendEvent(watched.parentWidget(), event)  # 让滚动区继续滚
+            return True
+        return super().eventFilter(watched, event)
+
     _INSTALL_MODEL_HINTS = {
-        "small": "轻量款：识别模型约 500MB，2GB 以上内存即可跑（无独显也能用）；"
-                 "识别较粗，个别词会错。适合低配机器或只想要个大概。",
-        "medium": "推荐款：识别模型约 1.5GB，8GB 内存或任意独显；识别准确、速度约 8 倍实时，"
-                  "综合性价比最高。",
-        "large-v3": "最准款：识别模型约 3GB，建议 16GB 内存或 6GB 以上显存；"
-                    "医学术语等专业内容最稳，加载稍慢（约 40 秒）。",
+        "qwen": "Qwen3-ASR-1.7B（推荐）：模型 4.7GB，建议 6GB 以上显存；52 种语言 + 22 种中文方言，"
+                "自带语种识别。实测中/英零错误、日语错误率最低，数字与专有名词也最稳。"
+                "无独显时可跑 CPU 但很慢。",
+        "sensevoice": "SenseVoice-small：模型 0.9GB，2GB 显存即可（CPU 也能实时）；"
+                      "中文/粤语/日语/韩语快而准，英语明显较弱。适合低配机器或纯中文内容。",
+        "large-v3": "Whisper large-v3：模型 5.8GB，建议 8GB 以上显存；99 种语言覆盖最广，"
+                    "加载约 40 秒，中文数字偶有错误。",
+        "medium": "Whisper medium：模型 1.5GB，4GB 显存；通用均衡款，速度约 8 倍实时。",
+        "small": "Whisper small：模型 0.5GB，2GB 显存即可（无独显也能用）；识别较粗，个别词会错。",
     }
     _INSTALL_TRANSLATE_HINTS = {
         "none": "不安装翻译模型：只出原文字幕，最省空间和时间。",
-        "qwen2.5:3b": "翻译模型 2.1GB：日常对话足够，速度快；专业术语一般。",
-        "qwen2.5:7b": "翻译模型 3.8GB（推荐）：多语言→中文质量最好，医疗/专业术语准确。",
-        "aya-expanse:8b": "翻译模型 5.1GB（Cohere）：多语言功底好；长句较慢且输出需清理。",
+        "qwen3:8b": "qwen3:8b 5.2GB（推荐）：实测口语化最自然，习语意译到位"
+                    "（Cut me some slack → 行行行，给我点面子吧）；已关思考模式，每句约 0.3s。",
+        "translategemma:4b": "translategemma:4b 3.3GB：谷歌翻译专精，日译最稳、体积最小，"
+                             "英语习语略偏直译。显存紧张时选它。",
+        "qwen2.5:7b": "qwen2.5:7b 3.8GB：旧默认，通用可靠，个别习语仍会直译。",
+        "qwen2.5:3b": "qwen2.5:3b 2.1GB：最省资源，日常对话够用，专业术语一般。",
+        "aya-expanse:8b": "aya-expanse:8b 5.1GB（Cohere）：多语种覆盖好，但中文偏直译。",
     }
 
     def _update_install_hint(self) -> None:
-        m = self.install_model.currentText()
-        tm = self.install_translate.currentText()
-        parts = [self._INSTALL_MODEL_HINTS.get(m, ""), self._INSTALL_TRANSLATE_HINTS.get(tm, "")]
+        """安装项提示：模型/翻译说明 + 本机显存磁盘是否够 + 总下载量。"""
+        from . import live_engine
+
+        model = str(self.install_model.currentData() or "")
+        translate = str(self.install_translate.currentData() or "none")
+        parts = [self._INSTALL_MODEL_HINTS.get(model, ""),
+                 self._INSTALL_TRANSLATE_HINTS.get(translate, "")]
+
+        spec = ASR_MODEL_SPECS.get(model)
+        tr_spec = TRANSLATE_MODEL_SPECS.get(translate, {"size_gb": 0.0, "vram_gb": 0.0})
+        total_gb = (spec["size_gb"] if spec else 0.0) + tr_spec["size_gb"]
+        # 首次安装还要装 venv 依赖（torch+CUDA 运行库约 4GB）
+        deps_gb = 4.0 if model in ("qwen", "sensevoice") else 1.5
+        parts.append(f"本次需下载约 {total_gb + deps_gb:.1f}GB"
+                     f"（模型 {total_gb:.1f}GB + 运行环境 {deps_gb:g}GB），"
+                     f"已装过的部分自动跳过。")
+
+        hardware = live_engine.hardware_snapshot()
+        vram_gb = hardware.get("vram_mb", 0) / 1024.0
+        if spec is not None:
+            need_both = spec["vram_gb"] + tr_spec["vram_gb"]
+            if vram_gb <= 0:
+                parts.append("未检测到 NVIDIA 显卡：将以 CPU 模式安装运行（慢，建议选 SenseVoice/small）。")
+            elif vram_gb + 0.4 < spec["vram_gb"]:
+                parts.append(f"⚠ 本机显存 {vram_gb:.1f}GB 低于建议 {spec['vram_gb']:g}GB，"
+                             f"可能加载失败或极慢。")
+            elif tr_spec["vram_gb"] > 0 and vram_gb < need_both:
+                parts.append(f"提示：识别 + 翻译同时常驻约需 {need_both:g}GB 显存，"
+                             f"本机 {vram_gb:.1f}GB——翻译模型会部分转到内存运行（略慢，可用）。")
+        free_gb = self._pipeline_free_gb()
+        if free_gb is not None and free_gb < total_gb + deps_gb:
+            parts.append(f"⚠ 引擎所在盘仅剩 {free_gb:.1f}GB，不足本次下载量。")
         self.install_hint.setText(" · ".join(p for p in parts if p))
 
     def _start_install(self) -> None:
@@ -854,10 +1036,57 @@ class SettingsDialog(QDialog):
 
         exe = sys.executable  # system python builds the venv
         args = [str(script), "--dir", str(pipe),
-                "--model", self.install_model.currentText(),
+                "--model", str(self.install_model.currentData() or "qwen"),
                 "--mirror", self.install_mirror.currentData() or "huggingface",
-                "--translate", self.install_translate.currentText()]
+                "--translate", str(self.install_translate.currentData() or "none")]
         proc.start(exe, args)
+
+    def _start_install_llama(self) -> None:
+        """一键安装 HY-MT2-30B SRT 翻译（llama.cpp + 11.6GB 模型，幂等）。"""
+        from PySide6.QtCore import QProcess
+
+        from .config import find_subtitle_pipeline_dir
+
+        if getattr(self, "_install_proc", None) is not None                 and self._install_proc.state() != QProcess.NotRunning:
+            return
+        pipe = find_subtitle_pipeline_dir()
+        if pipe is None:
+            pipe = Path(__file__).resolve().parent.parent / "live-subtitle"
+        script = pipe / "install_engine.py"
+        if not script.is_file():
+            self.install_status.setText(t("settings.install_no_script"))
+            return
+        proc = QProcess(self)
+        self._install_proc = proc
+        self.install_log.clear()
+        self.btn_install.setEnabled(False)
+        self.btn_install_llama.setEnabled(False)
+        self.install_status.setText(t("settings.install_running"))
+
+        def on_stdout() -> None:
+            self.install_log.appendPlainText(
+                bytes(proc.readAllStandardOutput()).decode("utf-8", "replace").strip()
+            )
+
+        def on_stderr() -> None:
+            self.install_log.appendPlainText(
+                bytes(proc.readAllStandardError()).decode("utf-8", "replace").strip()
+            )
+
+        def on_finished(code: int, _s) -> None:
+            self.btn_install.setEnabled(True)
+            self.btn_install_llama.setEnabled(True)
+            ok = code == 0
+            self.install_status.setText(
+                t("settings.install_done") if ok else t("settings.install_failed")
+            )
+            self.install_status.setStyleSheet("color:#5dc0f0;" if ok else "color:#e0653f;")
+            self._refresh_subtitle_status()
+
+        proc.readyReadStandardOutput.connect(on_stdout)
+        proc.readyReadStandardError.connect(on_stderr)
+        proc.finished.connect(on_finished)
+        proc.start(sys.executable, [str(script), "--dir", str(pipe), "--llamacpp-only"])
 
     def _browse_archive_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog
