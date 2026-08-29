@@ -239,7 +239,7 @@ def main() -> None:
             "target": args.target_lang,
             "scenario": args.scenario,
             "idle": int(args.idle_unload),
-            "engine": 6,
+            "engine": 7,
         }
         state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
@@ -667,6 +667,9 @@ def main() -> None:
         # translator 可能被上一个任务的连续失败降级成 None——SRT 不能跟着
         # 静默交付纯原文（还报 SRT_READY"成功"），用原始引用重试
         job_translator = translator if translator is not None else translator_base
+        # 本任务的场景（主循环已把它拨到共享 translator 上）：按任务新建的翻译器
+        # 也要用同一个值，别退回引擎启动时的旧场景
+        job_scenario = str(job.get("scenario") or args.scenario)
         llama_used = False
         try:
             if job_model == "hy-mt2-30b":
@@ -678,7 +681,7 @@ def main() -> None:
 
                 if ensure_llama_server(lambda m: _job_status(job, m)):
                     job_translator = LlamaServerTranslator(
-                        target=args.target_lang, scenario=args.scenario)
+                        target=args.target_lang, scenario=job_scenario)
                     llama_used = True
                 else:
                     _job_status(job, "llama.cpp 不可用，回退 Ollama")
@@ -688,7 +691,7 @@ def main() -> None:
 
                 job_translator = Translator(args.ollama, job_model,
                                             target=args.target_lang,
-                                            scenario=args.scenario)
+                                            scenario=job_scenario)
         except Exception as exc:  # noqa: BLE001
             _job_status(job, f"翻译模型初始化失败: {str(exc)[:120]}")
             job_translator = translator
@@ -897,6 +900,13 @@ def main() -> None:
             _stop_hb.wait(0.25)
             continue
         try:
+            # 场景随任务下发：播放器改了「翻译场景」后，下一个任务立刻按新场景
+            # 翻译，不必重建引擎（translator 与 translator_base 正常是同一对象，
+            # 降级后 translator 为 None，所以两个都要拨）
+            job_scenario = str(job.get("scenario") or args.scenario)
+            for _tr in (translator, translator_base):
+                if _tr is not None and getattr(_tr, "scenario", None) != job_scenario:
+                    _tr.scenario = job_scenario
             if job["mode"] == "cancel":
                 # generation 已被 _watch_control 置为最新 → 进行中的任务会在
                 # 下一个检查点退出并写 SRT_CANCELLED/TASK_DONE；此处无事可做

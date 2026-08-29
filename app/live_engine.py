@@ -14,7 +14,7 @@ from .config import (
     settings,
 )
 
-ENGINE_VERSION = 6
+ENGINE_VERSION = 7
 
 # 引擎拉起冷却：30s 内已 spawn 过就不再 kill+respawn（设置刚改过也等下一次
 # 调用再重建），防止多个启动入口把"加载中的引擎"反复杀掉造成重启循环
@@ -252,7 +252,8 @@ def matches() -> bool:
         and current.get("translate") == str(settings["live_ollama_model"])
         and current.get("target") == str(settings["live_translate_target"])
         and current.get("idle") == int(settings["live_caption_idle_unload"])
-        and current.get("scenario") == str(settings["translate_scenario"])
+        # scenario 不参与比较：它随每个任务下发（job["scenario"]），改场景无需
+        # 重建引擎（否则要白等一次 20-60s 的模型重载）。state 里仍写它便于诊断
     )
 
 

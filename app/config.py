@@ -51,7 +51,7 @@ DEFAULTS: dict[str, Any] = {
     "subtitle_save_dir": "media",      # 字幕保存位置: media=视频所在文件夹 / player=播放器所在文件夹
     "live_ollama_model": "qwen3:8b",    # 实时字幕翻译模型（Ollama）；none=不翻译
     "live_translate_target": "zh",     # 翻译目标语言: zh / zh-Hant / en
-    "translate_scenario": "general",   # 内容场景提示词: general/nsfw/science/meeting/blog/documentary/variety/anime/legal_med
+    "translate_scenario": "general",   # 场景选项由 live-subtitle/scenarios/*.json 提供
     "live_caption_idle_unload": 1800,  # 引擎空闲 N 秒后自动卸载模型释放显存；0=不卸载
     "srt_translate_model": "live",     # 生成 SRT 的翻译模型: live=跟随实时字幕 / Ollama 名 / hy-mt2-30b（llama.cpp）
     "srt_export_format": "srt",        # SRT 导出格式: srt / vtt / ass

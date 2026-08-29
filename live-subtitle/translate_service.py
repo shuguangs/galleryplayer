@@ -49,58 +49,88 @@ def system_prompt(target: str, scenario: str = "general") -> str:
     """按目标语言 + 内容场景组装系统提示（target 为 zh/zh-Hant/en 等设置值）。
 
     scenario 见 SCENARIO_HINTS；general（通用影视）不追加场景段。
+    中文特有的词表/例子（SCENARIO_ZH_EXTRA）只在目标语言是中文时追加——
+    否则会出现"翻成 English"却要求 dick→鸡巴 这种自相矛盾的指令。
     """
     name = TARGET_NAMES.get(target, target)
     prompt = SYSTEM_PROMPT.format(
         target=name, style=STYLE_HINTS.get(str(target), STYLE_DEFAULT)
     )
-    hint = SCENARIO_HINTS.get(str(scenario))
+    scenario = str(scenario)
+    allowed_targets = SCENARIO_TARGETS.get(scenario)
+    if allowed_targets is not None and str(target) not in allowed_targets:
+        hint = None
+    else:
+        hint = SCENARIO_HINTS.get(scenario)
     if hint:
-        prompt += "\n6. 场景补充——" + hint
+        if str(target).startswith("zh"):
+            hint += SCENARIO_ZH_EXTRA.get(str(scenario), "")
+        # 第 7 条是所有场景共用的护栏：实测发现场景段会诱导模型"发挥"——
+        # blog 场景漏掉半句、anime 场景把 Nani 译成「喂」并自创战力译名
+        prompt += ("\n6. 场景补充——" + hint
+                   + "\n7. 场景补充只改变用词与语域，不得增删信息、不得改写原意。")
     return prompt
 
 # 内容场景提示词组：按片源类型微调语气与术语策略（设置界面可选）。
-# 原则：场景补充只调整"译文的语域与术语策略"，与第 3 条"粗话要译出来，
+# 原则一：场景补充只调整"译文的语域与术语策略"，与第 3 条"粗话要译出来，
 # 不要净化"叠加而非冲突——nsfw 是把它推向粗俗对等，meeting 是推向正式。
-SCENARIO_HINTS = {
-    # general 无补充，用基础提示
-    "nsfw": (
-        "本片含成人/情色内容。性器官、性行为的俚语与粗话按原语同样的粗俗度"
-        "和直白度对等翻译（如 dick→鸡巴、cum→射了、fuck→肏/操），"
-        "禁止替换成临床、学术或委婉净化的说法（不要「阴茎」「交合」这类书面词）；"
-        "调情、呻吟、挑逗的语气完整保留，不做删减、弱化或道德评判。"
-    ),
-    "science": (
-        "本片为科学科普：术语按行业通行译法，首次出现的关键缩写保留英文并在"
-        "括号内注明中文；数字、单位、百分比必须精确，比喻可以口语化但不得"
-        "为顺口牺牲准确性。"
-    ),
-    "meeting": (
-        "本片为多人会议/访谈：用正式、简洁的书面语；多人发言时称谓与指代"
-        "保持清晰一致，不混用「我/您」；专业术语、数字、日期、金额精确保留。"
-    ),
-    "blog": (
-        "本片为单人博客/Vlog：轻松的口语独白，保留语气词、口头禅和网络流行语；"
-        "对镜头说话的互动感保留（「大家好呀」），过长的句子拆成短句。"
-    ),
-    "documentary": (
-        "本片为纪录片：解说部分用沉稳的叙述语感，采访部分保留口语；"
-        "人名、地名、年代按通行译法，首次出现可附原文。"
-    ),
-    "variety": (
-        "本片为综艺/脱口秀：笑点优先——谐音梗、双关、punchline 要译出笑果"
-        "而非字面；中文圈内已有等价梗可直接替换，起哄声与语气助词保留。"
-    ),
-    "anime": (
-        "本片为动漫/游戏：保留角色口癖与中二措辞；招式、技能、称号按圈内"
-        "习惯译法；感叹与情绪起伏（诶？！哈？！）完整保留。"
-    ),
-    "legal_med": (
-        "本片为医疗/律政剧：专业术语按行业准确译法（如 tension pneumothorax→"
-        "张力性气胸），行话缩写保留原文并按上下文意译；对白节奏紧凑不拖沓。"
-    ),
+# 原则二：正文必须与目标语言无关（说"目标语言里真的会说的词"而不是列中文词），
+# 中文词表放 SCENARIO_ZH_EXTRA，只在 zh/zh-Hant 目标下追加。
+# 内容场景提示词从 scenarios/*.json 加载。每个 JSON 文件对应一个设置选项；
+# 私有场景文件可以留在本地而不进入公开仓库。
+# 相对当前引擎目录定位，不依赖运行时工作目录或固定盘符。
+SCENARIO_RELATIVE_DIR = Path("scenarios")
+SCENARIO_DIR = BASE / SCENARIO_RELATIVE_DIR
+
+
+def _load_scenarios() -> dict[str, dict[str, object]]:
+    scenarios: dict[str, dict[str, object]] = {}
+    for path in sorted(SCENARIO_DIR.glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        key = str(payload.get("key") or path.stem).strip()
+        hint = str(payload.get("hint") or "").strip()
+        label = payload.get("label")
+        if not key or not isinstance(label, dict):
+            continue
+        item: dict[str, object] = {
+            "key": key,
+            "order": int(payload.get("order", 1000)),
+            "label": {str(k): str(v) for k, v in label.items()},
+            "hint": hint,
+        }
+        targets = payload.get("targets")
+        if isinstance(targets, list):
+            item["targets"] = {str(target) for target in targets if str(target).strip()}
+        zh_extra = str(payload.get("zh_extra") or "").strip()
+        if zh_extra:
+            item["zh_extra"] = zh_extra
+        scenarios[key] = item
+    return dict(sorted(scenarios.items(),
+                       key=lambda pair: (int(pair[1]["order"]), pair[0])))
+
+
+SCENARIOS = _load_scenarios()
+SCENARIO_HINTS = {key: str(item["hint"]) for key, item in SCENARIOS.items()}
+SCENARIO_TARGETS = {
+    key: set(item["targets"])
+    for key, item in SCENARIOS.items()
+    if "targets" in item
 }
-SCENARIO_DEFAULT = "general"
+SCENARIO_ZH_EXTRA = {
+    key: str(item["zh_extra"])
+    for key, item in SCENARIOS.items()
+    if item.get("zh_extra")
+}
+SCENARIO_LABELS = {
+    key: dict(item["label"])
+    for key, item in SCENARIOS.items()
+}
+SCENARIO_DEFAULT = "general" if "general" in SCENARIOS else next(iter(SCENARIOS), "general")
 
 # 各家模型泄漏的控制 token（aya 的 turn marker、HY-MT2 的 hy_ 系列等）
 JUNK_TOKENS = (

@@ -39,6 +39,7 @@ from .config import (
 )
 from .i18n import LANGUAGES, current_language, set_language, t
 from .runtime import APP_DIR
+from .scenarios import load_scenarios
 
 
 def _asr_model_label(key: str) -> str:
@@ -418,21 +419,6 @@ class SettingsDialog(QDialog):
         gg.addWidget(QLabel(t("settings.translate_target_label")), 16, 0)
         gg.addWidget(self.cb_translate_target, 16, 1)
 
-        # 内容场景提示词组：按片源类型微调翻译语气与术语策略
-        self.cb_translate_scenario = QComboBox()
-        for key in ("general", "nsfw", "science", "meeting", "blog",
-                    "documentary", "variety", "anime", "legal_med"):
-            self.cb_translate_scenario.addItem(
-                t("settings.translate_scenario_" + key), key)
-        idx = self.cb_translate_scenario.findData(str(settings["translate_scenario"]))
-        self.cb_translate_scenario.setCurrentIndex(max(0, idx))
-        self.cb_translate_scenario.setToolTip(t("settings.translate_scenario_hint"))
-        self.cb_translate_scenario.currentIndexChanged.connect(
-            lambda _i: self._set("translate_scenario",
-                                 self.cb_translate_scenario.currentData()))
-        gg.addWidget(QLabel(t("settings.translate_scenario_label")), 16, 4)
-        gg.addWidget(self.cb_translate_scenario, 16, 5)
-
         self.cb_srt_format = QComboBox()
         for fmt in ("srt", "vtt", "ass"):
             self.cb_srt_format.addItem(fmt.upper(), fmt)
@@ -454,6 +440,24 @@ class SettingsDialog(QDialog):
             lambda v: self._set("live_caption_idle_unload", int(v) * 60))
         gg.addWidget(QLabel(t("settings.idle_unload_label")), 17, 0)
         gg.addWidget(self.spin_idle_unload, 17, 1)
+
+        # 内容场景提示词组：按片源类型微调翻译语气与术语策略。放第 17 行的空
+        # 单元格（col 2/3）——这张表其余行只有 0-4 五列、跨行说明都是 colspan=5，
+        # 另开第 6 列会把分组最小宽度再拉宽近 200px，而新控件正好落在默认窗宽
+        # 之外（要横向滚动才看得到）
+        self.cb_translate_scenario = QComboBox()
+        for scenario in load_scenarios():
+            labels = scenario["label"]
+            label = labels.get(current_language()) or labels.get("zh") or scenario["key"]
+            self.cb_translate_scenario.addItem(label, scenario["key"])
+        idx = self.cb_translate_scenario.findData(str(settings["translate_scenario"]))
+        self.cb_translate_scenario.setCurrentIndex(max(0, idx))
+        self.cb_translate_scenario.setToolTip(t("settings.translate_scenario_hint"))
+        self.cb_translate_scenario.currentIndexChanged.connect(
+            lambda _i: self._set("translate_scenario",
+                                 self.cb_translate_scenario.currentData()))
+        gg.addWidget(QLabel(t("settings.translate_scenario_label")), 17, 2)
+        gg.addWidget(self.cb_translate_scenario, 17, 3)
 
         # 实时字幕覆盖层：字号 + 覆盖范围（按播放区域百分比）
         self.spin_live_font = QSpinBox()

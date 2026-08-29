@@ -14,6 +14,7 @@ samples/
 __pycache__/
 *.pyc
 live-caption.log*
+live-caption-restart.log
 live-caption.log.pid
 live-caption.log.lock
 live-caption.log.control
@@ -28,3 +29,6 @@ test-live*.stdout.log
 test-live*.mp4
 # llama.cpp 二进制（SRT 大模型后端，install_engine.py 拉取）
 llamacpp/
+# ---------- 私有翻译场景（仅本地，不上传） ----------
+scenarios/nsfw_gay.json
+scenarios/lingyu.json

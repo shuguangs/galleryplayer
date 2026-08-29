@@ -1,0 +1,10 @@
+{
+  "key": "legal_med",
+  "order": 8,
+  "label": {
+    "zh": "医疗/律政剧",
+    "en": "Medical/Legal drama"
+  },
+  "hint": "本片为医疗/律政剧：专业术语按行业准确译法，行话缩写第一次出现给出全称、之后沿用缩写；抢救与庭辩的对白节奏紧凑，不加解释性补语。",
+  "zh_extra": "（如 tension pneumothorax→张力性气胸）"
+}

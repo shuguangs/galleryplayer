@@ -342,6 +342,10 @@ class MpvWidget(QOpenGLWidget):
         self.mpv.sub_visibility = bool(visible)
         settings["sub_visible"] = bool(visible)
 
+    def set_file_subtitle_visible(self, visible: bool) -> None:
+        """Change mpv subtitle visibility without changing the user preference."""
+        self.mpv.sub_visibility = bool(visible)
+
     @property
     def sub_visible(self) -> bool:
         return bool(self.mpv.sub_visibility)

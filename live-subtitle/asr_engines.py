@@ -50,6 +50,12 @@ QWEN_LANG = {
 }
 SV_LANG = {"zh": "zh", "yue": "yue", "en": "en", "ja": "ja", "ko": "ko",
            "auto": "auto"}
+QWEN_LANGUAGE_TO_CODE = {name: code for code, name in QWEN_LANG.items()
+                         if code != "auto"}
+
+# auto 模式下的语言锁：连续 N 个语音段被判为同一语言后，后续段不再重新判语言。
+# 纯英文片里短促的 "Yeah" 曾被重新识别成粤语/日文；锁住后 Qwen 会按 English 解码。
+LANGUAGE_LOCK_SEGMENTS = 3
 
 # 字幕段落约束：VAD 单段上限（自然停顿优先；连续无停顿语音才强切——
 # 切点落在词中间会伤识别准确率，故上限放宽到 30s，真实内容几乎不触发）
@@ -144,6 +150,15 @@ def qwen_transcribe(model, audio16k, lang: str | None) -> tuple[str, str]:
     if not results:
         return "", ""
     return results[0].text.strip(), str(getattr(results[0], "language", "") or "")
+
+
+def detected_language_code(detected: str) -> str | None:
+    """把 Qwen 返回的语言名映射回播放器语言码；混合/未知语言不参与锁定。"""
+    value = str(detected or "").strip()
+    if not value or "," in value:
+        return None
+    canonical = value[:1].upper() + value[1:].lower()
+    return QWEN_LANGUAGE_TO_CODE.get(canonical)
 
 
 # ------------------------------------------------------------- sensevoice
@@ -242,7 +257,9 @@ def split_long_row(s: float, e: float, text: str) -> list[tuple[float, float, st
 
 
 def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
-                      block_secs: float = 120.0) -> Iterator[tuple[float, float, str]]:
+                      block_secs: float = 120.0,
+                      language_lock_after: int | None = LANGUAGE_LOCK_SEGMENTS
+                      ) -> Iterator[tuple[float, float, str]]:
     """按 block_secs 块推进（保持实时产出），块内 VAD 切段逐段转写。
 
     yield (start秒, end秒, 文本)，时间相对传入音频起点。
@@ -250,6 +267,13 @@ def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
     """
     total = len(audio16k) / SR
     pos = 0.0
+    requested_lang = str(lang or "auto")
+    forced_lang = None if requested_lang == "auto" else requested_lang
+    lock_after = LANGUAGE_LOCK_SEGMENTS if language_lock_after is None \
+        else max(0, int(language_lock_after))
+    locked_lang: str | None = None
+    streak_lang: str | None = None
+    streak_count = 0
     while pos < total:
         block_end = min(pos + block_secs, total)
         chunk = audio16k[int(pos * SR):int(block_end * SR)]
@@ -258,7 +282,20 @@ def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
             if len(seg) < int(MIN_SEG_SECS * SR):
                 continue
             if kind == "qwen":
-                text, _detected = qwen_transcribe(model, seg, lang)
+                text, detected = qwen_transcribe(
+                    model, seg, forced_lang or locked_lang)
+                if forced_lang is None and locked_lang is None and lock_after:
+                    detected_code = detected_language_code(detected)
+                    if detected_code is None:
+                        streak_lang = None
+                        streak_count = 0
+                    elif detected_code == streak_lang:
+                        streak_count += 1
+                    else:
+                        streak_lang = detected_code
+                        streak_count = 1
+                    if streak_count >= lock_after:
+                        locked_lang = streak_lang
             else:
                 text = sv_transcribe(model, seg, lang)
             text = (text or "").strip()

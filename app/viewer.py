@@ -578,6 +578,10 @@ class Viewer(QWidget):
             tracks, self.video_view.current_track("sub"), self.video_view.current_track("audio")
         )
         self.controls.set_sub_visible(self.video_view.sub_visible)
+        # mpv can auto-load a matching .srt after file-load. Live captions render
+        # in the Qt overlay; without this re-suppression both subtitle systems show.
+        if getattr(self, "_live_on", False) and not getattr(self, "_live_paused", False):
+            self._suppress_file_subtitles_for_live()
 
     def _on_file_loaded(self) -> None:
         if 0 <= self.index < len(self.items):
@@ -973,10 +977,38 @@ class Viewer(QWidget):
         self._show_toast(t("viewer.sub_delay_toast").format(delay=f"{self.video_view.sub_delay:+.1f}"))
 
     def _toggle_sub_visible(self) -> None:
+        if getattr(self, "_live_on", False) and not getattr(self, "_live_paused", False):
+            self._suppress_file_subtitles_for_live()
+            self._show_toast(t("viewer.live_caption_running"))
+            return
         vis = not self.video_view.sub_visible
         self.video_view.set_sub_visible(vis)
         self.controls.set_sub_visible(vis)
         self._show_toast(t("viewer.sub_visible") if vis else t("viewer.sub_hidden"))
+
+    def _suppress_file_subtitles_for_live(self) -> None:
+        """Hide mpv-rendered subtitles while the live-caption overlay is active."""
+        if getattr(self, "_live_saved_sub_visible", None) is None:
+            try:
+                self._live_saved_sub_visible = bool(self.video_view.sub_visible)
+            except Exception:
+                self._live_saved_sub_visible = bool(settings["sub_visible"])
+        try:
+            self.video_view.set_file_subtitle_visible(False)
+        except Exception:
+            pass
+        self.controls.set_sub_visible(False)
+
+    def _restore_file_subtitles_after_live(self) -> None:
+        """Restore the subtitle visibility that existed before live captions."""
+        saved = getattr(self, "_live_saved_sub_visible", None)
+        visible = bool(saved if saved is not None else settings["sub_visible"])
+        try:
+            self.video_view.set_file_subtitle_visible(visible)
+        except Exception:
+            pass
+        self.controls.set_sub_visible(visible)
+        self._live_saved_sub_visible = None
 
     def _adjust_volume(self, delta: int) -> None:
         self.video_view.set_volume(self.video_view.volume + delta)
@@ -1350,6 +1382,8 @@ class Viewer(QWidget):
         self._live_label.clear()
         self._live_label.hide()
         self._live_on = bool(item.is_video)
+        if self._live_on:
+            self._suppress_file_subtitles_for_live()
         return self._live_on
 
     def _pause_live_for_srt(self) -> None:
@@ -1358,6 +1392,7 @@ class Viewer(QWidget):
 
         self._live_on = False
         self._live_paused = True
+        self._restore_file_subtitles_after_live()
         self._stop_live_poll()
         self._live_label.hide()
         self._show_toast(t("viewer.live_caption_paused_for_srt"))
@@ -1397,6 +1432,7 @@ class Viewer(QWidget):
             # 的悬挂状态，SRT 结束后也没人恢复）
             self._pause_live_for_srt()
             return
+        self._suppress_file_subtitles_for_live()
         old_log_size = self._live_log.stat().st_size if self._live_log.is_file() else 0
         if self._live_media_path != media:
             self.controls.set_caption_ranges([])
@@ -1408,6 +1444,8 @@ class Viewer(QWidget):
             "media": str(media),
             "seek": start,
             "mode": "live",
+            # 场景随任务下发：改了设置后下一个任务立即生效，不必重建引擎
+            "scenario": str(settings["translate_scenario"]),
         }
         generation = submit_live_engine_job(payload)
         if generation is None:
@@ -1442,6 +1480,7 @@ class Viewer(QWidget):
             "media": str(media),
             "seek": seek,
             "mode": "live",
+            "scenario": str(settings["translate_scenario"]),
         })
         if generation is None:
             return
@@ -1598,6 +1637,7 @@ class Viewer(QWidget):
         if source == "audio" and engine_alive and (
                 self._check_live_alive()
                 or _t0.time() - getattr(self, "_live_spawn_at", 0.0) < 60):
+            self._suppress_file_subtitles_for_live()
             self._live_paused = False
             self._live_on = True
             self._live_ctl.reset_for_media(True)
@@ -1729,6 +1769,7 @@ class Viewer(QWidget):
         self._live_label.raise_()
         self._relayout()
         self._live_on = True
+        self._suppress_file_subtitles_for_live()
         self._start_live_poll()
         self._show_toast(t("viewer.live_caption_running"))
 
@@ -2101,6 +2142,7 @@ class Viewer(QWidget):
         resident = bool(_settings["live_caption_resident"])
         self._stop_live_poll()
         self._live_on = False
+        self._restore_file_subtitles_after_live()
         self._live_label.hide()
         self._save_live_srt()
         if resident:
@@ -2354,6 +2396,8 @@ class Viewer(QWidget):
         self._stop_live_poll()
         if self._live_on or self._live_paused:
             self._save_live_srt(announce=False)
+        if self._live_on:
+            self._restore_file_subtitles_after_live()
         self._live_on = False
         self._live_label.hide()
         self._remember_position()

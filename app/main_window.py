@@ -950,6 +950,9 @@ class MainWindow(QMainWindow):
             "seek": 0.0,
             "translate_model": str(settings["srt_translate_model"] or "live"),
             "format": fmt,
+            # 场景随任务下发（与 translate_model 同等）：引擎不必为改场景重建，
+            # 也不会在 start_preload 的 30s 冷却窗口里悄悄用上一次的场景
+            "scenario": str(settings["translate_scenario"]),
         })
         if not generation:
             self._finish_srt_job(srt, t("main_window.gen_srt_no_pipeline"))
@@ -1235,6 +1238,7 @@ class MainWindow(QMainWindow):
                     "seek": 0.0,
                     "translate_model": str(settings["srt_translate_model"] or "live"),
                     "format": str(nxt.get("format", "srt")),
+                    "scenario": str(settings["translate_scenario"]),
                 })
                 if generation:
                     nxt["generation"] = generation

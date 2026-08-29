@@ -42,8 +42,12 @@ class ScenarioPromptTests(unittest.TestCase):
         self.assertIn("鸡巴", p)          # 粗俗对等，而非临床词
         self.assertIn("禁止", p)
 
-    def test_all_scenarios_nonempty_and_distinct(self):
+    def test_all_scenarios_loaded_from_json(self):
         for key, hint in SCENARIO_HINTS.items():
+            if key == "general":
+                self.assertEqual(hint, "")
+                self.assertEqual(system_prompt("zh", key), system_prompt("zh"))
+                continue
             self.assertTrue(hint.strip(), key)
             self.assertIn("场景补充——" + hint, system_prompt("zh", key))
 

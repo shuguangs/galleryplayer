@@ -14,6 +14,7 @@ userdata/
 # ---------- 构建产物 / 打包输出 ----------
 build/
 dist/
+dist-fixed/
 complete/
 release/
 *.zip
@@ -26,6 +27,10 @@ vendor/
 # ---------- 本地开发截图（README 未引用，含真实界面） ----------
 _*.png
 _*.jpg
+
+# ---------- 本地临时评测脚本 / 输出 ----------
+_scenario_ab*.py
+_ab_out.txt
 
 # ---------- Python ----------
 __pycache__/
@@ -53,3 +58,6 @@ desktop.ini
 # AI 工具本地配置
 .zcode/
 GIT_COMMIT_INFO.md
+# ---------- 私有翻译场景（仅本地，不上传） ----------
+live-subtitle/scenarios/nsfw_gay.json
+live-subtitle/scenarios/lingyu.json

@@ -144,6 +144,55 @@ class LiveCaptionTests(unittest.TestCase):
         self.assertEqual(ctl.rows[1][3], "第二句。")
         self.assertEqual(len(ctl.rows), 4)
 
+    def test_live_captions_suppress_and_restore_file_subtitles(self) -> None:
+        """实时字幕开启时隐藏 mpv 文件字幕，停止后恢复原可见状态。"""
+        import os
+
+        from app.runtime import VENDOR_DIR
+
+        os.environ["PATH"] = str(VENDOR_DIR) + os.pathsep + os.environ.get("PATH", "")
+        from app.viewer import Viewer
+
+        class Video:
+            def __init__(self):
+                self.visible = True
+
+            @property
+            def sub_visible(self):
+                return self.visible
+
+            def set_file_subtitle_visible(self, visible):
+                self.visible = bool(visible)
+
+        class Controls:
+            def __init__(self):
+                self.visible = True
+
+            def set_sub_visible(self, visible):
+                self.visible = bool(visible)
+
+        video = Video()
+        controls = Controls()
+        viewer = Viewer.__new__(Viewer)
+        viewer.video_view = video
+        viewer.controls = controls
+        viewer._live_saved_sub_visible = None
+
+        Viewer._suppress_file_subtitles_for_live(viewer)
+        self.assertFalse(video.visible)
+        self.assertFalse(controls.visible)
+        self.assertTrue(viewer._live_saved_sub_visible)
+
+        # 换片后 mpv 重新加载字幕/track-list 变化，会再次调用压制；
+        # 此时不能把已保存的 True 覆盖成当前的 False。
+        Viewer._suppress_file_subtitles_for_live(viewer)
+        self.assertTrue(viewer._live_saved_sub_visible)
+
+        Viewer._restore_file_subtitles_after_live(viewer)
+        self.assertTrue(video.visible)
+        self.assertTrue(controls.visible)
+        self.assertIsNone(viewer._live_saved_sub_visible)
+
 
     def test_silence_gap_inside_span_does_not_restart(self) -> None:
         """青色区间（任务起点→前沿）内的 VAD 静音间隙不应触发重转。"""
