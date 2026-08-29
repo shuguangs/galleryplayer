@@ -1,6 +1,10 @@
 # Live Subtitle Prototype
 
-外语视频实时听音字幕 + 翻译原型（独立实验仓库，不影响主项目）。
+外语视频实时听音字幕 + 翻译引擎。
+
+> **整合说明（2026-08-29）**：本仓库已通过 git merge 整并入主仓库
+> `J:\播放器` 的 `live-subtitle/` 子目录（历史保留）；此处作为独立开发副本保留，
+> 后续改动建议直接在主仓库进行。
 
 ## 方案
 
@@ -9,7 +13,7 @@
   - **SenseVoice-small**：funasr，中日韩粤最快
   - **faster-whisper**（tiny~large-v3）：CTranslate2，低显存兜底 / 语言覆盖最广
 - 分句：fsmn-vad 按语音停顿切段（时间戳真实），段内按标点分行
-- 翻译：Ollama 本地模型（qwen2.5:3b/7b、aya-expanse:8b）
+- 翻译：Ollama 本地模型（默认 **qwen3:8b**，口语化最自然）；可选 llama.cpp 后端跑 HY-MT2-30B（仅 SRT，按需启停）
 
 ## 引擎对比实测（2026-08-28，RTX 5060 Ti 16GB）
 
@@ -146,7 +150,7 @@ curl.exe -L -o models\gguf\qwen2.5-7b-instruct-q3_k_m.gguf `
 
 ```powershell
 $env:PATH = "$PWD\.venv\Lib\site-packages\nvidia\cublas\bin;$PWD\.venv\Lib\site-packages\nvidia\cudnn\bin;$env:PATH"
-$env:HUGGINGFACE_HUB_CACHE = 'G:\播放器\live-subtitle\models\hf\hub'
+$env:HUGGINGFACE_HUB_CACHE = "$PWD\models\hf\hub"
 $env:HTTPS_PROXY = 'http://127.0.0.1:12589'   # 首次拉模型需要
 .\.venv\Scripts\python.exe transcribe.py samples\jfk.wav large-v3 cuda
 ```
