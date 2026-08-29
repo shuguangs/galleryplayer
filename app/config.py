@@ -50,7 +50,10 @@ DEFAULTS: dict[str, Any] = {
     "subtitle_pipeline_dir": "",       # 字幕引擎目录（空=自动探测：工程同级 live-subtitle/）
     "subtitle_save_dir": "media",      # 字幕保存位置: media=视频所在文件夹 / player=播放器所在文件夹
     "live_ollama_model": "qwen3:8b",    # 实时字幕翻译模型（Ollama）；none=不翻译
+    "live_translate_target": "zh",     # 翻译目标语言: zh / zh-Hant / en
+    "live_caption_idle_unload": 1800,  # 引擎空闲 N 秒后自动卸载模型释放显存；0=不卸载
     "srt_translate_model": "live",     # 生成 SRT 的翻译模型: live=跟随实时字幕 / Ollama 名 / hy-mt2-30b（llama.cpp）
+    "srt_export_format": "srt",        # SRT 导出格式: srt / vtt / ass
     "live_caption_font_size": 32,       # 实时字幕覆盖层字号（px）
     "live_caption_width": 84,           # 实时字幕水平覆盖范围（%）
     "live_caption_height": 16,          # 实时字幕垂直覆盖范围（%）

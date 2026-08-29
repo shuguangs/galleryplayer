@@ -109,6 +109,7 @@ class SeekBar(QWidget):
         self._cache_end = 0.0
         self._caption_ranges: list[tuple[float, float]] = []
         self._caption_front_text = ""
+        self._ab_range: tuple[float, float] | None = None
         self._hover_x: int | None = None
         self._scrubbing = False
         self._enabled = True
@@ -150,6 +151,11 @@ class SeekBar(QWidget):
         if text != self._caption_front_text:
             self._caption_front_text = text
             self.update()
+
+    def set_ab_range(self, ab_range: tuple[float, float] | None) -> None:
+        """A-B 循环区间可视化（琥珀色段 + 两端刻度）。None 清除。"""
+        self._ab_range = ab_range
+        self.update()
 
     def set_active(self, active: bool) -> None:
         self._enabled = active
@@ -219,6 +225,21 @@ class SeekBar(QWidget):
         pp = QPainterPath()
         pp.addRoundedRect(pr, radius, radius)
         p.fillPath(pp, QColor(theme.ACCENT))
+
+        # A-B 循环区间：琥珀色高亮 + 两端细刻度（mpv 只管循环，视觉在这画）
+        if self._ab_range is not None:
+            a, b = self._ab_range
+            if self._duration > 0 and b > a:
+                ax = self._x_at_time(a, hovered)
+                bx = self._x_at_time(b, hovered)
+                ab_r = QRect(ax, tr.top(), max(2, bx - ax), tr.height())
+                ab_path = QPainterPath()
+                ab_path.addRoundedRect(ab_r, radius, radius)
+                p.fillPath(ab_path, QColor(255, 176, 32, 88))
+                p.setPen(QColor(255, 176, 32, 220))
+                p.drawLine(ax, tr.top(), ax, tr.bottom())
+                p.drawLine(bx, tr.top(), bx, tr.bottom())
+                p.setPen(Qt.NoPen)
 
         if hovered:
             p.setBrush(QColor(theme.ACCENT))

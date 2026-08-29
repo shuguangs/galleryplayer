@@ -236,6 +236,7 @@ _TR: dict[str, dict[str, str]] = {
 
     # ---- main_window ----
     "main_window.title": {"zh": "媒体播放器", "en": "Media Player"},
+    "main_window.restore_playlist": {"zh": "上次未正常退出，检测到 {n} 个文件的播放列表。\n\n要恢复继续播放吗？", "en": "The player did not exit cleanly last time; a playlist of {n} files was saved.\n\nRestore and resume it?"},
     "main_window.title_with_folder": {"zh": "{folder} — 媒体播放器", "en": "{folder} — Media Player"},
     "main_window.no_folder": {"zh": "未打开文件夹", "en": "No folder open"},
     "main_window.open_folder": {"zh": "  打开文件夹", "en": "  Open Folder"},
@@ -305,6 +306,7 @@ _TR: dict[str, dict[str, str]] = {
     "main_window.scan_level": {"zh": "　·　第 {levels} 层", "en": "　·　level {levels}"},
     "main_window.verifying_suffix": {"zh": "　·　正在核对…", "en": "　·　verifying…"},
     "main_window.cache_hit_suffix": {"zh": "　·　{reused}/{total} 个目录来自缓存", "en": "　·　{reused}/{total} folders from cache"},
+    "main_window.scan_errors": {"zh": "　·　⚠ {n} 个目录读取失败", "en": "　·　⚠ {n} folders failed to read"},
     "main_window.scanning_suffix": {"zh": "　·　正在扫描…", "en": "　·　scanning…"},
     "main_window.item_count": {"zh": "{count} 项　·　图片 {images}　·　视频 {videos}{suffix}", "en": "{count} items　·　{images} images　·　{videos} videos{suffix}"},
 
@@ -507,6 +509,15 @@ _TR: dict[str, dict[str, str]] = {
     "settings.srt_follow_live": {"zh": "跟随实时字幕模型", "en": "Same as live captions"},
     "settings.srt_hymt2_label": {"zh": "HY-MT2-30B（llama.cpp，最高质量）", "en": "HY-MT2-30B (llama.cpp, top quality)"},
     "settings.srt_translate_hint": {"zh": "仅用于「生成 SRT 字幕」，与实时字幕互不影响。HY-MT2-30B 走 llama.cpp，仅在生成时启动、结束即关，不预载；需先用下方按钮安装（约 12GB 磁盘，显存 ~4GB 可与识别模型共存）。", "en": "For generated SRT only, independent of live captions. HY-MT2-30B runs on llama.cpp, started on demand per SRT job and closed after; install it via the button below (~12GB disk, ~4GB VRAM, coexists with the ASR model)."},
+    "settings.translate_target_label": {"zh": "翻译目标语言", "en": "Translation target"},
+    "settings.translate_target_zh": {"zh": "简体中文", "en": "简体中文 (Simplified)"},
+    "settings.translate_target_zh-Hant": {"zh": "繁體中文", "en": "繁體中文 (Traditional)"},
+    "settings.translate_target_en": {"zh": "English", "en": "English"},
+    "settings.translate_target_hint": {"zh": "译文输出语言。识别语言保持 auto 即可，不受此设置影响；修改后重开实时字幕生效。", "en": "Language captions are translated into. Source language stays on auto; takes effect when live captions restart."},
+    "settings.srt_format_label": {"zh": "SRT 导出格式", "en": "Subtitle format"},
+    "settings.idle_unload_label": {"zh": "空闲自动释放显存", "en": "Auto-release VRAM when idle"},
+    "settings.idle_unload_off": {"zh": "不释放", "en": "Never"},
+    "settings.idle_unload_hint": {"zh": "字幕引擎空闲超过该时间后自动卸载模型释放显存；再次开启实时字幕会自动重载（约 30-60 秒）。0 = 一直常驻。", "en": "Unloads the caption model after this much idle time to free VRAM; it reloads automatically (~30-60s) on next use. 0 = keep resident."},
     "settings.install_llama": {"zh": "安装 SRT 大模型翻译", "en": "Install SRT LLM translate"},
     "settings.install_llama_hint": {"zh": "下载 llama.cpp（约 0.7GB）+ HY-MT2-30B 翻译模型（11.6GB）；已装部分自动跳过。仅生成 SRT 时运行。", "en": "Downloads llama.cpp (~0.7GB) + the HY-MT2-30B model (11.6GB); existing parts are skipped. Only runs during SRT generation."},
     "settings.install_running": {"zh": "安装中…（可看到下方日志进度）", "en": "Installing… (see log below)"},

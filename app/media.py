@@ -232,6 +232,8 @@ class ScanStats:
     dirs_found: int = 0   # directories discovered so far, including ones not yet opened
     levels: int = 0       # how many levels of the tree the scan has descended
     from_cache: bool = False
+    errors: int = 0           # 读取失败的目录数（权限/离线盘等），状态栏浮出
+    last_error: str = ""
 
     @property
     def dirs_total(self) -> int:
@@ -245,7 +247,7 @@ SCAN_WORKERS_LOCAL = 6
 SCAN_WORKERS_REMOTE = 16
 
 
-def _enumerate(d: Path) -> tuple[list, list[str]]:
+def _enumerate(d: Path, stats: ScanStats | None = None) -> tuple[list, list[str]]:
     """One scandir pass over `d`: its media files and its subdirectory names."""
     files: list = []
     subdirs: list[str] = []
@@ -270,8 +272,11 @@ def _enumerate(d: Path) -> tuple[list, list[str]]:
                     )
                 except OSError:
                     continue
-    except OSError:
-        pass
+    except OSError as exc:
+        # 权限拒绝/设备离线等：不再静默吞掉，累计进 stats 由状态栏浮出
+        if stats is not None:
+            stats.errors += 1
+            stats.last_error = f"{d}: {exc}"
     return files, subdirs
 
 
@@ -374,7 +379,7 @@ def scan_from_cache(folder: Path, recursive: bool) -> list[MediaItem] | None:
     return items
 
 
-def _read_dir(d: Path, use_cache: bool) -> tuple[Path, list, list[str], bool]:
+def _read_dir(d: Path, use_cache: bool, stats: ScanStats | None = None) -> tuple[Path, list, list[str], bool]:
     """Read one directory, on a worker thread. Returns (dir, files, subdirs, reused).
 
     The mtime is taken *before* enumerating: a file that lands between the two reads
@@ -395,7 +400,7 @@ def _read_dir(d: Path, use_cache: bool) -> tuple[Path, list, list[str], bool]:
         if cached is not None and mtime is not None and abs(float(cached[0]) - mtime) < 1e-6:
             return d, cached[1], cached[2], True
 
-    files, subdirs = _enumerate(d)
+    files, subdirs = _enumerate(d, stats)
     # A directory with children is never skipped on mtime, so it does not need a usable
     # one. 0.0 also covers the directory that just lost its last subdirectory: it is
     # simply enumerated once more next time, and cached properly from then on.
@@ -479,7 +484,7 @@ def scan_folder_streaming(
                 # The common case at the top of every scan, and the whole of a
                 # non-recursive one. Handing a single directory to a pool would cost
                 # more in scheduling than the read itself.
-                absorb(_read_dir(frontier[0], use_cache))
+                absorb(_read_dir(frontier[0], use_cache, stats))
                 if on_progress is not None:
                     on_progress(stats)
             else:
@@ -487,7 +492,7 @@ def scan_folder_streaming(
                     pool = ThreadPoolExecutor(
                         max_workers=workers, thread_name_prefix="scan"
                     )
-                futures = [pool.submit(_read_dir, d, use_cache) for d in frontier]
+                futures = [pool.submit(_read_dir, d, use_cache, stats) for d in frontier]
                 # Absorb each directory as it lands rather than waiting for the slowest
                 # one in the level; a single unresponsive folder must not stall the UI.
                 for fut in as_completed(futures):

@@ -29,7 +29,7 @@ from .live_engine_state import EngineEvent, parse_engine_line
 from .media import MediaItem, format_duration, item_for_path
 from .mpv_widget import MpvWidget
 from .playlist_panel import PlaylistPanel
-from .runtime import APP_DIR
+from .runtime import APP_DIR, USERDATA_DIR
 from .thumbs import FramePreviewer, ThumbnailCache
 from .welcome import remember_recent_file
 
@@ -53,6 +53,8 @@ class Viewer(QWidget):
     playlist_changed = Signal(list)       # reordered / trimmed MediaItem list
     sort_requested = Signal(str, bool)    # (sort_key, desc) from the panel
     _capture_saved = Signal(str)          # toast text, emitted from a worker thread
+    _gif_done = Signal()                  # GIF 采样够数，worker 通知 UI 收尾
+    _drop_resolved = Signal(object)       # 拖放解析结论 (folder?, items)，worker → UI
 
     def __init__(self, thumbs: ThumbnailCache, fs_model_provider=None) -> None:
         super().__init__(None)
@@ -82,9 +84,10 @@ class Viewer(QWidget):
         self._gif_interval = GIF_FRAME_MS
         self._gif_max = GIF_MAX_FRAMES
         self._gif_w = GIF_MAX_WIDTH
-        self._gif_timer = QTimer(self)
-        self._gif_timer.setInterval(GIF_FRAME_MS)
-        self._gif_timer.timeout.connect(self._gif_tick)
+        # 采样在 worker 线程自定速循环里做：grab_frame 是同步解码+像素拷贝，
+        # 4K 下每 100ms 一次会拖垮 UI 线程（QTimer 方案的坑）
+        self._gif_done.connect(self._finish_gif)
+        self._drop_resolved.connect(self._on_drop_resolved)
         self._capture_saved.connect(self._show_toast)
         # ---- A-B loop state (mpv loops between these two marks when both are set)
         self._ab_a: float | None = None
@@ -102,6 +105,7 @@ class Viewer(QWidget):
         self.image_view.setMouseTracking(True)
         self.image_view.zoom_changed.connect(self._on_zoom_changed)
         self.image_view.load_failed.connect(self._on_load_failed)
+        self.image_view.loaded.connect(self._on_image_loaded)
         self.video_view = MpvWidget()
         self.video_view.setMouseTracking(True)
         self.stack.addWidget(self.image_view)
@@ -406,10 +410,28 @@ class Viewer(QWidget):
         self._relayout()
         self.show_index(index)
         self._show_bars()
+        self._save_playlist_state(clean=False)
         # Thumbnails for the (possibly huge) new playlist must not compete with
         # playback: pause their generation for a moment, then resume.
         self.panel.set_thumbs_paused(True)
         QTimer.singleShot(3000, lambda: self.panel.set_thumbs_paused(False))
+
+    def _save_playlist_state(self, clean: bool) -> None:
+        """播放列表落盘：正常退出时标 clean，崩溃/强杀后可提示恢复。"""
+        if not self.items:
+            return
+        try:
+            data = {
+                "clean": clean,
+                "index": max(0, self.index),
+                "paths": [str(i.path) for i in self.items[:2000]],
+            }
+            USERDATA_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = USERDATA_DIR / "last_playlist.json.tmp"
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(USERDATA_DIR / "last_playlist.json")
+        except Exception:
+            pass
 
     def extend_playlist(self, items: list[MediaItem], index: int) -> None:
         """Replace the playlist with a fuller listing without restarting playback.
@@ -470,6 +492,7 @@ class Viewer(QWidget):
             # A new clip starts without the previous one's A-B loop marks.
             self._ab_a = self._ab_b = None
             self.video_view.clear_ab_loop()
+            self._sync_ab_range()
             start = resume.lookup(item.path) if settings["resume_enabled"] else None
             self.video_view.load(item.path, start)
             self.video_view.set_speed(float(settings["speed"]))
@@ -483,8 +506,9 @@ class Viewer(QWidget):
             self.stack.setCurrentWidget(self.image_view)
             if self.image_view.load(item.path):
                 w, h = self.image_view.source_size
-                item.width, item.height = w, h
-                self._update_top_bar(item)
+                if w:  # 大图走后台解码，此刻尚未出结果（由 loaded 信号回填）
+                    item.width, item.height = w, h
+                    self._update_top_bar(item)
         self._show_bars()
 
     def _remember_position(self) -> None:
@@ -627,22 +651,31 @@ class Viewer(QWidget):
         self._gif_w = max(120, min(1920, int(settings["gif_max_width"])))
         self._gif_recording = True
         self._gif_frames = []
-        self._gif_timer.setInterval(self._gif_interval)
-        self._gif_timer.start()
+        import threading
+
+        threading.Thread(
+            target=self._gif_capture_loop, args=(self._gif_interval,), daemon=True
+        ).start()
         self.controls.set_gif_recording(True)
         self._show_toast(t("viewer.gif_recording"))
 
-    def _gif_tick(self) -> None:
-        if not self._gif_recording:
-            return
-        frame = self.video_view.grab_frame()
-        if frame is not None:
-            self._gif_frames.append(frame)
-        if len(self._gif_frames) >= self._gif_max:
-            self._finish_gif()
+    def _gif_capture_loop(self, interval_ms: int) -> None:
+        """worker 线程自定速采样：抓帧间隔自行补偿，不占 UI 线程。"""
+        import time as _t
+
+        while self._gif_recording and len(self._gif_frames) < self._gif_max:
+            started = _t.perf_counter()
+            frame = self.video_view.grab_frame()
+            if not self._gif_recording:
+                return  # 用户中途停止
+            if frame is not None:
+                self._gif_frames.append(frame)
+            elapsed_ms = (_t.perf_counter() - started) * 1000.0
+            _t.sleep(max(0.0, interval_ms - elapsed_ms) / 1000.0)
+        if self._gif_recording:
+            self._gif_done.emit()  # 采样够数 → UI 线程收尾
 
     def _finish_gif(self) -> None:
-        self._gif_timer.stop()
         self._gif_recording = False
         self.controls.set_gif_recording(False)
         frames, self._gif_frames = self._gif_frames, []
@@ -702,6 +735,7 @@ class Viewer(QWidget):
         if self._ab_a is None:
             self._ab_a = pos
             self.video_view.set_ab_loop("a", pos)
+            self._sync_ab_range()
             self._show_toast(t("viewer.ab_loop_start").format(pos=format_duration(pos)))
         elif self._ab_b is None:
             if pos <= self._ab_a:
@@ -709,17 +743,28 @@ class Viewer(QWidget):
                 return
             self._ab_b = pos
             self.video_view.set_ab_loop("b", pos)
+            self._sync_ab_range()
             self._show_toast(
                 t("viewer.ab_loop_set").format(a=format_duration(self._ab_a), b=format_duration(pos))
             )
         else:
             self._clear_ab_loop()
 
+    def _sync_ab_range(self) -> None:
+        """A-B 区间画到进度条（只有 A 点时先只画起点刻度）。"""
+        if self._ab_a is None:
+            self.controls.set_ab_range(None)
+        elif self._ab_b is None:
+            self.controls.set_ab_range((self._ab_a, self._ab_a))
+        else:
+            self.controls.set_ab_range((self._ab_a, self._ab_b))
+
     def _clear_ab_loop(self) -> None:
         if self._ab_a is None and self._ab_b is None:
             return
         self._ab_a = self._ab_b = None
         self.video_view.clear_ab_loop()
+        self._sync_ab_range()
         self._show_toast(t("viewer.ab_loop_cleared"))
 
     # ------------------------------------------------------------ drag & drop
@@ -733,17 +778,35 @@ class Viewer(QWidget):
         self._open_dropped(paths)
 
     def _open_dropped(self, paths: list) -> None:
-        # A single dropped folder: hand it to the browser to scan and play.
-        if len(paths) == 1 and paths[0].is_dir():
-            self.folder_requested.emit(paths[0])
+        # 所有 stat（is_dir/item_for_path）都在 worker 线程：网络路径上的
+        # 一次 stat 可能耗时数秒，不能拖住 UI
+        import threading
+
+        def _work() -> None:
+            single = len(paths) == 1
+            items = []
+            for p in paths:
+                try:
+                    is_dir = p.is_dir()
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    if single:  # 单个文件夹 → 交给浏览器扫描并播放
+                        self._drop_resolved.emit((p, None))
+                        return
+                    continue
+                it = item_for_path(p)
+                if it is not None:
+                    items.append(it)
+            self._drop_resolved.emit((None, items))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_drop_resolved(self, result) -> None:
+        folder, items = result
+        if folder is not None:
+            self.folder_requested.emit(folder)
             return
-        items = []
-        for p in paths:
-            if p.is_dir():
-                continue
-            it = item_for_path(p)
-            if it is not None:
-                items.append(it)
         if items:
             self.open_playlist(items, 0)
             self.playlist_changed.emit(self.items)
@@ -814,6 +877,15 @@ class Viewer(QWidget):
         self.error_label.setText(f"⚠  {message}")
         self.error_label.setVisible(True)
         self.error_label.raise_()
+
+    def _on_image_loaded(self, width: int, height: int) -> None:
+        """后台解码完成回填图片尺寸（同步路径在 load 后立即取）。"""
+        if not (0 <= self.index < len(self.items)) or not width:
+            return
+        item = self.items[self.index]
+        if not item.is_video:
+            item.width, item.height = width, height
+            self._update_top_bar(item)
 
     def _on_zoom_changed(self, scale: float) -> None:
         self.controls.set_zoom(scale)
@@ -1456,7 +1528,9 @@ class Viewer(QWidget):
         asr_dir = str(_settings["live_asr_dir"] or "").strip()
         translate_on = tr_model != "none"
         common = ["--log", log_path, "--lang", lang, "--model", asr_model,
-                  "--ollama-model", tr_model]
+                  "--ollama-model", tr_model,
+                  "--target-lang", str(_settings["live_translate_target"]),
+                  "--idle-unload", str(int(_settings["live_caption_idle_unload"]))]
         # 本地模型目录只对 whisper 有意义（qwen/sensevoice 走引擎目录固定路径）
         if asr_dir and asr_model not in ("qwen", "sensevoice"):
             common += ["--model-dir", asr_dir]
@@ -2139,8 +2213,8 @@ class Viewer(QWidget):
         self._shutdown = True
         if self._live_on:
             self._stop_live_caption()
-        self._gif_timer.stop()
-        self._gif_recording = False
+        self._gif_recording = False  # worker 线程在下一轮检查点自行退出
+        self._save_playlist_state(clean=True)
         self._remember_position()
         self.previewer.stop()
         self.video_view.shutdown()

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .config import PRESET_MODELS, find_subtitle_pipeline_dir, settings
 
-ENGINE_VERSION = 4
+ENGINE_VERSION = 5
 
 # SRT 生成进行中（含批量）：viewer 暂停提交实时字幕任务（UI 层互斥，
 # 引擎串行队列本身没问题，防的是 seek/换片误 cancel 掉 SRT 任务）
@@ -169,6 +169,8 @@ def matches() -> bool:
         and current.get("model") == effective_model()
         and current.get("model_dir") == model_dir_arg()
         and current.get("translate") == str(settings["live_ollama_model"])
+        and current.get("target") == str(settings["live_translate_target"])
+        and current.get("idle") == int(settings["live_caption_idle_unload"])
     )
 
 
@@ -233,6 +235,8 @@ def start_preload() -> bool:
         "--lang", str(settings["live_caption_lang"]),
         "--model", effective_model(),
         "--ollama-model", str(settings["live_ollama_model"]),
+        "--target-lang", str(settings["live_translate_target"]),
+        "--idle-unload", str(int(settings["live_caption_idle_unload"])),
     ]
     if model_dir_arg():
         args += ["--model-dir", model_dir_arg()]

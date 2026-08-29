@@ -404,6 +404,41 @@ class SettingsDialog(QDialog):
         srt_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         gg.addWidget(srt_hint, 15, 0, 1, 5)
 
+        # 翻译目标语言 + SRT 导出格式（同一行两个下拉）
+        self.cb_translate_target = QComboBox()
+        for code, key in (("zh", "zh"), ("zh-Hant", "zh-Hant"), ("en", "en")):
+            self.cb_translate_target.addItem(t("settings.translate_target_" + key), code)
+        idx = self.cb_translate_target.findData(str(settings["live_translate_target"]))
+        self.cb_translate_target.setCurrentIndex(max(0, idx))
+        self.cb_translate_target.setToolTip(t("settings.translate_target_hint"))
+        self.cb_translate_target.currentIndexChanged.connect(
+            lambda _i: self._set("live_translate_target",
+                                 self.cb_translate_target.currentData()))
+        gg.addWidget(QLabel(t("settings.translate_target_label")), 16, 0)
+        gg.addWidget(self.cb_translate_target, 16, 1)
+
+        self.cb_srt_format = QComboBox()
+        for fmt in ("srt", "vtt", "ass"):
+            self.cb_srt_format.addItem(fmt.upper(), fmt)
+        idx = self.cb_srt_format.findData(str(settings["srt_export_format"]))
+        self.cb_srt_format.setCurrentIndex(max(0, idx))
+        self.cb_srt_format.currentIndexChanged.connect(
+            lambda _i: self._set("srt_export_format", self.cb_srt_format.currentData()))
+        gg.addWidget(QLabel(t("settings.srt_format_label")), 16, 2)
+        gg.addWidget(self.cb_srt_format, 16, 3)
+
+        # 空闲自动释放显存（引擎侧 N 分钟无任务即卸载模型，下次任务自动重载）
+        self.spin_idle_unload = QSpinBox()
+        self.spin_idle_unload.setRange(0, 240)
+        self.spin_idle_unload.setSuffix(" min")
+        self.spin_idle_unload.setSpecialValueText(t("settings.idle_unload_off"))
+        self.spin_idle_unload.setValue(int(settings["live_caption_idle_unload"]) // 60)
+        self.spin_idle_unload.setToolTip(t("settings.idle_unload_hint"))
+        self.spin_idle_unload.valueChanged.connect(
+            lambda v: self._set("live_caption_idle_unload", int(v) * 60))
+        gg.addWidget(QLabel(t("settings.idle_unload_label")), 17, 0)
+        gg.addWidget(self.spin_idle_unload, 17, 1)
+
         # 实时字幕覆盖层：字号 + 覆盖范围（按播放区域百分比）
         self.spin_live_font = QSpinBox()
         self.spin_live_font.setRange(12, 96)
@@ -446,7 +481,7 @@ class SettingsDialog(QDialog):
         self.asr_hint = QLabel("")
         self.asr_hint.setWordWrap(True)
         self.asr_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        gg.addWidget(self.asr_hint, 14, 0, 1, 5)
+        gg.addWidget(self.asr_hint, 18, 0, 1, 5)
         self._warn_model_resources(str(settings["live_asr_model"]))
         self._update_combo_resources()
 

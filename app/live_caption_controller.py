@@ -22,6 +22,9 @@ class LiveCaptionController(QObject):
         super().__init__(parent)
         self.rows: list[tuple[float, float, str, str]] = []
         self._row_keys: set[tuple[float, float, str, str]] = set()
+        # (t0, t1, 原文) → rows 下标：译文更新行 O(1) 定位（全片 ~2000 行，
+        # 逐行线性扫是 O(n²)）；rows 只追加不删除，下标稳定
+        self._row_index: dict[tuple[float, float, str], int] = {}
         # 每个任务（generation）的转写覆盖 [起点, 前沿]，供 seekbar 显示：
         # 跳转后旧任务的区间保留、新任务从跳转点另行延伸，空洞如实显示，
         # 回头补洞的任务再补上空缺（UI 语义，与补转调度解耦）
@@ -47,6 +50,7 @@ class LiveCaptionController(QObject):
     def reset_for_media(self, item_is_video: bool) -> bool:
         self.rows = []
         self._row_keys = set()
+        self._row_index = {}
         self.task_spans.clear()
         self.media_path = None
         self.full_pass_running = False
@@ -63,6 +67,7 @@ class LiveCaptionController(QObject):
         if self.media_path != media:
             self.rows = []
             self._row_keys = set()
+            self._row_index = {}
             self.rows_changed.emit()
         self.media_path = media
         self.generation = generation
@@ -88,21 +93,23 @@ class LiveCaptionController(QObject):
         # 翻译异步化：引擎先发原文行（zh 空），译文就绪后发同 (t0,t1,seg)
         # 的更新行 → 原地补译文，不产生重复段
         rt0, rt1 = round(t0, 2), round(t1, 2)
-        for i, (r0, r1, rseg, rzh) in enumerate(self.rows):
-            if round(r0, 2) == rt0 and round(r1, 2) == rt1 and rseg == seg:
-                if zh == rzh:
-                    return False  # 完全相同的重复行
-                if zh:  # 译文后补：原地更新
-                    self.rows[i] = (r0, r1, rseg, zh)
-                    self._row_keys.discard((rt0, rt1, seg, rzh))
-                    self._row_keys.add((rt0, rt1, seg, zh))
-                    self.rows_changed.emit()
-                    return True
-                return False  # 重复的原文行
+        idx = self._row_index.get((rt0, rt1, seg))
+        if idx is not None:
+            r0, r1, rseg, rzh = self.rows[idx]
+            if zh == rzh:
+                return False  # 完全相同的重复行
+            if zh:  # 译文后补：原地更新
+                self.rows[idx] = (r0, r1, rseg, zh)
+                self._row_keys.discard((rt0, rt1, seg, rzh))
+                self._row_keys.add((rt0, rt1, seg, zh))
+                self.rows_changed.emit()
+                return True
+            return False  # 重复的原文行
         key = (rt0, rt1, seg, zh)
         if key in self._row_keys:
             return False
         self._row_keys.add(key)
+        self._row_index[(rt0, rt1, seg)] = len(self.rows)
         self.rows.append((t0, t1, seg, zh))
         span = self.task_spans.get(self.generation)
         if span is not None:

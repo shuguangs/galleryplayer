@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QSlider,
     QSplitter,
     QStackedWidget,
@@ -176,16 +177,26 @@ class _ScanTask(QRunnable):
                     progress,
                 )
                 dircache.cache.save()
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # 扫描线程意外失败也要让用户看到，而不是得到一个"空文件夹"
+            stats.errors += 1
+            stats.last_error = f"{self.folder}: {exc}"
         flush("done")
 
 
 class MainWindow(QMainWindow):
+    _drop_open = Signal(object)    # 拖放解析结论 (kind, Path)，后台线程 → UI 线程
+    _ext_resolved = Signal(object)  # 第二实例外部路径解析结论 (kind, Path)
+    _playlist_restored = Signal(list, int)  # 崩溃恢复：后台线程收集好的 (items, index)
+
     def __init__(self, startup_file: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle(t("main_window.title"))
         self.resize(1360, 850)
+        self._drop_open.connect(self._on_drop_resolved)
+        self._ext_resolved.connect(self._on_external_resolved)
+        self._playlist_restored.connect(self._on_playlist_restored)
+        QTimer.singleShot(600, self._maybe_restore_playlist)
         self.setAcceptDrops(True)
         self._startup_file: Path | None = startup_file
 
@@ -869,10 +880,11 @@ class MainWindow(QMainWindow):
             return
 
         # 保存位置：视频所在文件夹 / 播放器所在文件夹
+        fmt = str(settings["srt_export_format"] or "srt")
         if settings["subtitle_save_dir"] == "player":
-            srt = APP_DIR / f"{path.stem}.zh.srt"
+            srt = APP_DIR / f"{path.stem}.zh.{fmt}"
         else:
-            srt = path.with_suffix(".zh.srt")
+            srt = path.with_suffix(f".zh.{fmt}")
         job_log = live_engine.paths()[0].parent / "srt-generation.log"
         job_log.unlink(missing_ok=True)
 
@@ -911,6 +923,7 @@ class MainWindow(QMainWindow):
             "log": str(job_log),
             "seek": 0.0,
             "translate_model": str(settings["srt_translate_model"] or "live"),
+            "format": fmt,
         })
         if not generation:
             self._finish_srt_job(srt, t("main_window.gen_srt_no_pipeline"))
@@ -1100,10 +1113,11 @@ class MainWindow(QMainWindow):
             return
 
         engine_dir = live_engine.paths()[0].parent
+        fmt = str(settings["srt_export_format"] or "srt")
         jobs: list[dict] = []
         for index, item in enumerate(videos):
             output = (APP_DIR if settings["subtitle_save_dir"] == "player"
-                      else item.path.parent) / f"{item.path.stem}.zh.srt"
+                      else item.path.parent) / f"{item.path.stem}.zh.{fmt}"
             job_log = engine_dir / f"srt-batch-{index}.log"
             job_log.unlink(missing_ok=True)
             jobs.append({
@@ -1112,8 +1126,10 @@ class MainWindow(QMainWindow):
                 "output": output,
                 "log": job_log,
                 "pos": 0,
+                "tail": "",
                 "done": False,
                 "generation": 0,  # 懒提交：轮到它时才 submit
+                "format": fmt,
             })
 
         dlg = QDialog(self)
@@ -1181,6 +1197,7 @@ class MainWindow(QMainWindow):
                     "log": str(nxt["log"]),
                     "seek": 0.0,
                     "translate_model": str(settings["srt_translate_model"] or "live"),
+                    "format": str(nxt.get("format", "srt")),
                 })
                 if generation:
                     nxt["generation"] = generation
@@ -1287,24 +1304,83 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
         print(f"[single-instance] external paths: {list(paths)}")
-        for raw in paths:
-            p = Path(raw)
-            if p.is_dir():
-                self.set_folder(p)
-                return
-            if not p.is_file():
-                continue
-            from .archive import is_archive
 
-            if is_archive(p):
-                self._open_archive(p)
-                return
+        def _work() -> None:
+            # 所有 stat 都在 worker 线程：网络路径上一个 stat 可能耗时数秒
+            for raw in paths:
+                p = Path(raw)
+                try:
+                    if p.is_dir():
+                        self._ext_resolved.emit(("folder", p))
+                        return
+                    if not p.is_file():
+                        continue
+                except OSError:
+                    continue
+                from .archive import is_archive
+
+                if is_archive(p):
+                    self._ext_resolved.emit(("archive", p))
+                    return
+                if media.item_for_path(p) is not None:
+                    self._ext_resolved.emit(("media", p))
+                    return
+            self._ext_resolved.emit((None, None))
+
+        import threading
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_external_resolved(self, decision) -> None:
+        kind, p = decision
+        if kind == "folder":
+            self.set_folder(p)
+        elif kind == "archive":
+            self._open_archive(p)
+        elif kind == "media":
             item = media.item_for_path(p)
             if item is None:
-                continue
+                return
             self.ensure_viewer().open_playlist([item], 0)
             self.set_folder(p.parent, quiet=True)
+
+    def _maybe_restore_playlist(self) -> None:
+        """上次会话未正常退出 → 询问是否恢复播放列表（路径收集在后台线程）。"""
+        from .runtime import USERDATA_DIR
+
+        try:
+            data = json.loads(
+                (USERDATA_DIR / "last_playlist.json").read_text(encoding="utf-8"))
+        except Exception:
             return
+        if not isinstance(data, dict) or data.get("clean", True):
+            return
+        paths = [p for p in (data.get("paths") or []) if p]
+        index = int(data.get("index", 0))
+        if not paths:
+            return
+        ret = QMessageBox.question(
+            self, t("main_window.title"),
+            t("main_window.restore_playlist").format(n=len(paths)),
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if ret != QMessageBox.Yes:
+            return
+
+        import threading
+
+        def _collect() -> None:
+            items = [it for it in
+                     (media.item_for_path(Path(p)) for p in paths)
+                     if it is not None]
+            self._playlist_restored.emit(items, index)
+
+        threading.Thread(target=_collect, daemon=True).start()
+
+    def _on_playlist_restored(self, items, index: int) -> None:
+        if not items:
+            return
+        self.ensure_viewer().open_playlist(items, min(max(0, index), len(items) - 1))
 
     def _show_browser(self) -> None:
         """Leave the welcome page for whichever view mode is selected."""
@@ -1702,6 +1778,11 @@ class MainWindow(QMainWindow):
             suffix = t("main_window.cache_hit_suffix").format(
                 reused=stats.dirs_reused, total=stats.dirs_total
             )
+        if stats is not None and stats.errors:
+            # 权限/离线盘等导致的读取失败：明确浮出，避免看起来像"空文件夹"
+            err_text = t("main_window.scan_errors").format(n=stats.errors)
+            suffix = f"{suffix}{err_text}" if suffix else err_text
+            print(f"[scan] {stats.errors} 个目录读取失败，最后: {stats.last_error}")
         if not self._quiet_scan:
             self._apply_view(count_suffix=suffix)
 
@@ -1871,18 +1952,43 @@ class MainWindow(QMainWindow):
             e.acceptProposedAction()
 
     def dropEvent(self, e):
-        for url in e.mimeData().urls():
-            p = Path(url.toLocalFile())
-            if p.is_dir():
-                self.set_folder(p)
-                return
-            if p.is_file() and media.classify(p) is not None:
-                self.set_folder(p.parent)
-                QTimer.singleShot(400, lambda target=p: self._open_path(target))
-                return
-            if p.is_file() and media.is_archive_name(p.name):
-                self._open_archive(p)
-                return
+        paths = [Path(u.toLocalFile()) for u in e.mimeData().urls() if u.toLocalFile()]
+        if not paths:
+            return
+
+        def _work() -> None:
+            # 任何 stat 都在 worker 线程做：把死网络快捷方式拖进窗口时
+            # UI 线程不该被一个 is_dir() 卡住数秒
+            for p in paths:
+                try:
+                    if p.is_dir():
+                        self._drop_open.emit(("folder", p))
+                        return
+                    if not p.is_file():
+                        continue
+                except OSError:
+                    continue
+                if media.classify(p) is not None:
+                    self._drop_open.emit(("media", p))
+                    return
+                if media.is_archive_name(p.name):
+                    self._drop_open.emit(("archive", p))
+                    return
+            self._drop_open.emit((None, None))
+
+        import threading
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_drop_resolved(self, decision) -> None:
+        kind, p = decision
+        if kind == "folder":
+            self.set_folder(p)
+        elif kind == "media":
+            self.set_folder(p.parent)
+            QTimer.singleShot(400, lambda target=p: self._open_path(target))
+        elif kind == "archive":
+            self._open_archive(p)
 
     def _open_path(self, path: Path) -> None:
         for i, it in enumerate(self.model.items):

@@ -120,6 +120,30 @@ class LiveCaptionTests(unittest.TestCase):
             {"g": 1, "t": 0, "end": 5, "text": "Hello.", "zh": "你好。"}))
         self.assertEqual(len(ctl.rows), 1)
 
+    def test_translation_backfill_out_of_order_and_reindex(self) -> None:
+        """多条行的乱序回填 + 复用 (t0,t1,seg) 索引：O(1) 定位且互不串行。"""
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=False)
+        for i, text in enumerate(("One.", "Two.", "Three.")):
+            self.assertTrue(ctl.accept_line(
+                {"g": 1, "t": i * 10, "end": i * 10 + 4, "text": text, "zh": ""}))
+        self.assertEqual(len(ctl.rows), 3)
+        # 乱序补译文：中间行与最后一行
+        self.assertTrue(ctl.accept_line(
+            {"g": 1, "t": 10, "end": 14, "text": "Two.", "zh": "二。"}))
+        self.assertTrue(ctl.accept_line(
+            {"g": 1, "t": 20, "end": 24, "text": "Three.", "zh": "三。"}))
+        self.assertEqual([r[3] for r in ctl.rows], ["", "二。", "三。"])
+        # 时间戳不匹配 → 新增行而非误更新
+        self.assertTrue(ctl.accept_line(
+            {"g": 1, "t": 40, "end": 44, "text": "Four.", "zh": ""}))
+        self.assertEqual(len(ctl.rows), 4)
+        # 译文二次更新（重译覆盖）：仍原地更新
+        self.assertTrue(ctl.accept_line(
+            {"g": 1, "t": 10, "end": 14, "text": "Two.", "zh": "第二句。"}))
+        self.assertEqual(ctl.rows[1][3], "第二句。")
+        self.assertEqual(len(ctl.rows), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

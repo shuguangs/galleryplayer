@@ -5,6 +5,7 @@ fallback that brings HEIC/AVIF/JXL and anything else Qt does not know.
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer, Signal
@@ -25,6 +26,39 @@ MIN_SCALE = 0.04
 MAX_SCALE = 32.0
 ZOOM_STEP = 1.18
 MAX_ANIM_FRAMES = 600
+
+# 超过该像素数 / 帧数的图在后台线程解码（表头即可判断，不额外读像素），
+# 避免百兆像素大图或超长 GIF 冻结 UI；小图仍同步解码，"秒开"手感不变
+ASYNC_PIXELS = 24_000_000
+ASYNC_FRAMES = 120
+
+
+def _decode_image(path: Path) -> tuple[list[tuple[QImage, int]], str | None]:
+    """Qt 插件优先、Pillow 兜底的完整解码。返回 (frames, 错误消息)。"""
+    frames: list[tuple[QImage, int]] = []
+    reader = QImageReader(str(path))
+    reader.setAutoTransform(True)
+    if reader.canRead():
+        if reader.supportsAnimation() and reader.imageCount() > 1:
+            count = 0
+            while count < MAX_ANIM_FRAMES:
+                img = reader.read()
+                if img.isNull():
+                    break
+                delay = reader.nextImageDelay() or 100
+                frames.append((img, max(20, delay)))
+                count += 1
+        else:
+            img = reader.read()
+            if not img.isNull():
+                frames.append((img, 0))
+
+    if not frames:
+        try:
+            frames, _ = _load_with_pillow(path)
+        except Exception as exc:
+            return [], str(exc)
+    return frames, None
 
 
 def _load_with_pillow(path: Path) -> tuple[list[tuple[QImage, int]], bool]:
@@ -49,6 +83,8 @@ def _load_with_pillow(path: Path) -> tuple[list[tuple[QImage, int]], bool]:
 class ImageView(QWidget):
     zoom_changed = Signal(float)
     load_failed = Signal(str)
+    loaded = Signal(int, int)  # 后台解码完成：(宽, 高)，供 viewer 回填尺寸
+    _decoded = Signal(int, object, object)  # 内部：seq, frames, error（跨线程排队）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -70,6 +106,8 @@ class ImageView(QWidget):
         self._anim = QTimer(self)
         self._anim.setSingleShot(True)
         self._anim.timeout.connect(self._next_frame)
+        self._decoded.connect(self._on_decoded)  # worker 线程解码结果回 UI
+        self._load_seq = 0
 
     # -------------------------------------------------------------- loading
 
@@ -78,6 +116,7 @@ class ImageView(QWidget):
         self._frames = []
         self._frame_index = 0
         self._rotation = 0
+        self._load_seq += 1  # 作废在途的后台解码
         self.update()
 
     def load(self, path: Path) -> bool:
@@ -85,35 +124,44 @@ class ImageView(QWidget):
         self._frames = []
         self._frame_index = 0
         self._rotation = 0
-        frames: list[tuple[QImage, int]] = []
+        self._load_seq += 1
+        seq = self._load_seq
 
         reader = QImageReader(str(path))
         reader.setAutoTransform(True)
         if reader.canRead():
-            if reader.supportsAnimation() and reader.imageCount() > 1:
-                count = 0
-                while count < MAX_ANIM_FRAMES:
-                    img = reader.read()
-                    if img.isNull():
-                        break
-                    delay = reader.nextImageDelay() or 100
-                    frames.append((img, max(20, delay)))
-                    count += 1
-            else:
-                img = reader.read()
-                if not img.isNull():
-                    frames.append((img, 0))
-
-        if not frames:
-            try:
-                frames, _ = _load_with_pillow(path)
-            except Exception as exc:
-                self.load_failed.emit(t("image_view.load_failed").format(name=path.name, error=exc))
+            size = reader.size()
+            pixels = max(0, size.width()) * max(0, size.height())
+            n_frames = reader.imageCount() if reader.supportsAnimation() else 1
+            if pixels > ASYNC_PIXELS or n_frames > ASYNC_FRAMES:
+                # 大图后台解码：UI 不冻结，完成后经 loaded 信号回填
+                threading.Thread(target=self._decode_background,
+                                 args=(path, seq), daemon=True).start()
                 self.update()
-                return False
+                return True
 
+        frames, error = _decode_image(path)
+        return self._apply_result(seq, path, frames, error, background=False)
+
+    def _decode_background(self, path: Path, seq: int) -> None:
+        frames, error = _decode_image(path)
+        self._decoded.emit(seq, frames, error)  # 排队连接，回到 GUI 线程执行
+
+    def _on_decoded(self, seq: int, frames, error) -> None:
+        if seq != self._load_seq:
+            return  # 用户已翻页，丢弃过期结果
+        self._apply_result(seq, None, frames, error, background=True)
+
+    def _apply_result(self, seq: int, path, frames, error, background: bool) -> bool:
+        name = Path(str(path)).name if path is not None else ""
+        if error is not None:
+            self.load_failed.emit(
+                t("image_view.load_failed").format(name=name, error=error))
+            self.update()
+            return False
         if not frames:
-            self.load_failed.emit(t("image_view.decode_failed").format(name=path.name))
+            self.load_failed.emit(
+                t("image_view.decode_failed").format(name=name))
             self.update()
             return False
 
@@ -122,6 +170,8 @@ class ImageView(QWidget):
         self.fit_to_window()
         if len(self._frames) > 1:
             self._anim.start(self._frames[0][1])
+        if background:
+            self.loaded.emit(self._source_size[0], self._source_size[1])
         return True
 
     def _next_frame(self) -> None:
