@@ -237,18 +237,56 @@ def merge_fragments(rows: list[tuple[float, float, str]]) -> list[tuple[float, f
     return out
 
 
-def write_srt_file(path, rows: list[tuple[float, float, str, str]]) -> None:
-    """双语 SRT 写出（zh 空则只写原文行）。"""
-    def ts(value: float) -> str:
+def write_srt_file(path, rows: list[tuple[float, float, str, str]],
+                   fmt: str = "srt") -> None:
+    """双语字幕写出（译文空则只写原文行）。fmt: srt / vtt / ass。"""
+    def ts_srt(value: float) -> str:
         h, rest = divmod(int(value * 1000), 3600000)
         m, rest = divmod(rest, 60000)
         sec, ms = divmod(rest, 1000)
         return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
 
-    parts: list[str] = []
-    for index, (start, end, original, translated) in enumerate(rows, 1):
-        parts.append(f"{index}\n{ts(start)} --> {ts(end)}\n{original}")
-        if translated:
-            parts.append(translated)
-        parts.append("")
+    def ts_vtt(value: float) -> str:
+        h, rest = divmod(int(value * 1000), 3600000)
+        m, rest = divmod(rest, 60000)
+        sec, ms = divmod(rest, 1000)
+        return f"{h:02d}:{m:02d}:{sec:02d}.{ms:03d}"
+
+    def ts_ass(value: float) -> str:
+        # ASS 时间精度 0.01s：H:MM:SS.CC
+        h, rest = divmod(int(value * 100), 360000)
+        m, rest = divmod(rest, 6000)
+        sec, cs = divmod(rest, 100)
+        return f"{h:d}:{m:02d}:{sec:02d}.{cs:02d}"
+
+    fmt = (fmt or "srt").lower()
+    if fmt == "vtt":
+        parts = ["WEBVTT", ""]
+        for start, end, original, translated in rows:
+            text = original if not translated else f"{original}\n{translated}"
+            parts.append(f"{ts_vtt(start)} --> {ts_vtt(end)}")
+            parts.append(text)
+            parts.append("")
+    elif fmt == "ass":
+        header = (
+            "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\n\n"
+            "[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, "
+            "BackColour, Bold, Outline, Shadow, Alignment, MarginL, MarginR, MarginV\n"
+            "Style: Sub,Microsoft YaHei,48,&H00FFFFFF,&H00000000,&H7F000000,0,2,1,2,60,60,36\n\n"
+            "[Events]\nFormat: Layer, Start, End, Style, Text\n"
+        )
+        lines = []
+        for start, end, original, translated in rows:
+            text = original if not translated else f"{original}\\N{translated}"
+            text = text.replace("\n", "\\N")
+            lines.append(f"Dialogue: 0,{ts_ass(start)},{ts_ass(end)},Sub,{text}")
+        parts = [header, *lines]
+    else:  # srt（默认，保持历史行为）
+        parts = []
+        for index, (start, end, original, translated) in enumerate(rows, 1):
+            parts.append(f"{index}\n{ts_srt(start)} --> {ts_srt(end)}\n{original}")
+            if translated:
+                parts.append(translated)
+            parts.append("")
     path.write_text("\n".join(parts), encoding="utf-8")

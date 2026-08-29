@@ -182,6 +182,10 @@ def main() -> None:
                     help="从第 N 秒开始转写（音轨模式追播放进度）")
     ap.add_argument("--preload", action="store_true",
                     help="启动后仅加载模型并等待任务，不立即转写")
+    ap.add_argument("--target-lang", default="zh",
+                    help="翻译目标语言: zh / zh-Hant / en（translate_service.TARGET_NAMES）")
+    ap.add_argument("--idle-unload", type=float, default=0.0,
+                    help="空闲 N 秒后自动卸载模型释放显存（0=不卸载）")
     args = ap.parse_args()
     if not args.media and not args.preload:
         ap.error("必须提供媒体文件，或使用 --preload")
@@ -230,7 +234,9 @@ def main() -> None:
             "translate": args.ollama_model if args.translate else "none",
             "model": args.model,
             "model_dir": args.model_dir or "",
-            "engine": 4,
+            "target": args.target_lang,
+            "idle": int(args.idle_unload),
+            "engine": 5,
         }
         state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
@@ -295,42 +301,75 @@ def main() -> None:
     if args.preload:
         status("MODEL_PRELOADING")
 
-    t0 = time.perf_counter()
+    model = None
     vad = None
-    try:
-        if args.model in TORCH_ENGINES:
-            import asr_engines
 
-            if args.model == "qwen":
-                model = asr_engines.load_qwen(args.device, status)
+    def _load_model() -> None:
+        """加载 ASR 模型（启动与空闲自动卸载后的重载共用一条路径）。"""
+        nonlocal model, vad
+        t0 = time.perf_counter()
+        try:
+            if args.model in TORCH_ENGINES:
+                import asr_engines
+
+                if args.model == "qwen":
+                    model = asr_engines.load_qwen(args.device, status)
+                else:
+                    model = asr_engines.load_sensevoice(args.device, status)
+                vad = asr_engines.load_vad(status)
             else:
-                model = asr_engines.load_sensevoice(args.device, status)
-            vad = asr_engines.load_vad(status)
-        else:
-            from faster_whisper import WhisperModel
+                from faster_whisper import WhisperModel
 
-            # int8：GPU/CPU 通用、占用低（缓解转写期掉帧）；精度足够字幕用途
-            model = WhisperModel(args.model_dir or args.model,
-                                 device=args.device, compute_type="int8")
-    except Exception as exc:  # noqa: BLE001
-        status(f"MODEL_ERROR {exc}")
-        with pending_lock:
-            job = pending_job
-            pending_job = None
-        if job and job.get("mode") == "srt" and job.get("log"):
-            try:
-                job["log"].parent.mkdir(parents=True, exist_ok=True)
-                with open(job["log"], "a", encoding="utf-8") as fp:
-                    fp.write(f"# SRT_ERROR 模型加载失败: {exc}\n")
-            except Exception:
-                pass
+                # int8：GPU/CPU 通用、占用低（缓解转写期掉帧）；精度足够字幕用途
+                model = WhisperModel(args.model_dir or args.model,
+                                     device=args.device, compute_type="int8")
+        except Exception as exc:  # noqa: BLE001
+            status(f"MODEL_ERROR {exc}")
+            with pending_lock:
+                job = pending_job
+                pending_job = None
+            if job and job.get("mode") == "srt" and job.get("log"):
+                try:
+                    job["log"].parent.mkdir(parents=True, exist_ok=True)
+                    with open(job["log"], "a", encoding="utf-8") as fp:
+                        fp.write(f"# SRT_ERROR 模型加载失败: {exc}\n")
+                except Exception:
+                    pass
+            raise
+        status(f"模型就绪 {time.perf_counter() - t0:.0f}s")
+
+    try:
+        _load_model()
+    except Exception:  # noqa: BLE001
         sys.exit(1)
-    status(f"模型就绪 {time.perf_counter() - t0:.0f}s")
+
+    def _ensure_model() -> None:
+        if model is None:
+            status("模型已卸载，重新加载 ...")
+            _load_model()
+
+    def _unload_model() -> None:
+        """空闲自动卸载：释放显存；下次任务 _ensure_model 自动重载。"""
+        nonlocal model, vad
+        import gc as _gc
+
+        model = None
+        vad = None
+        _gc.collect()
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        status("MODEL_UNLOADED 空闲超时，已释放显存")
 
     if args.preload:
         status("MODEL_READY")
 
-    translator = Translator(args.ollama, args.ollama_model) if args.translate else None
+    translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang)
+                  if args.translate else None)
     # 有界翻译队列：Ollama 卡顿时旧实现无限积压（内存膨胀 + 拖住 join）；
     # 满了丢最旧一条的译文（字幕跟手优先，丢的只是后补的翻译）
     _translate_q: queue.Queue = queue.Queue(maxsize=64)
@@ -339,8 +378,22 @@ def main() -> None:
     # 的 (start, end, text)，体量可忽略；文件被修改/换片即失效
     _prefetch: dict = {"key": None, "rows": []}
 
+    def _translate_with_retry(trans, text: str, note) -> str:
+        """翻译一句，失败重试一次；连续 5 次失败自动降级停用翻译（返回原文）。
+
+        note: 回调（str）→ None，用于把降级/异常写进对应日志。
+        """
+        for attempt in (1, 2):
+            try:
+                return trans(text)
+            except Exception as exc:  # noqa: BLE001
+                note(f"翻译失败(第{attempt}次): {str(exc)[:120]}")
+        return ""
+
     def _translate_worker() -> None:
+        nonlocal translator
         cur_gen = None
+        fail_streak = 0
         while True:
             item = _translate_q.get()
             if item is None:
@@ -355,10 +408,14 @@ def main() -> None:
                     cur_gen = gen
                 zh = ""
                 if translator:
-                    try:
-                        zh = translator(text)
-                    except Exception as exc:  # noqa: BLE001
-                        status(f"✗ 翻译失败（Ollama）: {exc}")
+                    zh = _translate_with_retry(translator, text, status)
+                    if zh:
+                        fail_streak = 0
+                    else:
+                        fail_streak += 1
+                        if fail_streak >= 5:
+                            status("翻译连续失败，实时字幕降级为仅原文")
+                            translator = None
                 line = json.dumps({
                     "g": gen,
                     "t": round(t0, 2),
@@ -375,7 +432,7 @@ def main() -> None:
 
     threading.Thread(target=_translate_worker, daemon=True).start()
     if translator:
-        status(f"翻译启用: {args.ollama_model} → zh")
+        status(f"翻译启用: {args.ollama_model} → {args.target_lang}")
         ready, error = ensure_ollama(args.ollama, args.ollama_model, status)
         if ready:
             status(f"TRANSLATE_READY {args.ollama_model}")
@@ -412,10 +469,11 @@ def main() -> None:
             _job_status(job, f"翻译失败: {exc}")
             return ""
 
-    def _write_srt(path: Path, rows: list[tuple[float, float, str, str]]) -> None:
+    def _write_srt(path: Path, rows: list[tuple[float, float, str, str]],
+                   fmt: str = "srt") -> None:
         from translate_service import write_srt_file
 
-        write_srt_file(path, rows)
+        write_srt_file(path, rows, fmt)
 
     def _prefetch_key(media: Path):
         try:
@@ -437,6 +495,11 @@ def main() -> None:
             return
         if args.model not in TORCH_ENGINES:
             status("PREFETCH_SKIP（预转写仅支持 qwen/sensevoice）")
+            return
+        try:
+            _ensure_model()
+        except Exception:  # noqa: BLE001
+            status("PREFETCH_SKIP（模型重载失败）")
             return
         generation = job["generation"]
         status(f"PREFETCH_START {media.name}")
@@ -462,6 +525,11 @@ def main() -> None:
         media = job["media"]
         output = job["output"]
         generation = job["generation"]
+        try:
+            _ensure_model()
+        except Exception as exc:  # noqa: BLE001
+            _job_status(job, f"SRT_ERROR 模型重载失败: {str(exc)[:120]}")
+            return
         if cancel_generation > generation:
             _job_status(job, "SRT_CANCELLED")
             return
@@ -477,7 +545,9 @@ def main() -> None:
             import asr_engines
 
             audio = decode_audio(str(media), sampling_rate=16000)
+            duration = max(1.0, len(audio) / 16000.0)
             lang_note = args.lang or "auto"
+            last_pct = -10
             for seg_start, seg_end, text in asr_engines.stream_transcribe(
                     model, vad, args.model, audio, lang_note):
                 if cancel_generation > generation:
@@ -485,11 +555,18 @@ def main() -> None:
                     return
                 if text:
                     raw_rows.append((seg_start, seg_end, text))
+                    # 识别进度按语音位置推进（每 5% 报一次，避免刷屏）
+                    pct = int(seg_end / duration * 100) // 5 * 5
+                    if pct > last_pct:
+                        last_pct = pct
+                        _job_status(job, f"SRT_PROGRESS 识别 {min(pct, 100)}%")
         else:
             segments, info = model.transcribe(
                 str(media), language=args.lang or None, beam_size=5,
                 vad_filter=True, word_timestamps=True,
             )
+            total = max(1.0, float(getattr(info, "duration", 0.0)) or 1.0)
+            last_pct = -10
             for segment in segments:
                 if cancel_generation > generation:
                     _job_status(job, "SRT_CANCELLED")
@@ -497,6 +574,10 @@ def main() -> None:
                 text = (segment.text or "").strip()
                 if text:
                     raw_rows.append((segment.start, segment.end, text))
+                pct = int(segment.end / total * 100) // 5 * 5
+                if pct > last_pct:
+                    last_pct = pct
+                    _job_status(job, f"SRT_PROGRESS 识别 {min(pct, 100)}%")
             lang_note = f"{info.language} (p={info.language_probability:.2f})"
         _job_status(
             job,
@@ -533,7 +614,7 @@ def main() -> None:
                 )
 
                 if ensure_llama_server(lambda m: _job_status(job, m)):
-                    job_translator = LlamaServerTranslator()
+                    job_translator = LlamaServerTranslator(target=args.target_lang)
                     llama_used = True
                 else:
                     _job_status(job, "llama.cpp 不可用，回退 Ollama")
@@ -541,12 +622,14 @@ def main() -> None:
             elif job_model not in ("", "live", args.ollama_model):
                 from translate_service import Translator
 
-                job_translator = Translator(args.ollama, job_model)
+                job_translator = Translator(args.ollama, job_model,
+                                            target=args.target_lang)
         except Exception as exc:  # noqa: BLE001
             _job_status(job, f"翻译模型初始化失败: {str(exc)[:120]}")
             job_translator = translator
 
         translated_rows: list[tuple[float, float, str, str]] = []
+        fail_streak = 0
         try:
             if job_translator is not None:
                 job_translator.reset()
@@ -557,10 +640,16 @@ def main() -> None:
                 _job_status(job, f"翻译 {index}/{len(rows)} ...")
                 zh = ""
                 if job_translator is not None:
-                    try:
-                        zh = job_translator(original)
-                    except Exception as exc:  # noqa: BLE001
-                        _job_status(job, f"翻译失败: {str(exc)[:120]}")
+                    zh = _translate_with_retry(
+                        job_translator, original,
+                        lambda m: _job_status(job, m))
+                    if zh:
+                        fail_streak = 0
+                    else:
+                        fail_streak += 1
+                        if fail_streak >= 5:
+                            _job_status(job, "翻译连续失败，本任务降级为仅原文")
+                            job_translator = None
                 translated_rows.append((start, end, original, zh))
         finally:
             if llama_used:
@@ -568,12 +657,17 @@ def main() -> None:
 
                 stop_llama_server()
 
-        _write_srt(output, translated_rows)
+        _write_srt(output, translated_rows, str(job.get("format", "srt")))
         _job_status(job, f"SRT_READY {output}")
 
     def _transcribe(media: Path, seek: float, generation: int = 0) -> None:
         if cancel_generation > generation:
             status("模型加载期间收到切换，跳过旧转写任务 ...")
+            return
+        try:
+            _ensure_model()
+        except Exception as exc:  # noqa: BLE001
+            status(f"✗ 模型重载失败: {str(exc)[:120]}")
             return
         write_state(media)
         if not media.is_file():
@@ -693,6 +787,8 @@ def main() -> None:
             "log": Path(),
         }
 
+    last_task_end = time.monotonic()
+
     while True:
         if pending_job is not None:
             with pending_lock:
@@ -704,6 +800,11 @@ def main() -> None:
         else:
             job = None
         if job is None:
+            # 空闲自动卸载：默认 0=不卸载；重载耗时由 _ensure_model 兜底
+            if (args.idle_unload > 0 and model is not None
+                    and time.monotonic() - last_task_end >= args.idle_unload):
+                _unload_model()
+                last_task_end = time.monotonic()
             _stop_hb.wait(0.25)
             continue
         try:
@@ -726,6 +827,8 @@ def main() -> None:
 
             traceback.print_exc()
             status(f"TASK_DONE {job.get('generation', 0)}")
+        finally:
+            last_task_end = time.monotonic()
 
 
 if __name__ == "__main__":

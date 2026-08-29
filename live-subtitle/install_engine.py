@@ -370,18 +370,23 @@ def main() -> None:
 
     # ------------------------------------------------------- 5. 写配置
     cfg = root / "config.yaml"
-    cfg.write_text(
-        f"asr:\n  model: {args.model!r}\n"
-        f"  device: {'cuda' if gpu_name else 'cpu'}\n"
-        f"  compute: {'float16' if gpu_name else 'int8'}\n"
-        "  language: auto\n  beam_size: 5\n"
-        f"translate:\n  enabled: {'false' if args.translate == 'none' else 'true'}\n"
-        f"  endpoint: http://127.0.0.1:11434\n  model: {args.translate!r}\n"
-        "  target_lang: zh\n  chunk_sentences: 3\n"
-        "output:\n  show_original: true\n  srt: true\n",
-        encoding="utf-8",
-    )
-    log("config.yaml 已生成")
+    if cfg.is_file():
+        # 只在首次安装时生成：重装/换引擎不应清掉用户手工配置
+        #（播放器实际通过命令行参数下发配置，这份文件只服务独立入口）
+        log("config.yaml 已存在，保留不覆盖")
+    else:
+        cfg.write_text(
+            f"asr:\n  model: {args.model!r}\n"
+            f"  device: {'cuda' if gpu_name else 'cpu'}\n"
+            f"  compute: {'float16' if gpu_name else 'int8'}\n"
+            "  language: auto\n  beam_size: 5\n"
+            f"translate:\n  enabled: {'false' if args.translate == 'none' else 'true'}\n"
+            f"  endpoint: http://127.0.0.1:11434\n  model: {args.translate!r}\n"
+            "  target_lang: zh\n  chunk_sentences: 3\n"
+            "output:\n  show_original: true\n  srt: true\n",
+            encoding="utf-8",
+        )
+        log("config.yaml 已生成")
 
     log(f"\n==== 安装完成 ====\n引擎目录: {root}\n"
         f"识别: {label}（{'GPU' if gpu_name else 'CPU'}）\n"
