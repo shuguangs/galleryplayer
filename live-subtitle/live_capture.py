@@ -280,6 +280,8 @@ def main() -> None:
     translator = (Translator(args.ollama, args.ollama_model, target=args.target_lang)
                   if args.translate else None)
     if translator:
+        print(f"翻译启用: {args.ollama_model} → {args.target_lang}", flush=True)
+    if translator:
         status(f"翻译启用: {args.ollama_model} → zh")
         ready, error = ensure_ollama(args.ollama, args.ollama_model, status)
         if ready:

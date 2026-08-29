@@ -427,7 +427,7 @@ class MainWindow(QMainWindow):
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self._apply_view)
-        self.search.textChanged.connect(self._search_timer.start)
+        self.search.textChanged.connect(lambda *_: self._search_timer.start())
         lay.addWidget(self.search)
 
         self.btn_tree = _icon_button(icons.SIDEBAR, t("main_window.tree_toggle_tip"), 32, checkable=True)
@@ -935,6 +935,7 @@ class MainWindow(QMainWindow):
         self._srt_output = srt
         self._srt_job_log = job_log
         self._srt_job_log_pos = 0
+        self._srt_job_log_tail = ""  # 上一个任务的尾部残留会造成误判完成
         self._srt_timer.start()
 
     def _cancel_srt_job(self) -> None:
@@ -1351,12 +1352,12 @@ class MainWindow(QMainWindow):
         try:
             data = json.loads(
                 (USERDATA_DIR / "last_playlist.json").read_text(encoding="utf-8"))
+            paths = [p for p in (data.get("paths") or []) if p]
+            index = int(data.get("index", 0))
         except Exception:
             return
         if not isinstance(data, dict) or data.get("clean", True):
             return
-        paths = [p for p in (data.get("paths") or []) if p]
-        index = int(data.get("index", 0))
         if not paths:
             return
         ret = QMessageBox.question(
@@ -1365,6 +1366,13 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No,
         )
         if ret != QMessageBox.Yes:
+            # 拒绝恢复也要清掉脏标记，否则之后每次启动都会再弹
+            try:
+                (USERDATA_DIR / "last_playlist.json").write_text(
+                    json.dumps({"clean": True, "index": 0, "paths": []}),
+                    encoding="utf-8")
+            except Exception:
+                pass
             return
 
         import threading

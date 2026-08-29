@@ -378,17 +378,18 @@ def main() -> None:
     # 的 (start, end, text)，体量可忽略；文件被修改/换片即失效
     _prefetch: dict = {"key": None, "rows": []}
 
-    def _translate_with_retry(trans, text: str, note) -> str:
-        """翻译一句，失败重试一次；连续 5 次失败自动降级停用翻译（返回原文）。
+    def _translate_with_retry(trans, text: str, note) -> tuple[str, bool]:
+        """翻译一句，异常重试一次。返回 (译文, 是否最终失败)。
 
-        note: 回调（str）→ None，用于把降级/异常写进对应日志。
+        空译文但无异常是合法结果（纯符号/不可译），不计入连续失败——
+        否则纯符号台词连发 5 句会把整个任务的翻译误降级停用。
         """
         for attempt in (1, 2):
             try:
-                return trans(text)
+                return trans(text), False
             except Exception as exc:  # noqa: BLE001
                 note(f"翻译失败(第{attempt}次): {str(exc)[:120]}")
-        return ""
+        return "", True
 
     def _translate_worker() -> None:
         nonlocal translator
@@ -408,14 +409,14 @@ def main() -> None:
                     cur_gen = gen
                 zh = ""
                 if translator:
-                    zh = _translate_with_retry(translator, text, status)
-                    if zh:
-                        fail_streak = 0
-                    else:
+                    zh, failed = _translate_with_retry(translator, text, status)
+                    if failed:
                         fail_streak += 1
                         if fail_streak >= 5:
                             status("翻译连续失败，实时字幕降级为仅原文")
                             translator = None
+                    else:
+                        fail_streak = 0
                 line = json.dumps({
                     "g": gen,
                     "t": round(t0, 2),
@@ -640,16 +641,16 @@ def main() -> None:
                 _job_status(job, f"翻译 {index}/{len(rows)} ...")
                 zh = ""
                 if job_translator is not None:
-                    zh = _translate_with_retry(
+                    zh, failed = _translate_with_retry(
                         job_translator, original,
                         lambda m: _job_status(job, m))
-                    if zh:
-                        fail_streak = 0
-                    else:
+                    if failed:
                         fail_streak += 1
                         if fail_streak >= 5:
                             _job_status(job, "翻译连续失败，本任务降级为仅原文")
                             job_translator = None
+                    else:
+                        fail_streak = 0
                 translated_rows.append((start, end, original, zh))
         finally:
             if llama_used:

@@ -30,6 +30,9 @@ class LiveCaptionController(QObject):
         # 回头补洞的任务再补上空缺（UI 语义，与补转调度解耦）
         self.task_spans: dict[int, list[float]] = {}
         self.generation = 0
+        # 内容版本号：每次行增删/译文原地更新都递增。自动存盘的脏检查用
+        # 它而不是行数——译文回填不改变行数，按行数比较会漏存译文
+        self.data_version = 0
         self.catching = False
         self.media_path: Path | None = None
         self.task_start_seek = 0.0
@@ -51,6 +54,7 @@ class LiveCaptionController(QObject):
         self.rows = []
         self._row_keys = set()
         self._row_index = {}
+        self.data_version += 1
         self.task_spans.clear()
         self.media_path = None
         self.full_pass_running = False
@@ -68,6 +72,7 @@ class LiveCaptionController(QObject):
             self.rows = []
             self._row_keys = set()
             self._row_index = {}
+            self.data_version += 1
             self.rows_changed.emit()
         self.media_path = media
         self.generation = generation
@@ -102,6 +107,7 @@ class LiveCaptionController(QObject):
                 self.rows[idx] = (r0, r1, rseg, zh)
                 self._row_keys.discard((rt0, rt1, seg, rzh))
                 self._row_keys.add((rt0, rt1, seg, zh))
+                self.data_version += 1
                 self.rows_changed.emit()
                 return True
             return False  # 重复的原文行
@@ -110,6 +116,7 @@ class LiveCaptionController(QObject):
             return False
         self._row_keys.add(key)
         self._row_index[(rt0, rt1, seg)] = len(self.rows)
+        self.data_version += 1
         self.rows.append((t0, t1, seg, zh))
         span = self.task_spans.get(self.generation)
         if span is not None:

@@ -84,7 +84,7 @@ class ImageView(QWidget):
     zoom_changed = Signal(float)
     load_failed = Signal(str)
     loaded = Signal(int, int)  # 后台解码完成：(宽, 高)，供 viewer 回填尺寸
-    _decoded = Signal(int, object, object)  # 内部：seq, frames, error（跨线程排队）
+    _decoded = Signal(int, str, object, object)  # seq, 文件名, frames, error（跨线程排队）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -145,15 +145,15 @@ class ImageView(QWidget):
 
     def _decode_background(self, path: Path, seq: int) -> None:
         frames, error = _decode_image(path)
-        self._decoded.emit(seq, frames, error)  # 排队连接，回到 GUI 线程执行
+        self._decoded.emit(seq, path.name, frames, error)  # 排队连接，回 GUI 线程
 
-    def _on_decoded(self, seq: int, frames, error) -> None:
+    def _on_decoded(self, seq: int, name: str, frames, error) -> None:
         if seq != self._load_seq:
             return  # 用户已翻页，丢弃过期结果
-        self._apply_result(seq, None, frames, error, background=True)
+        self._apply_result(seq, name, frames, error, background=True)
 
-    def _apply_result(self, seq: int, path, frames, error, background: bool) -> bool:
-        name = Path(str(path)).name if path is not None else ""
+    def _apply_result(self, seq: int, name: str, frames, error,
+                      background: bool) -> bool:
         if error is not None:
             self.load_failed.emit(
                 t("image_view.load_failed").format(name=name, error=error))

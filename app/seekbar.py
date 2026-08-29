@@ -236,13 +236,15 @@ class SeekBar(QWidget):
         # A-B 循环区间：琥珀色高亮 + 两端细刻度（mpv 只管循环，视觉在这画）
         if self._ab_range is not None:
             a, b = self._ab_range
-            if self._duration > 0 and b > a:
+            # 只标了 A 点时先画起点刻度；A-B 齐了再画高亮段
+            if self._duration > 0 and b >= a:
                 ax = self._x_at_time(a, hovered)
                 bx = self._x_at_time(b, hovered)
-                ab_r = QRect(ax, tr.top(), max(2, bx - ax), tr.height())
-                ab_path = QPainterPath()
-                ab_path.addRoundedRect(ab_r, radius, radius)
-                p.fillPath(ab_path, QColor(255, 176, 32, 88))
+                if b > a:
+                    ab_r = QRect(ax, tr.top(), max(2, bx - ax), tr.height())
+                    ab_path = QPainterPath()
+                    ab_path.addRoundedRect(ab_r, radius, radius)
+                    p.fillPath(ab_path, QColor(255, 176, 32, 88))
                 p.setPen(QColor(255, 176, 32, 220))
                 p.drawLine(ax, tr.top(), ax, tr.bottom())
                 p.drawLine(bx, tr.top(), bx, tr.bottom())

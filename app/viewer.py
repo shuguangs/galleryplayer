@@ -88,6 +88,9 @@ class Viewer(QWidget):
         # 采样在 worker 线程自定速循环里做：grab_frame 是同步解码+像素拷贝，
         # 4K 下每 100ms 一次会拖垮 UI 线程（QTimer 方案的坑）
         self._gif_done.connect(self._finish_gif)
+        self._gif_stop = threading.Event()
+        self._gif_finishing = False
+        self._gif_thread = None
         self._drop_resolved.connect(self._on_drop_resolved)
         self._capture_saved.connect(self._show_toast)
         # ---- A-B loop state (mpv loops between these two marks when both are set)
@@ -652,11 +655,12 @@ class Viewer(QWidget):
         self._gif_w = max(120, min(1920, int(settings["gif_max_width"])))
         self._gif_recording = True
         self._gif_frames = []
-        import threading
-
-        threading.Thread(
+        self._gif_finishing = False
+        self._gif_stop = threading.Event()
+        self._gif_thread = threading.Thread(
             target=self._gif_capture_loop, args=(self._gif_interval,), daemon=True
-        ).start()
+        )
+        self._gif_thread.start()
         self.controls.set_gif_recording(True)
         self._show_toast(t("viewer.gif_recording"))
 
@@ -664,19 +668,23 @@ class Viewer(QWidget):
         """worker 线程自定速采样：抓帧间隔自行补偿，不占 UI 线程。"""
         import time as _t
 
-        while self._gif_recording and len(self._gif_frames) < self._gif_max:
+        while not self._gif_stop.is_set() and len(self._gif_frames) < self._gif_max:
             started = _t.perf_counter()
             frame = self.video_view.grab_frame()
-            if not self._gif_recording:
-                return  # 用户中途停止
+            if self._gif_stop.is_set():
+                return  # 用户中途停止/窗口关闭
             if frame is not None:
                 self._gif_frames.append(frame)
             elapsed_ms = (_t.perf_counter() - started) * 1000.0
-            _t.sleep(max(0.0, interval_ms - elapsed_ms) / 1000.0)
+            self._gif_stop.wait(max(0.0, interval_ms - elapsed_ms) / 1000.0)
         if self._gif_recording:
             self._gif_done.emit()  # 采样够数 → UI 线程收尾
 
     def _finish_gif(self) -> None:
+        if getattr(self, "_gif_finishing", False):
+            return  # 排队的 _gif_done 与手动停止撞车：只收一次尾
+        self._gif_finishing = True
+        self._gif_stop.set()
         self._gif_recording = False
         self.controls.set_gif_recording(False)
         frames, self._gif_frames = self._gif_frames, []
@@ -1345,8 +1353,7 @@ class Viewer(QWidget):
         self._live_started_at = _time.time()
         self._live_ctl.begin_media(media, start, generation, catching)
         self._live_alive_cache = None
-        # 换片后重新允许自动存 SRT（旧计数不再适用）
-        self._live_srt_saved_rows = -1
+        # 换片后重新允许自动存 SRT（版本号由 reset/begin 递增，无需手动处理）
         self._live_label.setText(
             t("viewer.live_caption_catching_status") if catching
             else t("viewer.live_caption_starting")
@@ -1504,7 +1511,21 @@ class Viewer(QWidget):
         #    仍复用——加载中的引擎（心跳正常）曾被误判后反复杀重启，卡死字幕
         import time as _t0
 
-        engine_alive = live_engine_matches() and _le.alive()
+        # 复用只认音轨引擎：环路模式（live_capture）写同一个 pid 文件但不读
+        # control——state 文件可能是上次音轨留下的陈旧数据，全信会"复用"一个
+        # 永远不出字幕的环路进程
+        def _pid_is_transcribe() -> bool:
+            try:
+                pid = int(self._live_pid.read_text(encoding="utf-8").strip())
+                import psutil
+
+                return "live_transcribe" in " ".join(
+                    psutil.Process(pid).cmdline())
+            except Exception:
+                return False
+
+        engine_alive = (live_engine_matches() and _le.alive()
+                        and _pid_is_transcribe())
         if source == "audio" and engine_alive and (
                 self._check_live_alive()
                 or _t0.time() - getattr(self, "_live_spawn_at", 0.0) < 60):
@@ -1955,12 +1976,9 @@ class Viewer(QWidget):
         if media is None or not Path(str(media)).is_file():
             return False
         self._live_auto_restart_at = now
-        try:
-            pos = float(self.video_view.position or 0.0)
-        except Exception:
-            pos = 0.0
         self._show_toast(t("viewer.live_caption_auto_restart"))
-        self._switch_live_media(Path(str(media)), max(0.0, pos), catching=True)
+        # 真正重建进程：写 control 文件对已死的引擎无人读取
+        self._start_live_caption()
         return True
 
     def _live_err_tail(self, limit: int = 3) -> str:
@@ -1998,8 +2016,10 @@ class Viewer(QWidget):
 
         if not self._live_rows:
             return
-        # 脏检查：行数没变就不写盘（定时器每 5s 触发，别让磁盘空转）
-        if len(self._live_rows) == getattr(self, "_live_srt_saved_rows", -1):
+        # 脏检查用控制器的内容版本号：译文后补是原地更新（行数不变），
+        # 按行数比较会漏存译文、导出永远停在纯原文
+        version = getattr(self._live_ctl, "data_version", 0)
+        if version == getattr(self, "_live_srt_saved_version", -1):
             return
         try:
             srt = self._write_live_srt(_settings)
@@ -2007,7 +2027,7 @@ class Viewer(QWidget):
             # 只读共享/磁盘满等场景：写失败不该打穿定时器回调
             print(f"[viewer] 自动保存实时字幕失败: {exc}")
             return
-        self._live_srt_saved_rows = len(self._live_rows)
+        self._live_srt_saved_version = version
         if announce:
             self._show_toast(t("viewer.live_caption_saved").format(path=srt.name))
 
@@ -2253,7 +2273,13 @@ class Viewer(QWidget):
         self._shutdown = True
         if self._live_on:
             self._stop_live_caption()
-        self._gif_recording = False  # worker 线程在下一轮检查点自行退出
+        # GIF 采样线程可能正卡在一次 4K screenshot 里，必须等它退出再拆 mpv，
+        # 否则对正在 terminate 的句柄发起命令会 native 崩溃
+        self._gif_stop.set()
+        self._gif_recording = False
+        thread = getattr(self, "_gif_thread", None)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
         self._save_playlist_state(clean=True)
         self._remember_position()
         self.previewer.stop()
