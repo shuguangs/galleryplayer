@@ -118,7 +118,7 @@ This project was co-written by AI:
 
 [![Claude](https://img.shields.io/badge/Claude-Anthropic-191919?logo=anthropic&logoColor=white)](https://github.com/anthropics)
 [![DeepSeek](https://img.shields.io/badge/DeepSeek-DeepSeek-blue)](https://github.com/deepseek-ai)
-[![GLM](https://img.shields.io/badge/GLM-Zhipu_AI-386BF0)](https://github.com/zhipuai)
+[![GLM](https://img.shields.io/badge/GLM-Z.ai-386BF0)](https://github.com/zai-org)
 **Qoder**
 
 They contributed different parts — player UI, the live-subtitle engine, architecture reviews and optimizations. Their commits carry `Co-authored-by` attribution.

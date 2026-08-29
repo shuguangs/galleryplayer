@@ -118,7 +118,7 @@
 
 [![Claude](https://img.shields.io/badge/Claude-Anthropic-191919?logo=anthropic&logoColor=white)](https://github.com/anthropics)
 [![DeepSeek](https://img.shields.io/badge/DeepSeek-DeepSeek-blue)](https://github.com/deepseek-ai)
-[![GLM](https://img.shields.io/badge/GLM-Zhipu_AI-386BF0)](https://github.com/zhipuai)
+[![GLM](https://img.shields.io/badge/GLM-Z.ai-386BF0)](https://github.com/zai-org)
 **Qoder**
 
 它们分别贡献了播放器界面、实时字幕引擎、架构评审与优化等不同部分；相关提交以 `Co-authored-by` 署名。
