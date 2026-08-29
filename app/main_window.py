@@ -411,7 +411,12 @@ class MainWindow(QMainWindow):
         self.search.setPlaceholderText(t("main_window.search_placeholder"))
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(190)
-        self.search.textChanged.connect(lambda _="": self._apply_view())
+        # 防抖：每击键全量 filter+sort+模型重置（2 万条约 200ms），停顿后再应用
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(300)
+        self._search_timer.timeout.connect(self._apply_view)
+        self.search.textChanged.connect(self._search_timer.start)
         lay.addWidget(self.search)
 
         self.btn_tree = _icon_button(icons.SIDEBAR, t("main_window.tree_toggle_tip"), 32, checkable=True)
@@ -953,7 +958,10 @@ class MainWindow(QMainWindow):
         if not new:
             return
         self._srt_log.appendPlainText(new.strip())
-        for line in new.splitlines():
+        # 拼上次尾部：状态行可能恰好被读到一半（跨两次轮询），截断后匹配不上
+        buf = getattr(self, "_srt_job_log_tail", "") + new
+        self._srt_job_log_tail = buf[-64:]
+        for line in buf.splitlines():
             line = line.strip()
             if line.startswith("# SRT_READY "):
                 self._finish_srt_job(getattr(self, "_srt_output", Path()))
@@ -1178,6 +1186,7 @@ class MainWindow(QMainWindow):
                     nxt["generation"] = generation
                     self._batch_active_gen = generation
                     nxt["pos"] = 0
+                    nxt["tail"] = ""
 
         for job in jobs:
             if not job["generation"] or job["done"] or not job["log"].is_file():
@@ -1191,7 +1200,10 @@ class MainWindow(QMainWindow):
                 continue
             if new:
                 self._batch_srt_log.appendPlainText(f"{job['name']}\n{new.strip()}")
-            text = job["log"].read_text(encoding="utf-8", errors="replace")
+            # 结束检测只扫新增文本（拼上次尾部防止状态行被读到一半截断）。
+            # 旧实现每秒全量重读整份日志，长任务数十 MB 会持续拖慢 UI
+            text = job.get("tail", "") + new
+            job["tail"] = text[-64:]
             finished = ("# SRT_READY " in text or "# SRT_ERROR " in text
                         or "# SRT_CANCELLED" in text)
             if finished:

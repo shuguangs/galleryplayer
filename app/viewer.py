@@ -1272,6 +1272,8 @@ class Viewer(QWidget):
         self._live_started_at = _time.time()
         self._live_ctl.begin_media(media, start, generation, catching)
         self._live_alive_cache = None
+        # 换片后重新允许自动存 SRT（旧计数不再适用）
+        self._live_srt_saved_rows = -1
         self._live_label.setText(
             t("viewer.live_caption_catching_status") if catching
             else t("viewer.live_caption_starting")
@@ -1509,6 +1511,13 @@ class Viewer(QWidget):
         except Exception as exc:  # noqa: BLE001
             self._show_toast(t("viewer.live_caption_error").format(err=str(exc)[:120]))
             return
+        finally:
+            # 句柄已交给子进程继承，父进程侧及时关闭，避免重启累积泄漏
+            if self._live_err_fh is not subprocess.DEVNULL:
+                try:
+                    self._live_err_fh.close()
+                except Exception:
+                    pass
         # 保存启动参数，供 seek 越界自动重转复用
         self._live_args_base = [str(exe), *args]
         self._live_env = env
@@ -1568,9 +1577,9 @@ class Viewer(QWidget):
         """按 pid 锁 + log 新鲜度判断已有字幕进程是否存活且健康（阻塞，勿在 UI 线程直接调用）。
 
         不健康（进程活着但 log 长期无产出 = 卡死）返回 False，由启动逻辑
-        杀掉旧进程再重建，杜绝多进程积累。
+        杀掉旧进程再重建，杜绝多进程积累。进程存在性/创建时间统一走 psutil
+        （wmic 在新 Win11 已移除，tasklist 探测不到创建时间）。
         """
-        import subprocess as _sp
         import time as _time
 
         pid_file = getattr(self, "_live_pid", None)
@@ -1580,12 +1589,26 @@ class Viewer(QWidget):
             pid = int(pid_file.read_text(encoding="utf-8").strip())
         except Exception:
             return False
+        create_time = None
         try:
-            out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
-                          capture_output=True, text=True, timeout=10,
-                          errors="replace",
-                          creationflags=_sp.CREATE_NO_WINDOW).stdout
-            if str(pid) not in out or "python" not in out.lower():
+            import psutil
+
+            proc = psutil.Process(pid)
+            if not (proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE):
+                return False
+            create_time = proc.create_time()
+        except ImportError:
+            # psutil 缺席（旧包）：退回 tasklist 只判存在性
+            import subprocess as _sp
+
+            try:
+                out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
+                              capture_output=True, text=True, timeout=10,
+                              errors="replace",
+                              creationflags=_sp.CREATE_NO_WINDOW).stdout
+                if str(pid) not in out or "python" not in out.lower():
+                    return False
+            except Exception:
                 return False
         except Exception:
             return False
@@ -1593,18 +1616,10 @@ class Viewer(QWidget):
         log = self._live_log_path()
         if log is not None and log.is_file() and log.stat().st_mtime > _time.time() - 60:
             return True
-        try:
-            fi = _sp.run(["wmic", "process", "where", f"ProcessId={pid}",
-                          "get", "CreationDate", "/value"],
-                         capture_output=True, text=True, timeout=10,
-                         errors="replace",
-                         creationflags=_sp.CREATE_NO_WINDOW).stdout
-            born = fi.split("=")[-1].strip()
-            ts = _time.mktime(_time.strptime(born[:14], "%Y%m%d%H%M%S"))
-            if _time.time() - ts < 90:
-                return True  # 刚启动仍在加载模型（GPU 竞争时 medium 可到 40s+）
-        except Exception:
+        if create_time is None:
             return True  # 拿不到时间就视为健康，避免误杀
+        if _time.time() - create_time < 90:
+            return True  # 刚启动仍在加载模型（GPU 竞争时 medium 可到 40s+）
         print(f"[viewer] pid={pid} 字幕进程 90s 无产出，判定卡死")
         return False
 
@@ -1633,33 +1648,39 @@ class Viewer(QWidget):
         """按命令行匹配杀掉所有实时字幕进程（含锁丢失的孤儿），保证单进程。
 
         同时匹配 live_capture 与 live_transcribe（音轨模式残留此前清不掉）；
-        wmic 在新 Win11 已移除，失败时回退 PowerShell CIM 查询。
+        wmic 在新 Win11 已移除——优先 psutil 枚举（毫秒级、无子进程开销），
+        缺席时回退 PowerShell CIM 查询。
         """
-        ids: list[int] = []
-        for cmd in (
-            ["wmic", "process", "where",
-             "name like '%pythonw%.exe' and (commandline like '%live_capture%' "
-             "or commandline like '%live_transcribe%')",
-             "get", "ProcessId", "/value"],
-            ["powershell", "-NoProfile", "-Command",
-             "Get-CimInstance Win32_Process -Filter \"Name like 'pythonw%.exe'\" | "
-             "Where-Object { $_.CommandLine -match 'live_(capture|transcribe)' } | "
-             "ForEach-Object { 'ProcessId=' + $_.ProcessId }"],
-        ):
+        pids: list[int] = []
+        try:
+            import psutil
+
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                try:
+                    info = proc.info
+                    if "python" not in (info.get("name") or "").lower():
+                        continue
+                    cmd = " ".join(info.get("cmdline") or [])
+                    if "live_capture" in cmd or "live_transcribe" in cmd:
+                        pids.append(info["pid"])
+                except Exception:
+                    continue
+        except ImportError:
             try:
                 done = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=15,
+                    ["powershell", "-NoProfile", "-Command",
+                     "Get-CimInstance Win32_Process -Filter \"Name like 'pythonw%.exe'\" | "
+                     "Where-Object { $_.CommandLine -match 'live_(capture|transcribe)' } | "
+                     "ForEach-Object { 'ProcessId=' + $_.ProcessId }"],
+                    capture_output=True, text=True, timeout=15,
                     errors="replace",
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
-                out = done.stdout
-                ids = [int(line.split("=")[-1]) for line in out.splitlines()
-                       if "ProcessId=" in line and line.split("=")[-1].strip().isdigit()]
-                if done.returncode == 0 or ids:
-                    break
+                pids = [int(line.split("=")[-1]) for line in done.stdout.splitlines()
+                        if "ProcessId=" in line and line.split("=")[-1].strip().isdigit()]
             except Exception:
-                continue
-        for pid in ids:
+                pids = []
+        for pid in pids:
             try:
                 subprocess.run(["taskkill", "/PID", str(pid), "/F"],
                                capture_output=True, timeout=10,
@@ -1863,6 +1884,20 @@ class Viewer(QWidget):
 
         if not self._live_rows:
             return
+        # 脏检查：行数没变就不写盘（定时器每 5s 触发，别让磁盘空转）
+        if len(self._live_rows) == getattr(self, "_live_srt_saved_rows", -1):
+            return
+        try:
+            srt = self._write_live_srt(_settings)
+        except Exception as exc:  # noqa: BLE001
+            # 只读共享/磁盘满等场景：写失败不该打穿定时器回调
+            print(f"[viewer] 自动保存实时字幕失败: {exc}")
+            return
+        self._live_srt_saved_rows = len(self._live_rows)
+        if announce:
+            self._show_toast(t("viewer.live_caption_saved").format(path=srt.name))
+
+    def _write_live_srt(self, _settings) -> Path:
         rows = merge_short_rows(self._live_rows)
         glossary = _settings["caption_glossary"] or {}
         fixed = []
@@ -1882,8 +1917,7 @@ class Viewer(QWidget):
         name = self.items[self.index].path.stem if self.items else "live"
         srt = out_dir / f"{name}.live.srt"
         _write_srt_file(srt, fixed)
-        if announce:
-            self._show_toast(t("viewer.live_caption_saved").format(path=srt.name))
+        return srt
 
     def _restart_live_for_seek(self, pos: int, catching: bool = True) -> None:
         """播放位置超出已转写范围 → 以 --seek pos 重启转写进程（追进度）。"""
@@ -2128,4 +2162,8 @@ def _write_srt_file(path: Path, rows) -> None:
         if zh:
             parts.append(zh)
         parts.append("")
-    path.write_text("\n".join(parts), encoding="utf-8")
+    # 原子写：定时器周期性覆盖目标文件，外部播放器/编辑器可能正在读取，
+    # 直接写原文件会被读到半截
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(parts), encoding="utf-8")
+    tmp.replace(path)

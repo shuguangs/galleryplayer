@@ -9,6 +9,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
+import threading
 
 from natsort import natsort_keygen, ns
 
@@ -172,27 +173,33 @@ class MetadataCache:
         except Exception:
             self._data = {}
         self._dirty = False
+        # apply/store 在扫描与缩略图线程调用，save 在 GUI 线程 dump——
+        # 无锁的话 dump 期间字典扩容会抛 "dictionary changed size"
+        self._lock = threading.Lock()
 
     def apply(self, item: MediaItem) -> bool:
-        rec = self._data.get(item.cache_key)
+        with self._lock:
+            rec = self._data.get(item.cache_key)
         if not rec:
             return False
         item.duration, item.width, item.height = rec[0], rec[1], rec[2]
         return True
 
     def store(self, item: MediaItem) -> None:
-        self._data[item.cache_key] = [item.duration, item.width, item.height]
-        self._dirty = True
+        with self._lock:
+            self._data[item.cache_key] = [item.duration, item.width, item.height]
+            self._dirty = True
 
     def save(self) -> None:
-        if not self._dirty:
-            return
-        try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            self._path.write_text(json.dumps(self._data), encoding="utf-8")
-            self._dirty = False
-        except OSError:
-            pass
+        with self._lock:
+            if not self._dirty:
+                return
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                self._path.write_text(json.dumps(self._data), encoding="utf-8")
+                self._dirty = False
+            except OSError:
+                pass
 
 
 metadata = MetadataCache()

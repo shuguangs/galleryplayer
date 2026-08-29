@@ -1006,14 +1006,6 @@ class PlaylistPanel(QWidget):
 
     def set_thumbs_paused(self, paused: bool) -> None:
         """Low-priority mode: stop requesting new thumbnails (playback first)."""
-        if self.thumbs_paused == paused:
-            return
-        self.thumbs_paused = paused
-        if not paused:
-            self.viewport().update()  # repaint visible rows -> resume requests
-
-    def set_thumbs_paused(self, paused: bool) -> None:
-        """Low-priority mode: stop requesting new thumbnails (playback first)."""
         self.list.set_thumbs_paused(paused)
 
     def set_playlist(self, items: list[MediaItem], current: int) -> None:
