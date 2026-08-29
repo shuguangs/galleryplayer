@@ -991,12 +991,14 @@ class SettingsDialog(QDialog):
 
         if event.type() == QEvent.Wheel and SettingsDialog._WHEEL_CLASSES \
                 and isinstance(watched, SettingsDialog._WHEEL_CLASSES):
-            # 滚轮一律转给设置页滚动区，控件自身绝不响应（中键/滚轮都一样），
-            # 避免悬停误改设置、也避免卡住界面的正常上下滚动
-            event.ignore()
+            # 滚轮一律只滚设置页，控件自身绝不响应。注意不能把原事件对象
+            # sendEvent 重入投递（PySide6 下会直接闪退），改为按滚轮增量
+            # 直接拨动滚动条
             scroll = getattr(self, "_scroll_area", None)
             if scroll is not None:
-                self._qapp.sendEvent(scroll.viewport(), event)
+                delta = event.angleDelta().y() or event.angleDelta().x()
+                bar = scroll.verticalScrollBar()
+                bar.setValue(bar.value() - int(delta))
             return True
         return super().eventFilter(watched, event)
 
