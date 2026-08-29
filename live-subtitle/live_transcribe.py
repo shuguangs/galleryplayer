@@ -109,7 +109,12 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 TORCH_ENGINES = ("qwen", "sensevoice")  # 走 asr_engines.py（torch 后端）
 
 
-def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0):
+class DecodeCancelled(Exception):
+    """新任务到达时中止解码（旧实现要等整段解完才看得到 cancel）。"""
+
+
+def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0,
+                       should_cancel=None):
     """从 seek 秒附近解码音频为 16kHz float32 mono（与 decode_audio 输出一致）。
 
     av 容器 seek 直接到目标时间附近再解码，不再全量解码：37 分钟视频跳转到
@@ -119,6 +124,10 @@ def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0):
     max_seconds 封顶解码窗口：旧实现会一路解到文件尾——2 小时片子跳到
     30 分钟处 ≈ 350MB 音频常驻内存。转写用不到尾部，15 分钟窗口足够覆盖
     一次连续播放（用完后由下一次 seek 触发重新就近解码）。
+
+    should_cancel 每解出一块调用一次：换片/seek 时立刻抛 DecodeCancelled。
+    解码本身不可中断曾是换片延迟的主因——大文件解完要几十秒，期间
+    cancel_generation 已经前进但没人看得到。
     """
     import gc
     import io
@@ -148,6 +157,8 @@ def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0):
         frames = _resample_frames(frames, resampler)
         decoded_seconds = 0.0
         for frame in frames:
+            if should_cancel is not None and should_cancel():
+                raise DecodeCancelled
             array = frame.to_ndarray()
             dtype = array.dtype
             raw.write(array)
@@ -406,16 +417,26 @@ def main() -> None:
     # 的 (start, end, text)，体量可忽略；文件被修改/换片即失效
     _prefetch: dict = {"key": None, "rows": []}
 
-    def _drain_translations(timeout: float = 90.0) -> None:
+    def _drain_translations(timeout: float = 90.0,
+                            generation: int | None = None) -> None:
         """收尾前等译文写完，但有上限。
 
         裸 join() 会把引擎主循环永久挂住：Ollama "能连上但不回"时单句就要等
         120s×2 次重试，队列里最多 64 条——期间换片/seek/新任务全不响应，而心跳
         仍在 touch log，播放器判"存活"永不重启。超时后未译完的行留在队列里，
         由 worker 继续写（同代次的更新行播放器仍会原地补上）。
+
+        有新任务在等（换片/seek/关窗）时立刻让路：90s 上限原本是"最坏情况
+        兜底"，实测却成了换片延迟的主因——用户已经打开下一部片，引擎还在
+        为上一部片等译文。剩余译文由 worker 继续写，不丢。
         """
         deadline = time.monotonic() + timeout
         while getattr(_translate_q, "unfinished_tasks", 0) > 0:
+            if pending_job is not None:
+                status("有新任务在等，译文收尾让路（剩余译文稍后补写）")
+                return
+            if generation is not None and cancel_generation > generation:
+                return
             if time.monotonic() >= deadline:
                 status("翻译收尾超时，先结束任务（剩余译文稍后补写）")
                 return
@@ -750,6 +771,9 @@ def main() -> None:
             return
         status(f"音轨模式：转写 {media.name} ...")
 
+        def _decode_cancelled() -> bool:
+            return cancel_generation > generation or pending_job is not None
+
         # 翻译异步化：转写行立即写 log（zh 为空），翻译 worker 按序译完再写
         # "更新行"（同 g/t/end/text，zh=译文）——转写不再被 Ollama 延迟拖住，
         # 播放器端按 (g,t,end,text) 匹配原地补译文
@@ -814,14 +838,34 @@ def main() -> None:
                         _emit(seek + piece_start, seek + piece_end, piece_text,
                               block=True)
                     if translator is not None:
-                        _drain_translations()  # 尾部译文随任务收尾写完，不留给下一代次
+                        # 尾部译文随任务收尾写完，不留给下一代次；有新任务在等就让路
+                        _drain_translations(generation=generation)
                     status(f"TASK_DONE {generation}")
                     return
 
             if seek > 0:
-                audio = _decode_audio_from(str(media), seek)
+                try:
+                    audio = _decode_audio_from(str(media), seek,
+                                               should_cancel=_decode_cancelled)
+                except DecodeCancelled:
+                    status("切换媒体，中断音频解码 ...")
+                    status(f"TASK_DONE {generation}")
+                    return
             else:
-                audio = decode_audio(str(media), sampling_rate=16000)
+                # 片头起播也走可中断解码（max_seconds=inf 保持整片解码的旧行为）：
+                # 大文件整片解码要几十秒，期间关窗换片完全没人响应
+                try:
+                    audio = _decode_audio_from(str(media), 0.0,
+                                               max_seconds=float("inf"),
+                                               should_cancel=_decode_cancelled)
+                except DecodeCancelled:
+                    status("切换媒体，中断音频解码 ...")
+                    status(f"TASK_DONE {generation}")
+                    return
+            if cancel_generation > generation:
+                status("切换媒体，中断当前转写 ...")
+                status(f"TASK_DONE {generation}")
+                return
             status(f"{args.model} 引擎转写中 ...")
             for piece_start, piece_end, piece_text in asr_engines.stream_transcribe(
                     model, vad, args.model, audio, args.lang or "auto"):
@@ -831,13 +875,20 @@ def main() -> None:
                 if piece_text:
                     _emit(seek + piece_start, seek + piece_end, piece_text)
             if translator is not None:
-                _drain_translations()  # 同 whisper 路径：收尾前等译文全部写出
+                # 同 whisper 路径：收尾前等译文写出，但有新任务在等就让路
+                _drain_translations(generation=generation)
             status(f"TASK_DONE {generation}")
             return
 
         # seek 就近解码（同 torch 引擎路径，带解码窗口封顶），时间戳加偏移
         if seek > 0:
-            audio = _decode_audio_from(str(media), seek)
+            try:
+                audio = _decode_audio_from(str(media), seek,
+                                           should_cancel=_decode_cancelled)
+            except DecodeCancelled:
+                status("切换媒体，中断音频解码 ...")
+                status(f"TASK_DONE {generation}")
+                return
             seg_iter, info = model.transcribe(
                 audio, language=args.lang or None, beam_size=1, vad_filter=True,
                 word_timestamps=True,
@@ -865,7 +916,7 @@ def main() -> None:
             for piece_start, piece_end, piece_text in pieces:
                 _emit(offset + piece_start, offset + piece_end, piece_text)
         if translator is not None:
-            _drain_translations()  # 等译文全部写出
+            _drain_translations(generation=generation)  # 等译文写出，有新任务即让路
         status(f"TASK_DONE {generation}")
 
     initial_job: dict | None = None

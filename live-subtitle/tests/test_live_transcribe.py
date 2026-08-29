@@ -1,6 +1,9 @@
 import unittest
 
-from live_transcribe import split_words_to_lines
+from live_transcribe import DecodeCancelled, _decode_audio_from, split_words_to_lines
+from pathlib import Path
+
+SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "jfk.wav"
 
 
 class Word:
@@ -36,6 +39,35 @@ class SplitWordsTests(unittest.TestCase):
         self.assertGreater(len(rows), 1)
         for _start, end, _text in rows:
             self.assertLessEqual(end - _start, 6.2)
+
+
+class DecodeCancelTests(unittest.TestCase):
+    """换片/seek 时解码必须立即中止：整段解完才响应曾让切换等上几十秒。"""
+
+    def setUp(self):
+        try:
+            import av  # noqa: F401
+        except ImportError:
+            self.skipTest("av 未安装（仅引擎 venv 有）")
+        if not SAMPLE.is_file():
+            self.skipTest(f"缺少样本 {SAMPLE}")
+
+    def test_cancel_raises_before_finishing(self):
+        with self.assertRaises(DecodeCancelled):
+            _decode_audio_from(str(SAMPLE), 0.0, should_cancel=lambda: True)
+
+    def test_no_cancel_decodes_audio(self):
+        audio = _decode_audio_from(str(SAMPLE), 0.0, should_cancel=lambda: False)
+        self.assertGreater(len(audio), 16000)  # 至少 1 秒
+
+    def test_seek_zero_matches_faster_whisper_decode(self):
+        """片头起播改走可中断解码，输出必须与 faster_whisper 原路径一致。"""
+        from faster_whisper import decode_audio
+
+        expected = decode_audio(str(SAMPLE), sampling_rate=16000)
+        actual = _decode_audio_from(str(SAMPLE), 0.0, max_seconds=float("inf"),
+                                    should_cancel=lambda: False)
+        self.assertEqual(len(actual), len(expected))
 
 
 if __name__ == "__main__":
