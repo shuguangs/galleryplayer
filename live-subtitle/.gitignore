@@ -1,0 +1,30 @@
+# 虚拟环境
+.venv/
+
+# 模型文件（大文件不入库，用脚本拉取）
+models/
+*.bin
+*.onnx
+*.ct2
+
+# 测试音频/临时产物
+samples/
+*.wav
+*.mp3
+__pycache__/
+*.pyc
+live-caption.log*
+live-caption.log.pid
+live-caption.log.lock
+live-caption.log.control
+live-caption.log.state
+live-caption.err
+live-caption.state
+srt-generation.log
+test-live*.log
+test-live*.pid
+test-live*.stderr.log
+test-live*.stdout.log
+test-live*.mp4
+# llama.cpp 二进制（SRT 大模型后端，install_engine.py 拉取）
+llamacpp/
