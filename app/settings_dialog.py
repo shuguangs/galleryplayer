@@ -111,6 +111,7 @@ class SettingsDialog(QDialog):
 
         # All option groups live in this viewport; the Done button stays visible.
         scroll = QScrollArea(self)
+        self._scroll_area = scroll  # 滚轮转发目标（见 eventFilter）
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -700,16 +701,14 @@ class SettingsDialog(QDialog):
         root_outer.addLayout(footer)
 
         # 悬停在下拉框/滑动条上滚轮会误改设置并卡住界面滚动——统一禁用，
-        # 滚轮事件转发给父级（滚动区域照常滚）
+        # 滚轮事件转发给设置页滚动区。安装动作放 showEvent 里反复执行，
+        # 确保运行期动态创建的控件（新引擎选项等）也全部覆盖
         from PySide6.QtCore import QEvent
         from PySide6.QtWidgets import QApplication
 
-        for cls in (QComboBox, QSlider, QSpinBox):
-            for widget in self.findChildren(cls):
-                widget.setFocusPolicy(Qt.StrongFocus)
-                widget.installEventFilter(self)
         self._wheel_types = (QEvent.Wheel,)
         self._qapp = QApplication
+        self._install_wheel_filter()
 
         screen = self.screen()
         if screen is not None:
@@ -955,14 +954,45 @@ class SettingsDialog(QDialog):
             self.sub_status.setText(t("settings.subtitle_dir_missing"))
             self.sub_status.setStyleSheet("color:#e0653f;")
 
+    _WHEEL_CLASSES = None  # 延迟解析，避免模块顶部额外导入
+
+    def _install_wheel_filter(self) -> None:
+        """给全部下拉/滑动/步进控件装滚轮过滤（幂等，showEvent 时重复执行）。"""
+        from PySide6.QtWidgets import (
+            QAbstractSlider,
+            QComboBox,
+            QDoubleSpinBox,
+            QSpinBox,
+        )
+
+        if SettingsDialog._WHEEL_CLASSES is None:
+            SettingsDialog._WHEEL_CLASSES = (
+                QComboBox, QSlider, QSpinBox, QDoubleSpinBox, QAbstractSlider,
+            )
+        seen = set()
+        for cls in SettingsDialog._WHEEL_CLASSES:
+            for widget in self.findChildren(cls):
+                if widget in seen:
+                    continue
+                seen.add(widget)
+                widget.setFocusPolicy(Qt.StrongFocus)
+                widget.installEventFilter(self)  # 同一过滤器重复安装是幂等的
+
+    def showEvent(self, e) -> None:  # noqa: N802
+        super().showEvent(e)
+        self._install_wheel_filter()
+
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         from PySide6.QtCore import QEvent
-        from PySide6.QtWidgets import QApplication
 
-        if event.type() == QEvent.Wheel and isinstance(
-                watched, (QComboBox, QSlider, QSpinBox)):
-            event.ignore()  # 标记未处理，控件自身的滚轮改值被跳过
-            QApplication.sendEvent(watched.parentWidget(), event)  # 让滚动区继续滚
+        if event.type() == QEvent.Wheel and SettingsDialog._WHEEL_CLASSES \
+                and isinstance(watched, SettingsDialog._WHEEL_CLASSES):
+            # 滚轮一律转给设置页滚动区，控件自身绝不响应（中键/滚轮都一样），
+            # 避免悬停误改设置、也避免卡住界面的正常上下滚动
+            event.ignore()
+            scroll = getattr(self, "_scroll_area", None)
+            if scroll is not None:
+                self._qapp.sendEvent(scroll.viewport(), event)
             return True
         return super().eventFilter(watched, event)
 
