@@ -1454,7 +1454,9 @@ class Viewer(QWidget):
         import time as _time
 
         self._live_started_at = _time.time()
-        self._live_ctl.begin_media(media, start, generation, catching)
+        self._live_ctl.begin_media(
+            media, start, generation, catching,
+            duration=self.video_view.duration if self._current_is_video() else None)
         self._live_alive_cache = None
         # 换片后重新允许自动存 SRT（版本号由 reset/begin 递增，无需手动处理）
         self._live_label.setText(
@@ -1763,7 +1765,9 @@ class Viewer(QWidget):
                 # 与上面传给引擎的 --seek int(pos) 对齐：起点取早了会把没转写的
                 # 几秒也画成青色已覆盖区，并让 span_covered 误报已覆盖
                 start = float(int(pos))
-            self._live_ctl.begin_media(current_media, start, 0, False)
+            self._live_ctl.begin_media(
+                current_media, start, 0, False,
+                duration=self.video_view.duration if self._current_is_video() else None)
         self._live_label.setText(t("viewer.live_caption_starting"))
         self._live_label.show()
         self._live_label.raise_()
@@ -1990,6 +1994,24 @@ class Viewer(QWidget):
                 self._start_live_full_pass()
             elif result == "done":
                 self._prefetch_next_live_media()
+        elif event == EngineEvent.LANG_REWRITE:
+            # 延迟探测改判：清掉误判区间内的行，引擎正按探测语言逐区间
+            # 重转。新行以相同时间戳重新到达，字幕内容就地替换。
+            # detail = "<lang>;<a1>-<b1>;<a2>-<b2>..."
+            ranges: list[tuple[float, float]] = []
+            lang = ""
+            try:
+                fields = event_data.detail.split(";")
+                lang = fields[0].strip()
+                for span in fields[1:]:
+                    a, b = span.strip().split("-")
+                    ranges.append((float(a), float(b)))
+            except (IndexError, ValueError):
+                ranges = []
+            removed = self._live_ctl.rewrite_rows(ranges)
+            if removed:
+                self._show_toast(t("viewer.live_caption_lang_rewrite")
+                                 .format(n=removed, lang=lang))
         elif event in (EngineEvent.TASK_STARTED, EngineEvent.TASK_PROGRESS):
             if not self._live_rows:
                 self._live_label.setText(t("viewer.live_caption_catching_status"))

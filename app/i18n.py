@@ -597,6 +597,7 @@ _TR: dict[str, dict[str, str]] = {
     "viewer.live_caption_starting": {"zh": "实时字幕启动中…（录音+识别引擎加载）", "en": "Starting live caption…"},
     "viewer.live_caption_model_loading": {"zh": "字幕模型加载中…（完成后自动开始）", "en": "Loading subtitle model…"},
     "viewer.live_caption_catching_status": {"zh": "字幕追赶中…（后台转写）", "en": "Catching up subtitles…"},
+    "viewer.live_caption_lang_rewrite": {"zh": "语言改判为 {lang}：已重写 {n} 行，正在重转开头…", "en": "Language re-detected as {lang}: rewrote {n} lines, re-transcribing the start…"},
     "viewer.live_caption_running": {"zh": "实时字幕运行中（右键菜单可停止）", "en": "Live caption running (stop from right-click menu)"},
     "viewer.live_caption_stopped": {"zh": "实时字幕已停止", "en": "Live caption stopped"},
     "viewer.live_caption_saved": {"zh": "实时字幕已保存：{path}", "en": "Live caption saved: {path}"},

@@ -16,6 +16,7 @@ class EngineEvent(Enum):
     TASK_CANCELLED = auto()
     TRANSLATE_READY = auto()
     TRANSLATE_ERROR = auto()
+    LANG_REWRITE = auto()
     MODEL_ERROR = auto()
     ERROR = auto()
 
@@ -49,6 +50,10 @@ def parse_engine_line(line: str) -> EngineEventData | None:
         return EngineEventData(EngineEvent.TRANSLATE_READY, text[16:].strip())
     if text.startswith("TRANSLATE_ERROR "):
         return EngineEventData(EngineEvent.TRANSLATE_ERROR, text[16:].strip())
+    if text.startswith("LANG_REWRITE "):
+        # 延迟探测改判：detail = "<lang>;<a1>-<b1>;<a2>-<b2>..."——
+        # 丢弃这些区间内的行，引擎正按探测语言逐区间重转
+        return EngineEventData(EngineEvent.LANG_REWRITE, text[13:].strip())
     if text.startswith("TASK_DONE "):
         try:
             generation = int(text.split()[1])

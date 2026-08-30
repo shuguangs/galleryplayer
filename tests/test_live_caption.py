@@ -210,5 +210,105 @@ class LiveCaptionTests(unittest.TestCase):
         self.assertEqual(ctl.handle_position(200.0, audio_mode=True), "restart")
 
 
+class LangRewriteTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QCoreApplication.instance() or QCoreApplication([])
+
+    def test_parse_lang_rewrite_event(self):
+        """LANG_REWRITE 状态行解析：detail = "<lang>;<a>-<b>;..."。"""
+        event = parse_engine_line("# LANG_REWRITE ja;45.2-120.0;300.5-360.0")
+        self.assertIsNotNone(event)
+        self.assertEqual(event.event, EngineEvent.LANG_REWRITE)
+        self.assertEqual(event.detail, "ja;45.2-120.0;300.5-360.0")
+
+    def test_rewrite_rows_drops_hit_ranges(self):
+        """rewrite_rows：清与区间相交的行；区间外的行保留；新行可覆盖。"""
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=False)
+        # 嘈杂区误判行（将被 0-60 区间清掉）
+        ctl.accept_line({"g": 1, "t": 10, "end": 12, "text": "嗯。", "zh": ""})
+        ctl.accept_line({"g": 1, "t": 30, "end": 32, "text": " itu sih.", "zh": ""})
+        # 真实中文长句（区间外，保留——真实多语言不该被误伤）
+        ctl.accept_line({"g": 1, "t": 65, "end": 70, "text": "我们下周去东京吧。", "zh": ""})
+        # 中段另一个误判小区间
+        ctl.accept_line({"g": 1, "t": 200, "end": 205, "text": "거기서는.", "zh": ""})
+        removed = ctl.rewrite_rows([(0.0, 60.0), (198.0, 210.0)])
+        self.assertEqual(removed, 3)
+        self.assertEqual(len(ctl.rows), 1)
+        self.assertEqual(ctl.rows[0][2], "我们下周去东京吧。")
+        # task_spans 不动（覆盖前沿保持，重转行以同代次重新推进）
+        self.assertEqual(ctl.task_spans[1][1], 205.0)
+        # 重转的新行以相同时间戳重新覆盖
+        self.assertTrue(ctl.accept_line(
+            {"g": 1, "t": 10, "end": 12, "text": "グレーして。", "zh": ""}))
+        self.assertEqual(len(ctl.rows), 2)
+        # 译文后补仍按 (t,end,seg) 定位
+        self.assertTrue(ctl.accept_line(
+            {"g": 1, "t": 65, "end": 70, "text": "我们下周去东京吧。", "zh": "要去。"}))
+        zh_row = next(r for r in ctl.rows if r[0] == 65.0)
+        self.assertEqual(zh_row[3], "要去。")
+
+    def test_rewrite_rows_bad_ranges_is_noop(self):
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=False)
+        ctl.accept_line({"g": 1, "t": 100, "end": 110, "text": "later", "zh": ""})
+        self.assertEqual(ctl.rewrite_rows([]), 0)
+        self.assertEqual(ctl.rewrite_rows([(50.0, 40.0)]), 0)  # 空/倒置区间
+        self.assertEqual(len(ctl.rows), 1)
+
+
+class TaskDoneProgressionTests(unittest.TestCase):
+    """追赶/补洞任务的完成判定：按"是否真的覆盖全片"而不是任务起点。
+
+    回归：③.mp4（3646s）追赶任务（seek=0）转完 900s 解码窗口就 TASK_DONE，
+    旧逻辑因 task_start_seek≤0.5 宣称 full_pass_done 并去预转写下一集——
+    长片尾部永远空白（"写一半去写下一个"）。新逻辑：行覆盖前沿 < 媒体
+    时长 → needs_full_pass（继续补洞）；达到时长 → done（才 prefetch）。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QCoreApplication.instance() or QCoreApplication([])
+
+    def test_catchup_window_done_still_needs_full_pass(self):
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=True, duration=3646.0)
+        ctl.accept_line({"g": 1, "t": 0, "end": 676, "text": "追赶窗口", "zh": ""})
+        self.assertEqual(ctl.task_done(1), "needs_full_pass")
+
+    def test_full_pass_window_done_still_needs_more(self):
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=True, duration=3646.0)
+        ctl.begin_full_pass(2, seek=676.0)
+        ctl.accept_line({"g": 2, "t": 676, "end": 1049, "text": "补洞窗口", "zh": ""})
+        self.assertEqual(ctl.task_done(2), "needs_full_pass")
+
+    def test_done_only_when_front_reaches_duration(self):
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=True, duration=1200.0)
+        ctl.accept_line({"g": 1, "t": 0, "end": 900, "text": "第一窗", "zh": ""})
+        ctl.begin_full_pass(2, seek=900.0)
+        ctl.accept_line({"g": 2, "t": 900, "end": 1199.5, "text": "补到尾", "zh": ""})
+        self.assertEqual(ctl.task_done(2), "done")
+        self.assertTrue(ctl.full_pass_done)
+
+    def test_unknown_duration_never_claims_done(self):
+        """无时长信息（duration=None）时保守：继续补洞而非 prefetch。"""
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=True, duration=None)
+        ctl.accept_line({"g": 1, "t": 0, "end": 900, "text": "x", "zh": ""})
+        self.assertEqual(ctl.task_done(1), "needs_full_pass")
+
+    def test_begin_media_new_file_clears_old_spans(self):
+        """换片清空旧任务区间：旧片的 span 残留会混进新片的覆盖显示。"""
+        ctl = LiveCaptionController()
+        ctl.begin_media(Path("a.mp4"), 0.0, 1, catching=True, duration=100.0)
+        ctl.accept_line({"g": 1, "t": 0, "end": 100, "text": "旧片", "zh": ""})
+        ctl.begin_media(Path("b.mp4"), 0.0, 2, catching=True, duration=200.0)
+        self.assertEqual(ctl.display_ranges(), [])
+        self.assertFalse(ctl.span_covered(50.0))
+
+
 if __name__ == "__main__":
     unittest.main()

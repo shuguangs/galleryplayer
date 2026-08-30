@@ -119,7 +119,10 @@ class HelpDialog(QDialog):
     _instance: "HelpDialog | None" = None
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent)
+        # parent 一律不认（同 SettingsDialog）：避免 Windows owned-window
+        # 联动最小化；Qt.Window 独立顶层，可各自最小化
+        super().__init__(None)
+        self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle(t("help.title"))
         self.setMinimumSize(560, 640)
         self.setStyleSheet(
@@ -145,7 +148,7 @@ class HelpDialog(QDialog):
         """Open (or re-focus) the shared help window."""
         dlg = cls._instance
         if dlg is None:
-            dlg = cls(parent)
+            dlg = cls()  # 无 parent：独立顶层窗口，不随主窗口最小化
             cls._instance = dlg
         dlg.show()
         dlg.raise_()

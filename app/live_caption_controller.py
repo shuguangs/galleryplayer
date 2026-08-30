@@ -38,6 +38,7 @@ class LiveCaptionController(QObject):
         self.task_start_seek = 0.0
         self.full_pass_running = False
         self.full_pass_done = False
+        self._media_duration: float | None = None
         self.last_position: float | None = None
         self._last_restart_pos = -10_000.0
         self._last_submit_at = 0.0
@@ -67,13 +68,17 @@ class LiveCaptionController(QObject):
         return item_is_video
 
     def begin_media(self, media: Path, seek: float, generation: int,
-                    catching: bool) -> None:
+                    catching: bool, duration: float | None = None) -> None:
         if self.media_path != media:
             self.rows = []
             self._row_keys = set()
             self._row_index = {}
             self.data_version += 1
             self.rows_changed.emit()
+            self.task_spans.clear()
+            self._media_duration = duration
+        elif duration is not None:
+            self._media_duration = duration
         self.media_path = media
         self.generation = generation
         start = max(0.0, float(seek))
@@ -123,6 +128,38 @@ class LiveCaptionController(QObject):
             span[1] = max(span[1], t1)
         self.rows_changed.emit()
         return True
+
+    def rewrite_rows(self, ranges: list[tuple[float, float]]) -> int:
+        """延迟探测改判：丢弃落在给定区间内的行，引擎正逐区间重转。
+
+        行与区间相交即清（重转的新行时间戳会重新覆盖）。task_spans 不动：
+        任务覆盖前沿仍在（重转行到达时以相同代次推进，span_covered 的
+        补洞判定不受影响）。返回删除的行数。
+        """
+        spans = [(max(0.0, float(a)), max(0.0, float(a), float(b)))
+                 for a, b in ranges if float(b) > float(a)]
+        if not spans:
+            return 0
+
+        def _hit(row) -> bool:
+            r0, r1 = row[0], row[1]
+            return any(a <= r1 and r0 <= b for a, b in spans)
+
+        old = self.rows
+        self.rows = [r for r in old if not _hit(r)]
+        removed = len(old) - len(self.rows)
+        if removed:
+            self._row_keys = {
+                (round(r[0], 2), round(r[1], 2), r[2], r[3]) for r in self.rows
+            }
+            self._row_index = {
+                (round(r[0], 2), round(r[1], 2), r[2]): i
+                for i, r in enumerate(self.rows)
+            }
+            self.data_version += 1
+        self.rows_changed.emit()
+        return removed
+        return removed
 
     def is_covered(self, pos: float) -> bool:
         return any(start - 0.2 <= pos <= end + 0.3
@@ -221,11 +258,17 @@ class LiveCaptionController(QObject):
     def task_done(self, generation: int) -> str:
         if generation != self.generation:
             return "ignored"
-        if self.full_pass_running or self.task_start_seek <= 0.5:
-            self.full_pass_done = True
-            self.full_pass_running = False
-            return "done"
         self.full_pass_running = False
+        # 是否已覆盖全片：行级覆盖的前沿 ≥ 媒体时长（无时长信息时保守
+        # 认为没完）。追赶任务（seek≤0.5）只转了一个解码窗口（~900s）
+        # 就 done——旧逻辑在此宣称 full_pass_done 并去预转写下一集，
+        # 长片从此再无补洞，尾部永远空白（实测 ③.mp4 3646s 只转到
+        # 676s 就"写一半去写下一个"）。
+        ranges = self.caption_ranges()
+        front = max((r[1] for r in ranges), default=0.0)
+        if self._media_duration is not None and front >= self._media_duration - 2.0:
+            self.full_pass_done = True
+            return "done"
         return "needs_full_pass"
 
     def begin_full_pass(self, generation: int, seek: float = 0.0) -> None:

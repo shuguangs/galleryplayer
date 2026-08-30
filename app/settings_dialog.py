@@ -157,7 +157,10 @@ class SettingsDialog(QDialog):
     _instance: "SettingsDialog | None" = None
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent)
+        # parent 一律不认：QDialog 带父窗口在 Windows 上是 owned window，
+        # 主窗口最小化时会被一起最小化。独立 Qt.Window 才能各自最小化。
+        super().__init__(None)
+        self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle(t("settings.title"))
         self.setMinimumWidth(520)
         self.resize(640, 480)
@@ -1366,7 +1369,11 @@ class SettingsDialog(QDialog):
     def show_for(cls, parent=None) -> "SettingsDialog":
         dlg = cls._instance
         if dlg is None:
-            dlg = cls(parent)
+            # 不把 parent 传给 QDialog：Windows 会把有父的顶层窗口作为
+            # owned window，最小化主窗口时被一起带下去。无 parent 的
+            # Qt.Window 独立参与任务栏，两边可各自最小化。parent 参数
+            # 仍保留（兼容调用方），只是不再作为窗口属主。
+            dlg = cls()
             cls._instance = dlg
         dlg.show()
         dlg.raise_()

@@ -217,6 +217,7 @@ class MainWindow(QMainWindow):
         self._scan_signals.batch.connect(self._on_scan_batch)
         self._pending_viewer_folder: Path | None = None
         self._quiet_scan = False  # startup playback: browser model updates are skipped
+        self._external_open_session = False  # 本次启动来自外部打开（跳过恢复弹窗）
         self._srt_timer = QTimer(self)  # monitors the resident engine's SRT job
         self._srt_timer.setInterval(500)
         self._srt_timer.timeout.connect(self._poll_srt_job)
@@ -243,7 +244,11 @@ class MainWindow(QMainWindow):
         self._resort_timer = QTimer(self)
         self._resort_timer.setSingleShot(True)
         self._resort_timer.setInterval(700)
-        self._resort_timer.timeout.connect(self._apply_view)
+        # meta 回填引发的自动重排：锚定项保持可见（keep="visible"，最小
+        # 滚动）。对齐视口顶（anchor）会每批跳一次；像素偏移（offset）在
+        # 时长排序下会让视口内容大换血（新获时长的项搬家）。
+        self._resort_timer.timeout.connect(
+            lambda: self._apply_view(keep="visible"))
         self.thumbs.meta_ready.connect(self._on_meta_ready)
 
         self._build_ui()
@@ -1325,6 +1330,10 @@ class MainWindow(QMainWindow):
         if target is None or not target.is_file():
             self._show_welcome()
             return
+        # 本次启动是外部打开：600ms 后的崩溃恢复弹窗跳过（用户意图明确，
+        # 模态框此刻弹出只会挡住刚打开的播放器）。独立于 _startup_file——
+        # 缓存命中时扫描会在 600ms 内 done 并把它消费成 None。
+        self._external_open_session = True
         from .archive import is_archive
 
         if is_archive(target):
@@ -1392,11 +1401,25 @@ class MainWindow(QMainWindow):
             if item is None:
                 return
             self.ensure_viewer().open_playlist([item], 0)
-            self.set_folder(p.parent, quiet=True)
+            # 与命令行首启路径（_startup_play）同构：记录外部打开的文件，
+            # 文件夹扫描 done 后 _handle_scan_batch 凭它把完整列表交给
+            # viewer（extend_playlist，不打断播放）。漏了这一步，播放列表
+            # 会永远停在单文件——quiet 扫描的结果没人接收。
+            self._startup_file = p
+            # force：多半是同文件夹的另一个文件（self.folder 已是它），
+            # set_folder 对同文件夹会短路返回——不强制重扫就没有 done，
+            # _startup_file 永远无人消费，列表停在单文件。authoritative
+            # 扫描层有 dircache 复用，重扫代价很小。
+            self.set_folder(p.parent, quiet=True, force=True)
 
     def _maybe_restore_playlist(self) -> None:
         """上次会话未正常退出 → 询问是否恢复播放列表（路径收集在后台线程）。"""
         from .runtime import USERDATA_DIR
+
+        # 外部打开（命令行/双击/转发）时用户意图明确：直接播给定的文件。
+        # 恢复弹窗是模态的，此刻弹出来只会挡住刚打开的播放器。
+        if self._startup_file is not None or self._external_open_session:
+            return
 
         try:
             data = json.loads(
@@ -1423,6 +1446,15 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             return
+        # 选“是”同样消费掉脏标记：恢复是一次性动作。之后再次异常退出时，
+        # open_playlist 落盘的 clean=False 会重新计——但只要本次恢复过，
+        # 就不会出现“反复弹同一个恢复框”的观感（断点位置另有 resume.json）。
+        try:
+            data["clean"] = True
+            (USERDATA_DIR / "last_playlist.json").write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
         import threading
 
@@ -1437,7 +1469,18 @@ class MainWindow(QMainWindow):
     def _on_playlist_restored(self, items, index: int) -> None:
         if not items:
             return
-        self.ensure_viewer().open_playlist(items, min(max(0, index), len(items) - 1))
+        cur = min(max(0, index), len(items) - 1)
+        self.ensure_viewer().open_playlist(items, cur)
+        # 恢复的列表多半是上次会话的片段（强杀时可能只剩 1 条）：借 startup
+        # handoff 让扫描 done 后 extend_playlist 把同文件夹完整列表交给
+        # viewer（正在播的就是 _startup_file → 原地扩展，不打断播放）。
+        # 浏览器同样需要扫描填充（否则主页面网格是空的，要点别的文件夹
+        # 再点回来才恢复）。quiet：不把播放器界面切走。
+        startup = items[cur].path
+        folder = startup.parent
+        if folder != self.folder:
+            self._startup_file = startup
+            self.set_folder(folder, quiet=True, force=True)
 
     def _show_browser(self) -> None:
         """Leave the welcome page for whichever view mode is selected."""
@@ -1842,6 +1885,18 @@ class MainWindow(QMainWindow):
             print(f"[scan] {stats.errors} 个目录读取失败，最后: {stats.last_error}")
         if not self._quiet_scan:
             self._apply_view(count_suffix=suffix)
+        else:
+            # quiet 扫描（外部打开文件/恢复播放列表）：流式刷新仍跳过，但模型
+            # 必须在 done 时回填——set_folder 进来时已把它清空，而 _flush_stream/
+            # cache 阶段在 quiet 下全不执行，漏了这里用户回到浏览器就是空网格，
+            # 要切到别的文件夹再切回来才恢复。代价与 startup handoff 的 sort 同
+            # 量级，只在 done 一次性发生。
+            self._apply_view()
+            # stack 还停在欢迎页的话一并切到浏览器视图：播放器是独立窗口，
+            # 这里切换不会打断它；否则用户关掉播放器看到的是欢迎页，观感
+            # 仍是"没加载文件夹内容"。
+            if self.stack.currentWidget() is self.welcome:
+                self._show_browser()
 
         # A folder picked from the panel's browser tab keeps playback going: hand the
         # freshly scanned list straight to the open viewer.
@@ -1856,9 +1911,10 @@ class MainWindow(QMainWindow):
         ):
             self.viewer.open_playlist(self.model.items, 0)
 
-        # A file passed on the command line: the player opened instantly with a
-        # single-item list; now the folder scan is done, hand it the full listing
-        # and keep the current position.
+        # A file opened from outside (command line on first launch, or forwarded
+        # by a second instance to the running one): the player opened instantly
+        # with a single-item list; now the folder scan is done, hand it the full
+        # listing and keep the current position.
         startup = self._startup_file
         self._startup_file = None
         if (
@@ -1906,13 +1962,18 @@ class MainWindow(QMainWindow):
             return
         started = time.perf_counter()
         self.all_items = list(self._stream_items)
-        self._apply_view(count_suffix=t("main_window.scanning_suffix"))
+        # 流式增量的滚动保持：名称/随机等稳定排序下新项只追加，保持像素
+        # 偏移即可；时长/mtime/大小等"元数据排序"下新项会插到中间（搬家），
+        # 像素偏移=视口内容大换血——改用锚定项保持可见。
+        meta_sort = (self.sort_combo.currentData() or "name") in ("duration", "mtime", "size")
+        self._apply_view(count_suffix=t("main_window.scanning_suffix"),
+                         keep="visible" if meta_sort else "offset")
         elapsed_ms = (time.perf_counter() - started) * 1000
         self._stream_timer.setInterval(
             int(min(self.STREAM_MAX_INTERVAL, max(self.STREAM_MIN_INTERVAL, elapsed_ms * 3)))
         )
 
-    def _apply_view(self, count_suffix: str = "") -> None:
+    def _apply_view(self, count_suffix: str = "", keep: str = "anchor") -> None:
         flags: set[str] = set()
         if self.chk_image.isChecked():
             flags.add("image")
@@ -1933,8 +1994,24 @@ class MainWindow(QMainWindow):
         keep_path = None
         if 0 <= keep_row < len(self.model.items):
             keep_path = self.model.items[keep_row].path
-        self.model.set_items(items)
-        self._restore_scroll_pos()
+        # keep="anchor"（默认，用户主动改排序/筛选/搜索）：同集合重排，锚定
+        # 视口首项并滚到它的新位置——正在看的缩略图不会被"刷走"，也不再
+        # 滚回顶部。keep="visible"（meta 回填/时长排序的自动重排）：锚定项
+        # 保持可见即可（EnsureVisible 最小滚动）——对齐视口顶会每批跳一次，
+        # 像素偏移会内容大换血。keep="offset"（流式增量）：内容增长，保持
+        # 像素偏移。换文件夹时 model 已被 set_folder 清空 → 走 else
+        # （回顶部+记忆位置）。
+        if keep == "anchor" and self.tiles is not None \
+                and self.model.items and items:
+            self.tiles.set_items_keep_scroll(items)
+        elif keep == "visible" and self.tiles is not None \
+                and self.model.items and items:
+            self.tiles.set_items_keep_anchor_visible(items)
+        elif keep == "offset" and self.tiles is not None and items:
+            self.tiles.set_items_keep_offset(items)
+        else:
+            self.model.set_items(items)
+            self._restore_scroll_pos()
         n_img = sum(1 for i in items if not i.is_video)
         self.status_count.setText(
             t("main_window.item_count").format(
