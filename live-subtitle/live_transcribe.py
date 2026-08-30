@@ -21,6 +21,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from asr_engines import audio_stream_start
 from ollama_service import ensure_ollama
 from translate_service import Translator
 
@@ -149,6 +150,12 @@ def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0,
     try:
         audio_stream = container.streams.audio[0]
         start_seconds = max(0.0, seek - 2.0)  # 早 2s 起解，给 VAD 留上下文
+        # 音频流首帧在媒体时间轴上的时刻（MP4 edit list / TS 起始 PTS 等会使
+        # 其非 0）：早于它的媒体区间没有音频可解，seek 只能落到首帧。
+        first_media = (
+            0.0 if audio_stream.start_time is None
+            else float(audio_stream.start_time * audio_stream.time_base)
+        )
         tb = float(audio_stream.time_base or av.time_base)
         container.seek(int(start_seconds / tb), stream=audio_stream)
         frames = container.decode(audio_stream)
@@ -172,7 +179,11 @@ def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0,
 
     audio = np.frombuffer(raw.getbuffer(), dtype=dtype or np.int16)
     audio = audio.astype(np.float32) / 32768.0
-    keep_from = int((seek - start_seconds) * 16000)
+    # 裁剪前导：解码实际从 max(start_seconds, first_media) 起（见上 first_media），
+    # 而非臆想的 start_seconds——否则首帧晚于 start_seconds 时会多裁掉缓冲区内
+    # 的真实音频，且把返回结果错标成"从 seek 起"。
+    actual_start = max(start_seconds, first_media)
+    keep_from = int((seek - actual_start) * 16000)
     if keep_from > 0:
         audio = audio[keep_from:]
     return audio
@@ -589,15 +600,23 @@ def main() -> None:
         import asr_engines
 
         audio = decode_audio(str(media), sampling_rate=16000)
+        audio_off = audio_stream_start(media)  # 缓存行存媒体时间，命中即用
+        prefetch_lang = args.lang or "auto"
+        if prefetch_lang == "auto" and args.model == "qwen":
+            # 预转写也是全片离线任务：先探测主导语言（同 _generate_srt）
+            dom = asr_engines.detect_dominant_language(model, vad, audio,
+                                                       status=status)
+            if dom:
+                prefetch_lang = dom
         rows: list[tuple[float, float, str]] = []
         for seg_start, seg_end, text in asr_engines.stream_transcribe(
-                model, vad, args.model, audio, args.lang or "auto"):
+                model, vad, args.model, audio, prefetch_lang):
             # 新任务到来（cancel_generation 前进）即放弃，不缓存半成品
             if cancel_generation > generation:
                 status("PREFETCH_CANCELLED")
                 return
             if text:
-                rows.append((seg_start, seg_end, text))
+                rows.append((seg_start + audio_off, seg_end + audio_off, text))
         _prefetch["key"] = key
         _prefetch["rows"] = rows
         status(f"PREFETCH_DONE {media.name} {len(rows)} 句 "
@@ -627,8 +646,18 @@ def main() -> None:
             import asr_engines
 
             audio = decode_audio(str(media), sampling_rate=16000)
+            audio_off = audio_stream_start(media)  # 缓冲区首样本≠媒体 0 时补差
             duration = max(1.0, len(audio) / 16000.0)
             lang_note = args.lang or "auto"
+            if lang_note == "auto" and args.model == "qwen":
+                # SRT 是离线任务全片在手：先抽样探测主导语言再全文转写，
+                # 不赌逐段顺序锁（开场杂乱/快节奏对白的短段误判会把锁带偏，
+                # 实测日语片第 8 段锁 zh 后全片汉字噪音）
+                dom = asr_engines.detect_dominant_language(
+                    model, vad, audio,
+                    status=lambda m: _job_status(job, m))
+                if dom:
+                    lang_note = dom
             last_pct = -10
             for seg_start, seg_end, text in asr_engines.stream_transcribe(
                     model, vad, args.model, audio, lang_note):
@@ -636,13 +665,14 @@ def main() -> None:
                     _job_status(job, "SRT_CANCELLED")
                     return
                 if text:
-                    raw_rows.append((seg_start, seg_end, text))
+                    raw_rows.append((seg_start + audio_off, seg_end + audio_off, text))
                     # 识别进度按语音位置推进（每 5% 报一次，避免刷屏）
                     pct = int(seg_end / duration * 100) // 5 * 5
                     if pct > last_pct:
                         last_pct = pct
                         _job_status(job, f"SRT_PROGRESS 识别 {min(pct, 100)}%")
         else:
+            audio_off = audio_stream_start(media)  # whisper 同样基于解码缓冲区起点
             segments, info = model.transcribe(
                 str(media), language=args.lang or None, beam_size=5,
                 vad_filter=True, word_timestamps=True,
@@ -655,7 +685,8 @@ def main() -> None:
                     return
                 text = (segment.text or "").strip()
                 if text:
-                    raw_rows.append((segment.start, segment.end, text))
+                    raw_rows.append((segment.start + audio_off,
+                                     segment.end + audio_off, text))
                 pct = int(segment.end / total * 100) // 5 * 5
                 if pct > last_pct:
                     last_pct = pct
@@ -817,6 +848,7 @@ def main() -> None:
                     except queue.Full:
                         pass
 
+        audio_off = audio_stream_start(media)
         if args.model in TORCH_ENGINES:
             # qwen / sensevoice：VAD 切段流式转写，时间戳为段落真实时间。
             # seek 时从目标位置就近解码（av 容器 seek），不再全量解码整个
@@ -835,8 +867,8 @@ def main() -> None:
                         if cancel_generation > generation:
                             status("切换媒体，中断当前转写 ...")
                             return
-                        _emit(seek + piece_start, seek + piece_end, piece_text,
-                              block=True)
+                        # 缓存行已存媒体时间（_prefetch_job 加过 audio_off）
+                        _emit(piece_start, piece_end, piece_text, block=True)
                     if translator is not None:
                         # 尾部译文随任务收尾写完，不留给下一代次；有新任务在等就让路
                         _drain_translations(generation=generation)
@@ -867,13 +899,105 @@ def main() -> None:
                 status(f"TASK_DONE {generation}")
                 return
             status(f"{args.model} 引擎转写中 ...")
-            for piece_start, piece_end, piece_text in asr_engines.stream_transcribe(
-                    model, vad, args.model, audio, args.lang or "auto"):
-                if cancel_generation > generation:
-                    status("切换媒体，中断当前转写 ...")
+
+            # 延迟探测+精准重跑：逐段转写照常出字幕，同时记录每个 auto
+            # 段的检测结果 (start, end, lang)。攒够 LANG_PROBE_ROWS 个
+            # "有意义内容行"（≥LANG_PROBE_MIN_CHARS 实义字符——嘈杂/短句
+            # 区没有语言判定价值，不触发）后做一次全片抽样探测，得到
+            # 主导语言 dom。然后：
+            # - dom != 顺序锁（锁错）：锁生效后被强制解码的段全被带偏，
+            #   从任务起点整体重跑（用 dom）。
+            # - dom == 顺序锁（锁对）：只重跑"auto 段中检测语言≠dom 的
+            #   短段"——短段误判修正；长段检测可信（真实多语言，保留）。
+            # LANG_REWRITE 行通知播放器清对应区间的行，引擎逐区间用 dom
+            # 强制重转，新行以相同时间戳重新覆盖。
+            class _LangRewrite(Exception):
+                def __init__(self, ranges: list[tuple[float, float]], lang: str):
+                    super().__init__()
+                    self.ranges = ranges
+                    self.lang = lang
+
+            seg_records: list[tuple[float, float, str]] = []
+            probed = [False]
+            content_rows = [0]
+            dom_lang: list[str | None] = [None]
+
+            def _seg_sink(s, e, code):
+                seg_records.append((s, e, code))
+
+            def _merge_ranges(spans: list[tuple[float, float]],
+                              gap: float = 1.0) -> list[tuple[float, float]]:
+                if not spans:
+                    return []
+                spans = sorted(spans)
+                merged = [list(spans[0])]
+                for a, b in spans[1:]:
+                    if a <= merged[-1][1] + gap:
+                        merged[-1][1] = max(merged[-1][1], b)
+                    else:
+                        merged.append([a, b])
+                return [(a, b) for a, b in merged]
+
+            def _maybe_probe(row_text: str, row_start: float,
+                             cur_pos: float) -> None:
+                if probed[0] or args.model != "qwen" \
+                        or (args.lang or "auto") != "auto":
                     return
-                if piece_text:
-                    _emit(seek + piece_start, seek + piece_end, piece_text)
+                import re as _re
+
+                meaningful = len(_re.sub(r"[\s\W]+", "", row_text))
+                if meaningful < asr_engines.LANG_PROBE_MIN_CHARS:
+                    return
+                content_rows[0] += 1
+                if content_rows[0] < asr_engines.LANG_PROBE_ROWS:
+                    return
+                probed[0] = True
+                dom = asr_engines.detect_dominant_language(
+                    model, vad, audio, status=status)
+                if not dom:
+                    return
+                dom_lang[0] = dom
+                # 探测/重跑只在【本任务音频】内做（见上方注释：seek 任务
+                # 音频不含片头，整体重跑会清掉别的任务的正确行且无法回填）
+                mis = [(s, e) for s, e, c in seg_records
+                       if c != dom
+                       and (e - s) < asr_engines.LOCK_MIN_SECS]
+                ranges = _merge_ranges(mis)
+                if not ranges:
+                    return
+                total_bad = sum(b - a for a, b in ranges)
+                status(f"LANG_REWRITE {dom};"
+                       + ";".join(f"{a:.1f}-{b:.1f}" for a, b in ranges))
+                status(f"语言改判 {dom}：重跑 {len(ranges)} 段区间 "
+                       f"共 {total_bad:.0f}s")
+                raise _LangRewrite(ranges, dom)
+
+            try:
+                for piece_start, piece_end, piece_text in asr_engines.stream_transcribe(
+                        model, vad, args.model, audio, args.lang or "auto",
+                        seg_lang_sink=_seg_sink):
+                    if cancel_generation > generation:
+                        status("切换媒体，中断当前转写 ...")
+                        return
+                    if piece_text:
+                        _emit(max(seek, audio_off) + piece_start,
+                              max(seek, audio_off) + piece_end, piece_text)
+                    _maybe_probe(piece_text or "", piece_start, piece_end)
+            except _LangRewrite as rw:
+                # 逐区间用探测语言强制重转；播放器已按 LANG_REWRITE 清掉
+                # 这些区间的行，新行时间戳相同位置自然覆盖
+                base = max(seek, audio_off)
+                for a, b in rw.ranges:
+                    for piece_start, piece_end, piece_text in asr_engines.stream_transcribe(
+                            model, vad, args.model,
+                            audio[int(a * asr_engines.SR):int(b * asr_engines.SR)],
+                            rw.lang):
+                        if cancel_generation > generation:
+                            status("切换媒体，中断当前转写 ...")
+                            return
+                        if piece_text:
+                            _emit(base + a + piece_start,
+                                  base + a + piece_end, piece_text)
             if translator is not None:
                 # 同 whisper 路径：收尾前等译文写出，但有新任务在等就让路
                 _drain_translations(generation=generation)
@@ -893,13 +1017,14 @@ def main() -> None:
                 audio, language=args.lang or None, beam_size=1, vad_filter=True,
                 word_timestamps=True,
             )
-            offset = seek
+            offset = max(seek, audio_off)
         else:
             seg_iter, info = model.transcribe(
                 str(media), language=args.lang or None, beam_size=1, vad_filter=True,
                 word_timestamps=True,
             )
-            offset = 0.0
+            # 片头全量解码：whisper 内部 decode_audio 从音频流首帧起，起点即 audio_off
+            offset = audio_off
         status(f"语言 {info.language} (p={info.language_probability:.2f})，转写中 ...")
 
         for seg in seg_iter:

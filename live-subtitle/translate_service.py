@@ -336,22 +336,26 @@ def merge_fragments(rows: list[tuple[float, float, str]]) -> list[tuple[float, f
 
 def write_srt_file(path, rows: list[tuple[float, float, str, str]],
                    fmt: str = "srt") -> None:
-    """双语字幕写出（译文空则只写原文行）。fmt: srt / vtt / ass。"""
+    """双语字幕写出（译文空则只写原文行）。fmt: srt / vtt / ass。
+
+    时间戳钳到 0：容器负偏移（音频流早于媒体 0 呈现）可能把开头几行推成
+    负数，负时间在 SRT/VTT/ASS 里非法且播放器解析行为不一。
+    """
     def ts_srt(value: float) -> str:
-        h, rest = divmod(int(value * 1000), 3600000)
+        h, rest = divmod(max(0, int(value * 1000)), 3600000)
         m, rest = divmod(rest, 60000)
         sec, ms = divmod(rest, 1000)
         return f"{h:02d}:{m:02d}:{sec:02d},{ms:03d}"
 
     def ts_vtt(value: float) -> str:
-        h, rest = divmod(int(value * 1000), 3600000)
+        h, rest = divmod(max(0, int(value * 1000)), 3600000)
         m, rest = divmod(rest, 60000)
         sec, ms = divmod(rest, 1000)
         return f"{h:02d}:{m:02d}:{sec:02d}.{ms:03d}"
 
     def ts_ass(value: float) -> str:
         # ASS 时间精度 0.01s：H:MM:SS.CC
-        h, rest = divmod(int(value * 100), 360000)
+        h, rest = divmod(max(0, int(value * 100)), 360000)
         m, rest = divmod(rest, 6000)
         sec, cs = divmod(rest, 100)
         return f"{h:d}:{m:02d}:{sec:02d}.{cs:02d}"

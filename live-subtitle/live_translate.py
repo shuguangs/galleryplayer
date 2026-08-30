@@ -141,12 +141,19 @@ def main() -> None:
         from faster_whisper import decode_audio
 
         audio = decode_audio(str(media), sampling_rate=16000)
-        rows = list(asr_engines.stream_transcribe(
-            model, vad, engine, audio, asr["language"] or "auto"))
         lang_note = asr["language"] or "auto"
-        lines: list[tuple[float, float, str]] = list(rows)
+        if lang_note == "auto" and engine == "qwen":
+            # 全片在手：先抽样探测主导语言，不赌逐段顺序锁（短段误判会把
+            # 锁带偏——日语片第 8 段锁 zh 后全片汉字噪音，实测）
+            dom = asr_engines.detect_dominant_language(
+                model, vad, audio, status=print)
+            if dom:
+                lang_note = dom
+        rows = list(asr_engines.stream_transcribe(
+            model, vad, engine, audio, lang_note))
         print(f"      转写完成 {time.perf_counter() - t1:.0f}s，"
-              f"语言 {lang_note}，{len(lines)} 句\n")
+              f"语言 {lang_note}，{len(rows)} 句\n")
+        lines: list[tuple[float, float, str]] = list(rows)
     else:
         segments, info = model.transcribe(
             str(media), language=asr["language"] or None,
@@ -212,6 +219,15 @@ def main() -> None:
         for s in segs:
             lines.extend(clean_rows(
                 [(s.start, s.end, s.text or "", getattr(s, "words", None))]))
+
+    # 容器音频时间轴偏移：解码缓冲区首样本 ≠ 媒体时间 0 时（MP4 edit list /
+    # TS 起始 PTS / MKV codec delay），全部时间戳平移该偏移，SRT 才与播放器
+    # 呈现的时间轴一致，否则字幕整体提早或推迟
+    import asr_engines
+
+    audio_off = asr_engines.audio_stream_start(str(media))
+    if audio_off:
+        lines = [(s + audio_off, e + audio_off, t) for s, e, t in lines]
     print(f"      断句后 {len(lines)} 条\n")
 
     out_lines: list[tuple[float, float, str, str]] = []

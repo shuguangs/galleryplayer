@@ -53,9 +53,25 @@ SV_LANG = {"zh": "zh", "yue": "yue", "en": "en", "ja": "ja", "ko": "ko",
 QWEN_LANGUAGE_TO_CODE = {name: code for code, name in QWEN_LANG.items()
                          if code != "auto"}
 
-# auto 模式下的语言锁：连续 N 个语音段被判为同一语言后，后续段不再重新判语言。
+# auto 模式下的语言锁：以"最近 N 个长段(≥LOCK_MIN_SECS)的多数语言"锁定。
 # 纯英文片里短促的 "Yeah" 曾被重新识别成粤语/日文；锁住后 Qwen 会按 English 解码。
+# 但"连续 N 段同语言就永久锁死"是灾难：日语片里"嗯/诶"类中日同形语气词短段
+# 被误判成 Chinese 连成 3 个，第 8 段起全片按中文解码，输出汉字噪音
+# （实测 I:\ri\③.mp4：#2 Japanese 正确 → #3-8 短句误判 → 锁 zh → 全片废）。
+# 修正后的策略：
+#   - 长段（≥LOCK_MIN_SECS）始终 auto 转写并参与滑动多数投票——长段自识别
+#     可靠，是锁的唯一依据；早期误锁会被后续长段自然纠正（锁可变）。
+#   - 短段用当前多数语言强制解码——短段是误判主源，靠上下文兜底（锁的意义）。
 LANGUAGE_LOCK_SEGMENTS = 3
+LOCK_MIN_SECS = 2.0       # 参与语言投票的最短段长（秒）
+LANGUAGE_VOTE_WINDOW = 5  # 多数投票的滑动窗口（个长段）
+# 实时字幕的延迟探测触发：攒够 LANG_PROBE_ROWS 个"有意义内容行"
+# （去标点后 ≥LANG_PROBE_MIN_CHARS 实义字符）才做一次全量探测——嘈杂/
+# 短句区没有语言判定价值，不触发；内容行出现说明进入对白密集区。
+# 与顺序锁不一致则回溯重写（重转代价约 1/3 实时）。12 行：快节奏
+# 对白 1-2 分钟攒够；纯音乐/嘈杂片不触发（本来也没有可判定的语言）。
+LANG_PROBE_MIN_CHARS = 8
+LANG_PROBE_ROWS = 12
 
 # 字幕段落约束：VAD 单段上限（自然停顿优先；连续无停顿语音才强切——
 # 切点落在词中间会伤识别准确率，故上限放宽到 30s，真实内容几乎不触发）
@@ -161,6 +177,42 @@ def detected_language_code(detected: str) -> str | None:
     return QWEN_LANGUAGE_TO_CODE.get(canonical)
 
 
+def detect_dominant_language(model, vad, audio16k, sample_n: int = 12,
+                             status: Callable[[str], None] | None = None
+                             ) -> str | None:
+    """全片抽样探测主导语言（SRT 生成/预转写等离线场景）。
+
+    顺序语言锁对快节奏对白、开场杂乱音频无解：短段（中日同形语气词）
+    误判连片会把锁带偏（实测 I:\\ri\\③.mp4 前 6 分钟逐段检测 ja/zh/en/yue
+    混杂，旧逻辑第 8 段锁死 zh 全片报废）。离线任务全片在手：均匀抽
+    sample_n 个 ≥LOCK_MIN_SECS 的长段 auto 转写，检测结果严格多数投票。
+    中后段密集对白检测可靠（同片 12 抽 9 票 Japanese）。返回语言码；
+    长段不足/无严格多数时 None（调用方回退顺序投票逻辑）。
+    """
+    from collections import Counter
+
+    segs = [(s, e) for s, e in vad_segments(vad, audio16k)
+            if e - s >= LOCK_MIN_SECS]
+    if not segs:
+        return None
+    step = max(1, len(segs) // sample_n)
+    picked = segs[::step][:sample_n]
+    votes = []
+    for s, e in picked:
+        seg = audio16k[int(s * SR):int(e * SR)]
+        _text, detected = qwen_transcribe(model, seg, None)
+        code = detected_language_code(detected)
+        if code:
+            votes.append(code)
+    if not votes:
+        return None
+    top, n = Counter(votes).most_common(1)[0]
+    if status is not None and votes:
+        detail = ",".join(f"{c}:{v}" for c, v in Counter(votes).most_common())
+        status(f"语言探测: {detail} → {top if n * 2 > len(votes) else '无多数，回退逐段'}")
+    return top if n * 2 > len(votes) else None
+
+
 # ------------------------------------------------------------- sensevoice
 def load_sensevoice(device: str = "cuda", status: Callable[[str], None] = print):
     """返回 funasr AutoModel(SenseVoiceSmall)。"""
@@ -189,6 +241,29 @@ def sv_transcribe(model, audio16k, lang: str | None) -> str:
                          use_itn=True)
     text = re.sub(r"<\|[^|]*\|>", "", res[0].get("text", ""))  # 去 <|zh|> 等标记
     return text.strip()
+
+
+# ------------------------------------------------------- 容器音频时间轴
+def audio_stream_start(media: str) -> float:
+    """音频流在媒体时间轴上的起始偏移（秒），用于把 ASR 时间戳修正到媒体时间。
+
+    faster-whisper 的 decode_audio 把音频流从首帧起按样本序解码并丢弃时间戳，
+    因此 VAD/whisper 报的时间是相对"音频流首帧"的；而播放器按容器时间轴呈现
+    （MP4 edit list、TS 起始 PTS、MKV codec delay 等都会让音频流首帧落在非 0
+    的媒体时刻）。把该偏移加回所有时间戳，SRT/实时字幕才能与画面同步。
+
+    该值可为负（容器裁掉开头音频时）；无音频流/读取失败时返回 0.0。
+    """
+    try:
+        import av
+
+        with av.open(str(media), mode="r", metadata_errors="ignore") as container:
+            stream = next((s for s in container.streams if s.type == "audio"), None)
+            if stream is None or stream.start_time is None:
+                return 0.0
+            return float(stream.start_time * stream.time_base)
+    except Exception:
+        return 0.0
 
 
 # ------------------------------------------------------------------- VAD
@@ -258,12 +333,28 @@ def split_long_row(s: float, e: float, text: str) -> list[tuple[float, float, st
 
 def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
                       block_secs: float = 120.0,
-                      language_lock_after: int | None = LANGUAGE_LOCK_SEGMENTS
+                      language_lock_after: int | None = LANGUAGE_LOCK_SEGMENTS,
+                      lang_observer=None,
+                      seg_lang_sink=None,
                       ) -> Iterator[tuple[float, float, str]]:
     """按 block_secs 块推进（保持实时产出），块内 VAD 切段逐段转写。
 
     yield (start秒, end秒, 文本)，时间相对传入音频起点。
     kind: "qwen" | "sensevoice"
+
+    auto 模式的语言策略（qwen）：
+    - 长段（≥LOCK_MIN_SECS）始终 auto 转写——长段自带足够语境，自识别
+      可靠（实测日语片长段稳定返回 Japanese，即使之前被短句误锁）；
+      其检测结果进入滑动投票窗口，多数语言即当前锁定语言。
+    - 短段用锁定语言强制解码——短段（中日同形语气词"嗯/诶"、单音节
+      "Yeah/자"）是误判主源，靠多数上下文兜底（这正是锁存在的意义）。
+    - 锁随投票窗口滑动更新：早期误锁会被后续长段自然纠正；视频真实
+      换语言（少见）时锁也会跟着走。
+
+    lang_observer(lock_or_none)：锁定语言变化时回调。
+    seg_lang_sink(start, end, code)：每个 **auto 转写段**的检测结果回调
+    （强制解码段的 detected 不可信，不回调）。实时字幕用它记录"哪一段
+    曾被判成什么语言"，探测确立主导语言后只重跑判错的段。
     """
     total = len(audio16k) / SR
     pos = 0.0
@@ -272,8 +363,20 @@ def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
     lock_after = LANGUAGE_LOCK_SEGMENTS if language_lock_after is None \
         else max(0, int(language_lock_after))
     locked_lang: str | None = None
-    streak_lang: str | None = None
-    streak_count = 0
+    votes: list[str] = []
+
+    def _tally() -> str | None:
+        """投票窗口的多数语言（票数 ≥ lock_after 才算锁定）。"""
+        if not votes:
+            return None
+        best: str | None = None
+        best_n = 0
+        for code in set(votes):
+            n = votes.count(code)
+            if n > best_n or (n == best_n and best is None):
+                best, best_n = code, n
+        return best if best_n >= lock_after else None
+
     while pos < total:
         block_end = min(pos + block_secs, total)
         chunk = audio16k[int(pos * SR):int(block_end * SR)]
@@ -282,20 +385,26 @@ def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
             if len(seg) < int(MIN_SEG_SECS * SR):
                 continue
             if kind == "qwen":
-                text, detected = qwen_transcribe(
-                    model, seg, forced_lang or locked_lang)
-                if forced_lang is None and locked_lang is None and lock_after:
-                    detected_code = detected_language_code(detected)
-                    if detected_code is None:
-                        streak_lang = None
-                        streak_count = 0
-                    elif detected_code == streak_lang:
-                        streak_count += 1
-                    else:
-                        streak_lang = detected_code
-                        streak_count = 1
-                    if streak_count >= lock_after:
-                        locked_lang = streak_lang
+                long_seg = (e - s) >= LOCK_MIN_SECS
+                # 长段：auto（可靠自识别）；短段：锁定的多数语言兜底
+                ask = forced_lang if forced_lang is not None \
+                    else (None if long_seg else locked_lang)
+                text, detected = qwen_transcribe(model, seg, ask)
+                if ask is None and seg_lang_sink is not None:
+                    # auto 段的 detected 才可信（强制解码后检测字段无意义）
+                    code = detected_language_code(detected)
+                    if code is not None:
+                        seg_lang_sink(pos + s, pos + e, code)
+                if forced_lang is None and lock_after and long_seg:
+                    code = detected_language_code(detected)
+                    if code is not None:
+                        votes.append(code)
+                        del votes[:-LANGUAGE_VOTE_WINDOW]
+                        new_lock = _tally()
+                        if new_lock != locked_lang:
+                            locked_lang = new_lock
+                            if lang_observer is not None:
+                                lang_observer(new_lock)
             else:
                 text = sv_transcribe(model, seg, lang)
             text = (text or "").strip()
