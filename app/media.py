@@ -571,7 +571,16 @@ def sort_items(
     elif key == "size":
         keyfn = lambda i: i.size  # noqa: E731
     elif key == "duration":
-        keyfn = lambda i: (i.duration if i.duration is not None else -1.0)  # noqa: E731
+        # 时长未知（缩略图还没探到）的项恒排尾部，与升降序无关：升序时
+        # 排最前会让整个开头都是空白时长项（旧 -1.0 哨兵的行为）。
+        # 升序 key=(0/1 哨兵, dur)：None 哨兵 1 恒大 → 尾部；
+        # 降序 key=(0/1 哨兵反转, dur)：reverse 后 None 的 (0,·) 恒小 → 尾部。
+        if desc:
+            keyfn = lambda i: (1 if i.duration is not None else 0,  # noqa: E731
+                               i.duration or 0.0)
+        else:
+            keyfn = lambda i: (0 if i.duration is not None else 1,  # noqa: E731
+                               i.duration or 0.0)
     else:
         keyfn = lambda i: i.sort_key  # noqa: E731
     return sorted(items, key=keyfn, reverse=desc)

@@ -62,7 +62,13 @@ class MediaModel(QAbstractTableModel):
         super().__init__(parent)
         self.items: list[MediaItem] = []
 
-    def set_items(self, items: list[MediaItem]) -> None:
+    def set_items(self, items: list[MediaItem], reset_scroll: bool = True) -> None:
+        """Replace the listing.
+
+        reset_scroll=True: a different folder is on screen — go back to the top.
+        reset_scroll=False: the same folder is being re-sorted — the tile view
+        (via modelReset) anchors on the first visible item instead.
+        """
         self.beginResetModel()
         self.items = items
         self.endResetModel()
@@ -191,12 +197,20 @@ class TileView(QAbstractScrollArea):
         self._current = -1
         self._hover = -1
         self._key_to_row: dict[str, int] = {}
+        # 同文件夹重排（改排序/筛选/流式增量）时的滚动保持：锚定项（同集合
+        # 重排）或像素偏移（流式增量）；锚定项消失时按滚动比例兜底。
+        # 三者皆 None=全新内容（换文件夹），_on_model_reset 回顶部
+        self._anchor_item: MediaItem | None = None
+        self._keep_offset_px: int | None = None
+        self._keep_scroll_ratio: float | None = None
+        self._keep_anchor_visible = False  # 锚定项仅保持可见（meta 回填重排）
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self.viewport().setAutoFillBackground(True)
         self.viewport().setStyleSheet(f"background:{theme.BG_BASE};")
         self.verticalScrollBar().setSingleStep(48)
+        self.model._view_ref = self
         self.model.modelReset.connect(self._on_model_reset)
         self.thumbs.ready.connect(self._on_thumb_ready)
         self.thumbs.meta_ready.connect(self._on_meta_ready)
@@ -243,10 +257,108 @@ class TileView(QAbstractScrollArea):
 
     def _on_model_reset(self) -> None:
         self._key_to_row = {it.cache_key: i for i, it in enumerate(self.model.items)}
+        anchor = self._anchor_item
+        offset = self._keep_offset_px
+        ratio = self._keep_scroll_ratio
+        keep_visible = self._keep_anchor_visible
+        self._anchor_item = None
+        self._keep_offset_px = None
+        self._keep_scroll_ratio = None
+        self._keep_anchor_visible = False
         self._current = -1
         self._hover = -1
+        if anchor is not None:
+            self.relayout()
+            row = self._key_to_row.get(anchor.cache_key)
+            if row is not None:
+                r = self.rect_for(row)
+                bar = self.verticalScrollBar()
+                if keep_visible:
+                    # meta 回填式重排（时长排序下项陆续搬家）：锚定项保持
+                    # 在视口内即可（EnsureVisible 最小滚动）——对齐视口顶
+                    # 会每批跳一次；保持像素偏移则内容大换血。
+                    # 锚定项保留：下一轮 meta 重排继续跟随同一个项。
+                    self._anchor_item = anchor
+                    top, bottom = bar.value(), bar.value() + self.viewport().height()
+                    if r.top() < top:
+                        bar.setValue(max(0, r.top() - TILE_GAP))
+                    elif r.bottom() > bottom:
+                        bar.setValue(r.bottom() - self.viewport().height() + TILE_GAP)
+                else:
+                    # 用户主动改排序/筛选：锚定项对齐到视口顶——正在看的
+                    # 内容保持在原地，其下按新顺序展开。EnsureVisible 语义
+                    # 不够：排序反转时项的位置剧变，最小滚动拉不回视口。
+                    bar.setValue(max(0, r.top() - TILE_GAP))
+                return
+            # 锚定项不在新列表（被筛选掉）：退回比例定位，绝不落在尾部
+            self._scroll_to_ratio(ratio)
+            return
+        if offset is not None:
+            self.relayout()
+            # 流式增量（内容增长）：保持像素偏移，用户在哪就还在哪
+            bar = self.verticalScrollBar()
+            bar.setValue(min(offset, bar.maximum()))
+            return
+        # 全新内容（换文件夹）：回顶部
         self.verticalScrollBar().setValue(0)
         self.relayout()
+
+    def _scroll_to_ratio(self, ratio: float | None) -> None:
+        """按滚动比例恢复位置（锚定项消失时的兜底）。
+
+        绝对偏移在内容变短时会被钳到 maximum（= 跳到尾部，实测大文件夹
+        改排序时出现）；比例保持"看到的大致位置"。
+        """
+        bar = self.verticalScrollBar()
+        if bar.maximum() <= 0:
+            bar.setValue(0)
+            return
+        r = 0.5 if ratio is None else min(1.0, max(0.0, ratio))
+        bar.setValue(int(bar.maximum() * r))
+
+    def _first_visible_item(self) -> MediaItem | None:
+        """视口顶部第一个可见项（重排前的锚点）。"""
+        items = self.model.items
+        if not items:
+            return None
+        off = self.verticalScrollBar().value()
+        for row in self._visible_rows():
+            if 0 <= row < len(items):
+                return items[row]
+        return None
+
+    def set_items_keep_scroll(self, items: list[MediaItem]) -> None:
+        """同集合重排入口：锚定视口首项 → set_items → 滚到它的新位置。
+
+        同时记录滚动比例：锚定项被筛选掉时（改筛选条件）用它兜底——
+        绝对偏移会被钳到新 maximum（= 跳到尾部）。
+        """
+        bar = self.verticalScrollBar()
+        self._keep_scroll_ratio = (
+            bar.value() / bar.maximum()) if bar.maximum() > 0 else 0.0
+        self._anchor_item = self._first_visible_item()
+        self.model.set_items(items, reset_scroll=False)
+
+    def set_items_keep_anchor_visible(self, items: list[MediaItem]) -> None:
+        """meta 回填式重排入口：锚定项保持在视口内（最小滚动）。
+
+        时长排序下 meta 陆续到达会让项大搬家：对齐视口顶会每批跳一次，
+        保持像素偏移则视口内容大换血——两者都不是用户想要的。
+        EnsureVisible 式的最小滚动让"正在看的那个"始终在屏上。
+
+        锚定项沿用既有值（用户切排序时设定的），不随视口重锚——重锚
+        会累积跟随误差，10 轮搬家后锚定项仍可能漂出视口（实测）。
+        """
+        if self._anchor_item is None:
+            self._anchor_item = self._first_visible_item()
+        self._keep_scroll_ratio = None
+        self._keep_anchor_visible = True
+        self.model.set_items(items, reset_scroll=False)
+
+    def set_items_keep_offset(self, items: list[MediaItem]) -> None:
+        """流式增量入口：保持滚动像素偏移 → set_items（内容增长不推走视口）。"""
+        self._keep_offset_px = self.verticalScrollBar().value()
+        self.model.set_items(items, reset_scroll=False)
 
     def relayout(self) -> None:
         items = self.model.items
@@ -395,7 +507,9 @@ class TileView(QAbstractScrollArea):
             for i in rows:
                 it = self.model.items[i]
                 if not it.is_archive:
-                    self.thumbs.request(it)
+                    # priority=行号：视口内自上而下、行内自左向右的阅读
+                    # 顺序渲染（旧"最新优先"会让视口从右下角往上出图）
+                    self.thumbs.request(it, priority=i)
 
     def _paint_tile(self, p: QPainter, rect: QRect, it: MediaItem, row: int) -> None:
         selected = row == self._current
@@ -577,6 +691,9 @@ class TileView(QAbstractScrollArea):
             self.set_columns(self.columns - (1 if e.angleDelta().y() > 0 else -1))
             e.accept()
             return
+        # 用户主动滚动：丢弃 meta 重排的跟随锚——否则下一轮 meta 回填
+        # 重排会把视口拉回用户已离开的位置（滚动被"撤销"）
+        self._anchor_item = None
         super().wheelEvent(e)
 
     def scrollContentsBy(self, dx, dy):

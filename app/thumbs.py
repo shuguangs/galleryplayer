@@ -8,11 +8,11 @@ into the shared metadata cache.
 """
 from __future__ import annotations
 
+import heapq
 import queue
 import threading
 import time
-from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict, deque
 from pathlib import Path
 
 from PIL import Image, ImageOps
@@ -363,10 +363,22 @@ class ThumbnailCache(QObject):
         # this new cache would silently discard every job it is ever given.
         _STOPPING.clear()
         THUMB_DIR.mkdir(parents=True, exist_ok=True)
-        self._img_pool = ThreadPoolExecutor(IMAGE_WORKERS, thread_name_prefix="thumb-img")
-        self._vid_pool = ThreadPoolExecutor(VIDEO_WORKERS, thread_name_prefix="thumb-vid")
+        # 视口优先调度：请求入优先级堆（新者优先），worker 常驻取件。
+        # 视频线程只处理视频项（解码重、单独限流），图片线程处理其余。
+        self._prio_heap: list = []
+        self._prio_seq = 0
+        self._prio_wake = threading.Event()
+        self._closed = False
+        self._workers: list[threading.Thread] = []
         self._memory: "OrderedDict[str, QImage]" = OrderedDict()
         self._pending: set[str] = set()
+        # pending 的入队顺序（FIFO）：队列满时按序驱逐最旧的——滚出视口
+        # 的请求先让位，正在绘制的新视口请求优先进（防优先级反转）
+        self._pending_order: "deque[str]" = deque()
+        # key → 当前生效的最高优先级：同 key 重复请求且优先级更高时，
+        # 堆里追加新条目并把旧条目标记为过期（出堆时惰性丢弃）——paint
+        # 每帧都会请求可见项，滚动后行号变化要能"升级"已排队请求
+        self._key_prio: dict[str, float] = {}
         # key -> attempts. Not a plain blacklist: a file that failed once because a
         # worker was interrupted, or because it was still being copied in, deserves
         # another go. Only after MAX_ATTEMPTS is it given up on for this session.
@@ -377,6 +389,19 @@ class ThumbnailCache(QObject):
         self._mem_lock = threading.Lock()
         self._generation = 0
         self._video_inflight = 0
+
+        # worker 线程必须最后起：它们立刻访问 _lock/_prio_heap 等属性
+        for name, want_video, n in (
+            ("thumb-vid", True, VIDEO_WORKERS),
+            ("thumb-img", False, IMAGE_WORKERS),
+        ):
+            for i in range(n):
+                t = threading.Thread(
+                    target=self._prio_worker_loop,
+                    args=(want_video,), daemon=True,
+                    name=f"{name}-{i}")
+                t.start()
+                self._workers.append(t)
 
         # Reclaim the ~55 MB each idle video grabber holds once a folder is scanned.
         self._idle_sweep = QTimer(self)
@@ -402,8 +427,18 @@ class ThumbnailCache(QObject):
                 self._memory.move_to_end(key)
         return img
 
-    def request(self, item: MediaItem) -> QImage | None:
-        """Return a cached thumbnail immediately, or schedule generation."""
+    def request(self, item: MediaItem, priority: float | None = None) -> QImage | None:
+        """Return a cached thumbnail immediately, or schedule generation.
+
+        priority：渲染优先级，小者先（网格 paint 传行号——视口内从上往下、
+        行内从左往右的阅读顺序）。None=低优先（列表侧栏等非视口请求）。
+        同优先级内新请求优先（快速滚动后停住时视口重请求插队）。
+
+        队列满时驱逐最旧的 pending 项腾位（而不是拒绝新请求）：paint 是
+        请求方，被拒的项只有等下一次重绘——快速滚动时旧视口的请求占满
+        队列，当前视口反而拿不到坑位（优先级反转）。驱逐最旧 = 滚出
+        视口的先让位，正在绘制的（新视口）优先进。
+        """
         key = item.cache_key
         with self._mem_lock:
             cached = self._memory.get(key)
@@ -411,15 +446,43 @@ class ThumbnailCache(QObject):
                 self._memory.move_to_end(key)
         if cached is not None:
             return cached
+        prio = 1e18 if priority is None else priority
         with self._lock:
-            if key in self._pending or self._failed.get(key, 0) >= MAX_ATTEMPTS:
+            if self._failed.get(key, 0) >= MAX_ATTEMPTS:
+                return None
+            if key in self._pending:
+                # 已排队：优先级更高时升级（堆内追加新条目，旧条目出堆时
+                # 惰性丢弃）。paint 每帧重请求可见项——滚动后行号变小
+                # （项进入视口上部）要能插队。
+                if prio < self._key_prio.get(key, 1e18):
+                    self._key_prio[key] = prio
+                    self._prio_seq += 1
+                    heapq.heappush(self._prio_heap,
+                                   (prio, -self._prio_seq, key, item,
+                                    self._generation))
+                    self._prio_wake.set()
                 return None
             if len(self._pending) >= MAX_QUEUED_JOBS:
-                return None
+                # 驱逐仍 pending 的最旧项（按入队序；order 里可能混有已
+                # 完成/已失效的 key，跳过）。被驱逐者已 submit 的工作仍
+                # 会执行并缓存（结果不浪费），但它让出"等待坑位"给正在
+                # 绘制的新视口——重复解码一次是小代价。
+                while len(self._pending) >= MAX_QUEUED_JOBS and self._pending_order:
+                    oldest = self._pending_order.popleft()
+                    if oldest in self._pending:
+                        self._pending.discard(oldest)
+                        self._key_prio.pop(oldest, None)
+                if len(self._pending) >= MAX_QUEUED_JOBS:
+                    return None
             self._pending.add(key)
+            self._pending_order.append(key)
             gen = self._generation
-        pool = self._vid_pool if item.is_video else self._img_pool
-        pool.submit(self._work, item, gen)
+            self._key_prio[key] = prio
+            # (priority, -seq)：priority 小者先（阅读顺序）；同级新者先。
+            self._prio_seq += 1
+            heapq.heappush(self._prio_heap,
+                           (prio, -self._prio_seq, key, item, gen))
+            self._prio_wake.set()
         return None
 
     def invalidate_queue(self) -> None:
@@ -432,7 +495,11 @@ class ThumbnailCache(QObject):
         with self._lock:
             self._generation += 1
             self._pending.clear()
+            self._pending_order.clear()
+            self._key_prio.clear()
             self._failed.clear()
+            # 清空待取件堆：换文件夹后旧请求（即便未被驱逐）不再解码
+            self._prio_heap.clear()
 
     def trim_memory(self, keep: int = MEMORY_CACHE_MAX) -> None:
         """Evict least-recently-used thumbnails down to `keep`."""
@@ -451,12 +518,60 @@ class ThumbnailCache(QObject):
         # Cancel what is queued, let in-flight grabs finish (they are sub-second), then
         # tear the libmpv instances down from here rather than at interpreter exit.
         _STOPPING.set()
-        self._img_pool.shutdown(wait=True, cancel_futures=True)
-        self._vid_pool.shutdown(wait=True, cancel_futures=True)
+        self._closed = True
+        self._prio_wake.set()
+        for t in self._workers:
+            t.join(timeout=2.0)
         shutdown_grabbers()
         metadata.save()
 
     # -- worker -----------------------------------------------------------
+
+    def _prio_worker_loop(self, want_video: bool) -> None:
+        """常驻取件循环：按 (优先级, 新旧) 取请求解码。
+
+        堆序：(priority, -seq)——priority 小者先（视口内自上而下的
+        阅读顺序），同级最新请求优先（快速滚动后停住时视口插队）。
+        视频线程只取视频项（解码重、VIDEO_WORKERS=1 限流），图片线程
+        跳过视频项。
+        """
+        while not self._closed and not _STOPPING.is_set():
+            job = None
+            with self._lock:
+                heap = self._prio_heap
+                while heap and job is None:
+                    # 找堆里类型匹配且 (priority, -seq) 最小的项。
+                    best_i = -1
+                    best_key = None
+                    for i, entry in enumerate(heap):
+                        _prio, _neg_seq, _k, item, _gen = entry
+                        if bool(item.is_video) != want_video:
+                            continue
+                        k = (entry[0], entry[1])
+                        if best_key is None or k < best_key:
+                            best_key = k
+                            best_i = i
+                    if best_i < 0:
+                        break
+                    entry = heap[best_i]
+                    heap[best_i] = heap[-1]
+                    heap.pop()
+                    if best_i < len(heap):
+                        heapq.heapify(heap)
+                    key, item, gen = entry[2], entry[3], entry[4]
+                    # 惰性过期：该 key 已被更高优先级条目替代（或已完成/
+                    # 失效）——丢弃此旧条目，继续取下一个
+                    if key not in self._pending or \
+                            self._key_prio.get(key) != entry[0]:
+                        continue
+                    job = (key, item, gen)
+                if job is None:
+                    self._prio_wake.clear()
+            if job is None:
+                self._prio_wake.wait(timeout=0.5)
+                continue
+            key, item, gen = job
+            self._work(item, gen)
 
     def _disk_path(self, key: str) -> Path:
         return THUMB_DIR / key[:2] / f"{key}.jpg"
@@ -472,6 +587,7 @@ class ThumbnailCache(QObject):
             # video-heavy folder meant minutes of libmpv work for nothing.
             if gen != self._generation:
                 self._pending.discard(key)
+                self._key_prio.pop(key, None)
                 return
         if item.is_video:
             with self._lock:
@@ -541,12 +657,14 @@ class ThumbnailCache(QObject):
             if img is None:
                 with self._lock:
                     self._pending.discard(key)
+                    self._key_prio.pop(key, None)
                     self._failed[key] = self._failed.get(key, 0) + 1
                 return
             qimg = pil_to_qimage(img)
             with self._lock:
                 stale = gen != self._generation
                 self._pending.discard(key)
+                self._key_prio.pop(key, None)
             self._store(key, qimg)
             if meta_found:
                 self.meta_ready.emit(key, (item.duration, item.width, item.height))
@@ -555,6 +673,7 @@ class ThumbnailCache(QObject):
         except Exception:
             with self._lock:
                 self._pending.discard(key)
+                self._key_prio.pop(key, None)
                 self._failed[key] = self._failed.get(key, 0) + 1
 
     def _load_from_disk(self, key: str) -> Image.Image | None:

@@ -75,6 +75,33 @@ class SortItemsTests(unittest.TestCase):
         sort_items(items, "name", False)
         self.assertEqual([i.name for i in items], ["b.mp4", "a.mp4"])
 
+    def test_duration_unknown_always_last(self):
+        """时长未知（None）恒排尾部，与升降序无关。
+
+        旧哨兵 -1.0 在升序时把所有空白时长项堆到列表开头——大文件夹
+        切时长排序后满屏空白项；探到时长后它们又搬家（配合 meta 重排
+        是滚动跳跃的帮凶）。
+        """
+        items = [
+            _item("none_a.mp4"), _item("short.mp4"), _item("none_b.mp4"),
+            _item("long.mp4"), _item("mid.mp4"), _item("none_c.mp4"),
+        ]
+        for it in items:
+            if it.name.startswith("none"):
+                it.duration = None
+        by_name = {"short": 10.0, "mid": 60.0, "long": 300.0}
+        for it in items:
+            base = it.name.split(".")[0]
+            if base in by_name:
+                it.duration = by_name[base]
+
+        asc = [i.name for i in sort_items(items, "duration", False)]
+        self.assertEqual(asc, ["short.mp4", "mid.mp4", "long.mp4",
+                               "none_a.mp4", "none_b.mp4", "none_c.mp4"])
+        desc = [i.name for i in sort_items(items, "duration", True)]
+        self.assertEqual(desc, ["long.mp4", "mid.mp4", "short.mp4",
+                                "none_a.mp4", "none_b.mp4", "none_c.mp4"])
+
 
 if __name__ == "__main__":
     unittest.main()
