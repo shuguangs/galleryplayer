@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, QRect, QSize, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QLayout,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -28,6 +29,73 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class FlowLayout(QLayout):
+    """按钮空间不足时自动换行，避免窗口缩窄后控件被吞掉。"""
+
+    def __init__(self, parent=None, margin=0, spacing=6):
+        super().__init__(parent)
+        self._items = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):
+        return Qt.Orientations()
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(),
+                            margins.top() + margins.bottom())
+
+    def _do_layout(self, rect, test_only):
+        margins = self.contentsMargins()
+        area = rect.adjusted(margins.left(), margins.top(),
+                             -margins.right(), -margins.bottom())
+        x, y = area.x(), area.y()
+        line_height = 0
+        spacing = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + spacing
+            if line_height and next_x - spacing > area.right() + 1:
+                x = area.x()
+                y += line_height + spacing
+                next_x = x + hint.width() + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
 
 from . import assoc, theme
 from .config import (
@@ -673,22 +741,23 @@ class SettingsDialog(QDialog):
             f" font-family:Consolas; font-size:11px; }}"
         )
         dg.addWidget(self.live_diag_log, 2, 0, 1, 4)
+        diag_buttons = QWidget()
+        diag_buttons_layout = FlowLayout(diag_buttons, spacing=6)
         btn_diag_refresh = QPushButton(t("settings.live_diagnostics_refresh"))
         btn_diag_refresh.setFocusPolicy(Qt.NoFocus)
         btn_diag_refresh.clicked.connect(self._refresh_live_diagnostics)
-        dg.addWidget(btn_diag_refresh, 3, 0)
+        diag_buttons_layout.addWidget(btn_diag_refresh)
         btn_diag_restart = QPushButton(t("settings.live_diagnostics_restart"))
         btn_diag_restart.setFocusPolicy(Qt.NoFocus)
         btn_diag_restart.clicked.connect(self._restart_live_engine)
-        dg.addWidget(btn_diag_restart, 3, 1)
+        diag_buttons_layout.addWidget(btn_diag_restart)
+        dg.addWidget(diag_buttons, 3, 0, 1, 4)
         root.addWidget(diag_grp)
         self._refresh_live_diagnostics()
         # ---- 文件关联
         root.addWidget(_section(t("settings.section_assoc")))
         assoc_box = QWidget()
-        ab = QHBoxLayout(assoc_box)
-        ab.setContentsMargins(0, 0, 0, 0)
-        ab.setSpacing(8)
+        ab = FlowLayout(assoc_box, spacing=8)
         self.btn_assoc = QPushButton(t("settings.assoc_register"))
         self.btn_assoc.setFocusPolicy(Qt.NoFocus)
         self.btn_assoc.clicked.connect(self._register_assoc)
@@ -697,7 +766,6 @@ class SettingsDialog(QDialog):
         self.btn_unassoc.setFocusPolicy(Qt.NoFocus)
         self.btn_unassoc.clicked.connect(self._unregister_assoc)
         ab.addWidget(self.btn_unassoc)
-        ab.addStretch(1)
         root.addWidget(assoc_box)
         self.assoc_hint = QLabel("")
         self.assoc_hint.setWordWrap(True)
@@ -980,9 +1048,10 @@ class SettingsDialog(QDialog):
     _WHEEL_CLASSES = None  # 延迟解析，避免模块顶部额外导入
 
     def _install_wheel_filter(self) -> None:
-        """给全部下拉/滑动/步进控件装滚轮过滤（幂等，showEvent 时重复执行）。"""
+        """禁止设置控件响应滚轮；两个只读上下文窗口保持原生滚动。"""
         from PySide6.QtWidgets import (
             QAbstractSlider,
+            QAbstractButton,
             QComboBox,
             QDoubleSpinBox,
             QSpinBox,
@@ -990,7 +1059,8 @@ class SettingsDialog(QDialog):
 
         if SettingsDialog._WHEEL_CLASSES is None:
             SettingsDialog._WHEEL_CLASSES = (
-                QComboBox, QSlider, QSpinBox, QDoubleSpinBox, QAbstractSlider,
+                QAbstractButton, QComboBox, QSlider, QSpinBox,
+                QDoubleSpinBox, QAbstractSlider,
             )
         seen = set()
         for cls in SettingsDialog._WHEEL_CLASSES:
@@ -1010,9 +1080,7 @@ class SettingsDialog(QDialog):
 
         if event.type() == QEvent.Wheel and SettingsDialog._WHEEL_CLASSES \
                 and isinstance(watched, SettingsDialog._WHEEL_CLASSES):
-            # 滚轮一律只滚设置页，控件自身绝不响应。注意不能把原事件对象
-            # sendEvent 重入投递（PySide6 下会直接闪退），改为按滚轮增量
-            # 直接拨动滚动条
+            # 控件自身不响应滚轮，但设置页仍应正常滚动。
             scroll = getattr(self, "_scroll_area", None)
             if scroll is not None:
                 delta = event.angleDelta().y() or event.angleDelta().x()

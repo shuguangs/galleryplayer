@@ -57,7 +57,11 @@ desktop.ini
 
 # AI 工具本地配置
 .zcode/
+.mimosa/
+.skill-search-tmp/
+.code_map_validation.json
 GIT_COMMIT_INFO.md
 # ---------- 私有翻译场景（仅本地，不上传） ----------
 live-subtitle/scenarios/nsfw_gay.json
 live-subtitle/scenarios/lingyu.json
+CODE_MAP.md
