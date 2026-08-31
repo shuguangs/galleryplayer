@@ -57,7 +57,7 @@ QWEN_LANGUAGE_TO_CODE = {name: code for code, name in QWEN_LANG.items()
 # 纯英文片里短促的 "Yeah" 曾被重新识别成粤语/日文；锁住后 Qwen 会按 English 解码。
 # 但"连续 N 段同语言就永久锁死"是灾难：日语片里"嗯/诶"类中日同形语气词短段
 # 被误判成 Chinese 连成 3 个，第 8 段起全片按中文解码，输出汉字噪音
-# （实测 I:\ri\③.mp4：#2 Japanese 正确 → #3-8 短句误判 → 锁 zh → 全片废）。
+# （实测 测试样本视频：#2 Japanese 正确 → #3-8 短句误判 → 锁 zh → 全片废）。
 # 修正后的策略：
 #   - 长段（≥LOCK_MIN_SECS）始终 auto 转写并参与滑动多数投票——长段自识别
 #     可靠，是锁的唯一依据；早期误锁会被后续长段自然纠正（锁可变）。
@@ -183,7 +183,7 @@ def detect_dominant_language(model, vad, audio16k, sample_n: int = 12,
     """全片抽样探测主导语言（SRT 生成/预转写等离线场景）。
 
     顺序语言锁对快节奏对白、开场杂乱音频无解：短段（中日同形语气词）
-    误判连片会把锁带偏（实测 I:\\ri\\③.mp4 前 6 分钟逐段检测 ja/zh/en/yue
+    误判连片会把锁带偏（实测 多语言测试样本 前 6 分钟逐段检测 ja/zh/en/yue
     混杂，旧逻辑第 8 段锁死 zh 全片报废）。离线任务全片在手：均匀抽
     sample_n 个 ≥LOCK_MIN_SECS 的长段 auto 转写，检测结果严格多数投票。
     中后段密集对白检测可靠（同片 12 抽 9 票 Japanese）。返回语言码；

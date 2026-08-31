@@ -69,6 +69,9 @@ class MediaModel(QAbstractTableModel):
         reset_scroll=False: the same folder is being re-sorted — the tile view
         (via modelReset) anchors on the first visible item instead.
         """
+        view = getattr(self, "_view_ref", None)
+        if view is not None:
+            view._snapshot_selection()  # reset 后按路径重定位选中行
         self.beginResetModel()
         self.items = items
         self.endResetModel()
@@ -179,6 +182,8 @@ class TileView(QAbstractScrollArea):
     activatedRow = Signal(int)
     currentRowChanged = Signal(int)
     contextRow = Signal(int, QPoint)   # row (-1 for empty space), global position
+    selectionChanged = Signal()        # 多选集合变化（Ctrl/Shift/框选）
+    rubberBandChanged = Signal(QRect)  # 框选矩形变化（viewport 坐标，空=结束）
 
     def __init__(self, model: MediaModel, thumbs: ThumbnailCache, parent=None) -> None:
         super().__init__(parent)
@@ -204,6 +209,16 @@ class TileView(QAbstractScrollArea):
         self._keep_offset_px: int | None = None
         self._keep_scroll_ratio: float | None = None
         self._keep_anchor_visible = False  # 锚定项仅保持可见（meta 回填重排）
+        # ready/meta 潮的合并重绘/重排标志（见 _schedule_repaint）
+        self._repaint_pending = False
+        self._relayout_pending = False
+        # 多选（桌面语义）：Ctrl 点选切换 / Shift 范围 / 空白拖拽框选
+        self._selected_rows: set[int] = set()
+        self._selected_paths: set[str] | None = None  # reset 前的路径快照
+        self._selection_anchor = -1      # Shift 范围选的锚行
+        self._rubber_origin: QPoint | None = None   # 框选起点（viewport 坐标）
+        self._rubber_rect: QRect | None = None      # 当前框选矩形
+        self._drag_press_row = -1        # 按下时命中的行（-1=空白，可框选）
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -257,6 +272,13 @@ class TileView(QAbstractScrollArea):
 
     def _on_model_reset(self) -> None:
         self._key_to_row = {it.cache_key: i for i, it in enumerate(self.model.items)}
+        # 重排后行号失效：set_items 前快照的路径在新区重定位
+        if self._selected_paths is not None:
+            self._selected_rows = {
+                i for i, it in enumerate(self.model.items)
+                if str(it.path) in self._selected_paths
+            }
+            self._selected_paths = None
         anchor = self._anchor_item
         offset = self._keep_offset_px
         ratio = self._keep_scroll_ratio
@@ -326,6 +348,17 @@ class TileView(QAbstractScrollArea):
             if 0 <= row < len(items):
                 return items[row]
         return None
+
+    def _snapshot_selection(self) -> None:
+        """model reset 前快照选中项路径（reset 后按路径重定位行号）。"""
+        if self._selected_rows:
+            items = self.model.items
+            self._selected_paths = {
+                str(items[r].path) for r in self._selected_rows
+                if 0 <= r < len(items)
+            }
+        else:
+            self._selected_paths = set()
 
     def set_items_keep_scroll(self, items: list[MediaItem]) -> None:
         """同集合重排入口：锚定视口首项 → set_items → 滚到它的新位置。
@@ -466,7 +499,7 @@ class TileView(QAbstractScrollArea):
 
     def _on_thumb_ready(self, key: str, _img: QImage) -> None:
         if key in self._key_to_row:
-            self.viewport().update()
+            self._schedule_repaint()
 
     def _on_meta_ready(self, key: str, meta) -> None:
         row = self._key_to_row.get(key)
@@ -475,9 +508,37 @@ class TileView(QAbstractScrollArea):
         it = self.model.items[row]
         it.duration, it.width, it.height = meta
         if self.mode == "waterfall":
-            self.relayout()
+            self._schedule_relayout()
         else:
+            self._schedule_repaint()
+
+    def _schedule_repaint(self) -> None:
+        """合并重绘：首批缩略图 ready 潮（几十个/秒）逐个触发全视口
+        update 曾造成 1.3-1.5s 的连续重绘峰刺（冷缓存实测）。100ms
+        合并窗口内多次 ready 只绘一次。"""
+        if self._repaint_pending:
+            return
+        self._repaint_pending = True
+        from PySide6.QtCore import QTimer
+
+        def _do():
+            self._repaint_pending = False
             self.viewport().update()
+
+        QTimer.singleShot(100, _do)
+
+    def _schedule_relayout(self) -> None:
+        """waterfall 的 meta 合并重排（同 _schedule_repaint 理由）。"""
+        if self._relayout_pending:
+            return
+        self._relayout_pending = True
+        from PySide6.QtCore import QTimer
+
+        def _do():
+            self._relayout_pending = False
+            self.relayout()
+
+        QTimer.singleShot(150, _do)
 
     def paintEvent(self, e):
         p = QPainter(self.viewport())
@@ -502,6 +563,13 @@ class TileView(QAbstractScrollArea):
             it = self.model.items[i]
             rect = self.rect_for(i).translated(0, -off)
             self._paint_tile(p, rect, it, i)
+        # 框选橡皮筋（半透明填充 + 边框）
+        if self._rubber_rect is not None and not self._rubber_rect.isNull():
+            p.fillRect(self._rubber_rect, QColor(90, 160, 255, 40))
+            pen = QPen(QColor(90, 160, 255, 200))
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.drawRect(self._rubber_rect)
         # keep decode work focused on what the user can actually see
         if not self.thumbs_suspended:
             for i in rows:
@@ -512,7 +580,12 @@ class TileView(QAbstractScrollArea):
                     self.thumbs.request(it, priority=i)
 
     def _paint_tile(self, p: QPainter, rect: QRect, it: MediaItem, row: int) -> None:
-        selected = row == self._current
+        selected = row == self._current or row in self._selected_rows
+        # 框选拖拽中：矩形相交的行临时高亮（预览）
+        if self._rubber_rect is not None and not selected:
+            off = self.verticalScrollBar().value()
+            if rect.intersects(self._rubber_rect.translated(0, off)):
+                selected = True
         hovered = row == self._hover
 
         path = QPainterPath()
@@ -626,7 +699,12 @@ class TileView(QAbstractScrollArea):
     # -- interaction ------------------------------------------------------
 
     def mouseMoveEvent(self, e):
-        row = self._row_at(e.position().toPoint())
+        pos = e.position().toPoint()
+        # 框选拖拽进行中：扩展矩形 + 自动滚动
+        if self._rubber_origin is not None:
+            self._update_rubber(pos)
+            return
+        row = self._row_at(pos)
         if row != self._hover:
             self._hover = row
             self.setToolTip(str(self.model.items[row].path) if row >= 0 else "")
@@ -638,10 +716,110 @@ class TileView(QAbstractScrollArea):
             self.viewport().update()
 
     def mousePressEvent(self, e):
-        row = self._row_at(e.position().toPoint())
+        pos = e.position().toPoint()
+        row = self._row_at(pos)
+        mods = e.modifiers()
+        if e.button() == Qt.LeftButton:
+            if mods & Qt.ControlModifier:
+                # Ctrl 点选：切换该项的选中态（再次点击=反选）。若反选的是
+                # current 行，current 移到剩余选中项的第一个（无则 -1）——
+                # selected_rows() 恒并入 current，不移走会让被反选的项
+                # 永远留在选区里（普通单击选中的项无法反选，实测 bug）
+                if row >= 0:
+                    if row in self._selected_rows:
+                        self._selected_rows.discard(row)
+                        if row == self._current:
+                            rest = sorted(self._selected_rows)
+                            self._current = rest[0] if rest else -1
+                            self.currentRowChanged.emit(self._current)
+                    else:
+                        self._selected_rows.add(row)
+                    self._selection_anchor = row
+                    self.selectionChanged.emit()
+                    self.viewport().update()
+                self.setFocus()
+                return
+            if mods & Qt.ShiftModifier:
+                # Shift 范围选：锚行到当前行（无锚则以 current 为锚）
+                if row >= 0:
+                    anchor = self._selection_anchor if self._selection_anchor >= 0 \
+                        else max(0, self._current)
+                    lo, hi = min(anchor, row), max(anchor, row)
+                    self._selected_rows = set(range(lo, hi + 1))
+                    self.selectionChanged.emit()
+                    self.set_current_row(row, scroll=False)
+                self.setFocus()
+                return
+            if row < 0:
+                # 空白处按下：开始框选
+                self._rubber_origin = pos
+                self._rubber_rect = QRect(pos, pos)
+                self._drag_press_row = -1
+                self.setFocus()
+                return
         if row >= 0:
             self.set_current_row(row, scroll=False)
+            # 单击（无修饰键）重置选区为仅此项——current 与选区一致：
+            # 之后 Ctrl 点其他项再反选时，普通点击选中的项也能被反选/
+            # 出现在多选菜单里（旧实现只进 current 不进选区，首个点击的
+            # 项永远排除在多选外）
+            if e.button() == Qt.LeftButton and not (mods & (Qt.ControlModifier | Qt.ShiftModifier)):
+                self._selected_rows = {row}
+                self.selectionChanged.emit()
+            self._selection_anchor = row
         self.setFocus()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and self._rubber_origin is not None:
+            rect = self._rubber_rect or QRect(self._rubber_origin, e.position().toPoint())
+            self._rubber_origin = None
+            self._rubber_rect = None
+            # 命中矩形内所有行（内容坐标）
+            off = self.verticalScrollBar().value()
+            content_rect = rect.translated(0, off)
+            hit = set()
+            for i, it in enumerate(self.model.items):
+                r = self.rect_for(i)
+                if r.intersects(content_rect):
+                    hit.add(i)
+            if e.modifiers() & Qt.ControlModifier:
+                # Ctrl+框选：并入现有选区
+                self._selected_rows |= hit
+            else:
+                self._selected_rows = hit
+            self.selectionChanged.emit()
+            self.rubberBandChanged.emit(QRect())
+            self.viewport().update()
+            return
+        super().mouseReleaseEvent(e)
+
+    def _update_rubber(self, pos: QPoint) -> None:
+        """扩展框选矩形；拖到视口上下边缘时自动滚动。"""
+        assert self._rubber_origin is not None
+        # 自动滚动：指针贴近视口上下边
+        vp = self.viewport().rect()
+        edge = 24
+        bar = self.verticalScrollBar()
+        if pos.y() < vp.top() + edge:
+            bar.setValue(bar.value() - 48)
+        elif pos.y() > vp.bottom() - edge:
+            bar.setValue(bar.value() + 48)
+        self._rubber_rect = QRect(self._rubber_origin, pos).normalized()
+        # 实时高亮预览：矩形相交行临时并入显示
+        self.viewport().update()
+
+    def selected_rows(self) -> list[int]:
+        """当前多选行（current 恒包含——单击即选中语义）。"""
+        rows = {r for r in self._selected_rows if 0 <= r < len(self.model.items)}
+        if self._current >= 0:
+            rows.add(self._current)
+        return sorted(rows)
+
+    def clear_selection(self) -> None:
+        self._selected_rows.clear()
+        self._selection_anchor = -1
+        self.selectionChanged.emit()
+        self.viewport().update()
 
     def mouseDoubleClickEvent(self, e):
         row = self._row_at(e.position().toPoint())

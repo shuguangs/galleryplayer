@@ -251,6 +251,25 @@ class MainWindow(QMainWindow):
             lambda: self._apply_view(keep="visible"))
         self.thumbs.meta_ready.connect(self._on_meta_ready)
 
+        # 定时归位：元数据排序（时长/大小/时间）下，新探到数据的项
+        # 累积在错误位置（如时长 None 区）——每 RESORT_INTERVAL 秒做一次
+        # keep="anchor" 的完整重排，让它们回到应在的排序位置。锚定项=
+        # 当前选中项（无选中则视口首项）：用户看着的内容重排后仍在
+        # 原地，新探到项在其周围归位（用户明确要求的"定时刷新归位"）。
+        self._resort_interval_timer = QTimer(self)
+        self._resort_interval_timer.setInterval(5000)
+        self._resort_interval_timer.timeout.connect(self._periodic_resort)
+        self._meta_dirty = False  # 自上次归位后是否有新 meta 到达
+
+        # 后台预热：扫描 done 后把未缓存的项以低优先级逐批排队解码——
+        # 大文件夹放着不动也能全量加载缩略图/时长（纯按需加载曾让
+        # 48k 文件夹一小时只探到滚过的 5%）。视口请求（priority=行号，
+        # 小值）天然插队在前台，预热不抢用户正在看的。
+        self._warmup_timer = QTimer(self)
+        self._warmup_timer.setInterval(500)
+        self._warmup_timer.timeout.connect(self._warmup_tick)
+        self._warmup_cursor = 0
+
         self._build_ui()
         self._restore_state()
         self._install_shortcuts()
@@ -1591,15 +1610,106 @@ class MainWindow(QMainWindow):
 
     def _on_meta_ready(self, *_args) -> None:
         # duration/aspect just changed; re-sort or re-flow shortly
+        self._meta_dirty = True
         if self.sort_combo.currentData() == "duration":
             self._resort_timer.start()
+
+    def _periodic_resort(self) -> None:
+        """元数据排序下的定时归位：新探到时长/大小的项回到排序位置。
+
+        只锚定视口首项（用户看着的内容）——绝不用"选中项"做锚：正常
+        使用中选中一个项继续下滑浏览，归位若锚定选中项会把视口弹回
+        它的位置（实测体验差）。选中态本身按路径保留，不受重排影响。
+        """
+        if not self._meta_dirty:
+            return
+        sort_key = self.sort_combo.currentData() or "name"
+        if sort_key not in ("duration", "mtime", "size"):
+            self._meta_dirty = False
+            return
+        if self.tiles is None or not self.model.items:
+            return
+        self._meta_dirty = False
+        # keep="anchor" 的锚取视口首项（set_items_keep_scroll 语义）
+        self._apply_view(keep="anchor")
 
     # ------------------------------------------------------- context menus
 
     def _media_menu(self, row: int, global_pos) -> None:
+        # 右键落在选中项上 → 多选菜单；否则先选中该行（桌面语义）
+        tiles = getattr(self, "tiles", None)
+        if tiles is not None and hasattr(tiles, "selected_rows"):
+            sel = tiles.selected_rows()
+            if sel and row in sel and len(sel) > 1:
+                menu = self._build_multi_menu(sel)
+                if menu.actions():
+                    menu.exec(global_pos)
+                return
+            if row >= 0 and row not in sel:
+                tiles.clear_selection()
         menu = self.build_media_menu(row)
         if menu.actions():
             menu.exec(global_pos)
+
+    def _open_selection_playlist(self, rows: tuple) -> None:
+        """多选打开：把选中项作为独立播放列表在播放器中打开。
+
+        单选时退化为普通打开（沿用浏览器全列表+定位，保持断点续播等
+        语义）；多选时列表=仅这 N 项（用户明确圈定的播放范围），从
+        第一个开始播。
+        """
+        items = [self.model.item(r) for r in rows]
+        items = [i for i in items if i is not None and not i.is_archive]
+        if not items:
+            return
+        if len(items) == 1:
+            # 单选：普通打开（全文件夹列表）
+            for i, it in enumerate(self.model.items):
+                if it is items[0]:
+                    self._open_viewer(i)
+                    return
+            return
+        self.ensure_viewer().open_playlist(items, 0)
+
+    def _build_multi_menu(self, rows: list[int]) -> QMenu:
+        """多选右键菜单：批量操作作用于全部选中项。"""
+        menu = QMenu(self)
+        items = [self.model.item(r) for r in rows]
+        items = [i for i in items if i is not None]
+        if not items:
+            return menu
+        paths = [i.path for i in items]
+        n = len(paths)
+
+        menu.addAction(
+            t("main_window.multi_open").format(n=n)).triggered.connect(
+            lambda _=False, r=tuple(rows): self._open_selection_playlist(r))
+        menu.addSeparator()
+        menu.addAction(
+            t("main_window.multi_copy_path").format(n=n)).triggered.connect(
+            lambda _=False, ps=tuple(paths): fileops.copy_to_clipboard(
+                "\n".join(str(p) for p in ps)))
+        menu.addAction(
+            t("main_window.multi_copy_name").format(n=n)).triggered.connect(
+            lambda _=False, ps=tuple(paths): fileops.copy_to_clipboard(
+                "\n".join(p.name for p in ps)))
+        menu.addAction(
+            t("main_window.multi_copy_file").format(n=n)).triggered.connect(
+            lambda _=False, ps=tuple(paths): fileops.copy_files_to_clipboard(list(ps)))
+        menu.addSeparator()
+        video_paths = [p for p in paths if p.suffix.lower() in media.VIDEO_EXTS]
+        if video_paths:
+            menu.addAction(
+                t("main_window.multi_gen_srt").format(n=len(video_paths))
+            ).triggered.connect(
+                lambda _=False, r=tuple(rows):
+                    self._batch_generate_srt([self.model.item(x) for x in r
+                                              if self.model.item(x) is not None]))
+        menu.addSeparator()
+        menu.addAction(
+            t("main_window.multi_recycle").format(n=n)).triggered.connect(
+            lambda _=False, ps=tuple(paths): self._recycle_media(list(ps)))
+        return menu
 
     def build_media_menu(self, row: int) -> QMenu:
         """Right-click menu for the grid / waterfall / details views."""
@@ -1773,6 +1883,12 @@ class MainWindow(QMainWindow):
         self._quiet_scan = quiet
         self.thumbs.invalidate_queue()
         self.thumbs.trim_memory(600)
+        # 换文件夹：预热/归位定时器停（旧文件夹的未完成项已被 invalidate
+        # 清出队列；新文件夹扫描 done 后 _warmup_start 再启动）
+        self._warmup_timer.stop()
+        self._resort_interval_timer.stop()
+        self._warmup_cursor = 0
+        self._meta_dirty = False
         self.status_path.setText(str(folder))
         self.setWindowTitle(t("main_window.title_with_folder").format(folder=folder.name or str(folder)))
         if not quiet:
@@ -1911,6 +2027,10 @@ class MainWindow(QMainWindow):
         ):
             self.viewer.open_playlist(self.model.items, 0)
 
+        # 扫描 done：启动后台预热（低优先级消化全部未缓存项的缩略图/
+        # 时长——大文件夹放着不管也会全量加载；视口请求优先插队）
+        self._warmup_start()
+
         # A file opened from outside (command line on first launch, or forwarded
         # by a second instance to the running one): the player opened instantly
         # with a single-item list; now the folder scan is done, hand it the full
@@ -1990,6 +2110,16 @@ class MainWindow(QMainWindow):
             self._random_seed,
             orders.get(self.folder) if (sort_key == "custom" and self.folder) else None,
         )
+        # meta 回填引发的自动重排（keep=visible）加"结果未变"守卫：预热期
+        # 间持续 meta_ready → 每 700ms 一次全量 set_items+relayout（48k 项
+        # ~100ms/次）让界面持续卡顿（观感"未响应"）。排序键没变时（名称
+        # 排序下 meta 回填不改变顺序）直接跳过——只有时长/大小等元数据
+        # 排序才真正需要重排。
+        if keep == "visible":
+            new_fp = [it.cache_key for it in items]
+            old_fp = [it.cache_key for it in self.model.items]
+            if new_fp == old_fp:
+                return
         keep_row = self.tiles.current_row() if self.tiles is not None else -1
         keep_path = None
         if 0 <= keep_row < len(self.model.items):
@@ -2023,6 +2153,68 @@ class MainWindow(QMainWindow):
                 if it.path == keep_path:
                     self.tiles.set_current_row(i)
                     break
+
+    # ------------------------------------------------------------ 后台预热
+    WARMUP_BATCH = 8
+    WARMUP_FAST_MS = 1000      # 首轮消化（游标未走完）；视频解码 ~1s/个，
+                               # 8 项/批 + 1s 间隔≈全速但不压 GUI（meta
+                               # 风暴由 _resort_timer 700ms 防抖兜住）
+    WARMUP_POLL_MS = 15000     # 轮询模式（首轮走完，等失败重试/新增）
+    WARMUP_DELAY_MS = 2000     # done 后延迟启动：避开 done 首绘 +
+                               # 首批缩略图 ready 的重绘高峰（冷缓存实测
+                               # 该窗口单次卡顿可达 1.3s）
+
+    def _warmup_start(self) -> None:
+        """扫描 done（或列表变化）后启动/重置后台预热。
+
+        延迟 WARMUP_DELAY_MS：done 的首绘 + 首批缩略图 ready 是重绘
+        高峰（冷缓存实测单次卡顿 1.3s），预热避开这 2 秒窗口再进场。
+        归位定时器（元数据排序下的定时刷新）一并启动。
+        """
+        self._warmup_cursor = 0
+        self._warmup_timer.setInterval(self.WARMUP_FAST_MS)
+        self._warmup_timer.stop()
+        if not self._resort_interval_timer.isActive():
+            self._resort_interval_timer.start()
+        QTimer.singleShot(self.WARMUP_DELAY_MS, self._warmup_timer.start)
+
+    def _warmup_tick(self) -> None:
+        """低优先级逐批请求未缓存项的缩略图/时长。
+
+        priority 用大值（1e17）：视口请求（priority=行号，小值）在调度
+        堆里恒排前面——用户滚动时可见项优先，预热只消化余量。request
+        内部判重（内存/磁盘命中或已排队都跳过提交，磁盘命中还会顺带
+        回填 meta），所以这里无需自己查缓存。
+        """
+        items = self.all_items
+        if not items:
+            self._warmup_timer.stop()
+            return
+        n = len(items)
+        cursor = self._warmup_cursor
+        # 轮询模式下从 0 重扫（失败重试/新增项）
+        if cursor >= n:
+            cursor = 0
+        submitted = 0
+        while cursor < n and submitted < self.WARMUP_BATCH:
+            it = items[cursor]
+            cursor += 1
+            if it.is_archive:
+                continue
+            # request 返回 None=已提交解码/已排队；返回 QImage=内存命中
+            # （无需处理）。磁盘缓存命中走 request 内部的 _load_from_disk
+            # + _backfill_metadata 路径，同样提交。
+            before = self.thumbs.peek(it)
+            self.thumbs.request(it, priority=1e17)
+            if before is None:
+                submitted += 1
+        self._warmup_cursor = cursor
+        if cursor >= n:
+            # 本轮走完 → 切慢速轮询（15s 后从 0 重扫：失败项重试、
+            # 扫描期间新发现的文件补探）
+            if self._warmup_timer.interval() != self.WARMUP_POLL_MS:
+                self._warmup_timer.setInterval(self.WARMUP_POLL_MS)
+                self._warmup_timer.start()
 
     # -------------------------------------------------------------- viewer
 

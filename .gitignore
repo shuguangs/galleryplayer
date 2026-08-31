@@ -65,3 +65,6 @@ GIT_COMMIT_INFO.md
 live-subtitle/scenarios/nsfw_gay.json
 live-subtitle/scenarios/lingyu.json
 CODE_MAP.md
+
+# ---------- 本地临时测试脚本（含真实媒体路径，不上传） ----------
+_thumb_bug_test/

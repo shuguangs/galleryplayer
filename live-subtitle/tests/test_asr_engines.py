@@ -71,7 +71,7 @@ class LanguageLockTests(unittest.TestCase):
     def test_short_segments_never_vote_or_lock(self):
         """短段（<LOCK_MIN_SECS）不投票：语气词连片误判不再锁死全片。
 
-        回归：I:\\ri\\③.mp4 前 8 段里 3 个"嗯/诶"短段被误判 Chinese，
+        回归：多语言测试样本 前 8 段里 3 个"嗯/诶"短段被误判 Chinese，
         旧逻辑第 8 段锁 zh 全片报废。新逻辑：短段全程 auto，永不锁。
         """
         # 6 个 0.8s 短段，检测全是 zh（模拟误判连片）
