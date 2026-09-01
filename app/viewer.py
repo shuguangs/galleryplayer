@@ -984,7 +984,10 @@ class Viewer(QWidget):
         vis = not self.video_view.sub_visible
         self.video_view.set_sub_visible(vis)
         self.controls.set_sub_visible(vis)
-        self._show_toast(t("viewer.sub_visible") if vis else t("viewer.sub_hidden"))
+        # 旧代码用的 "viewer.sub_visible" 在 i18n 表里不存在——t() 找不到就
+        # 原样返回 key，切换字幕时 toast 显示的是 "viewer.sub_visible"
+        # 而不是中文（实测）。与 sub_hidden 配对的键名是 sub_shown。
+        self._show_toast(t("viewer.sub_shown") if vis else t("viewer.sub_hidden"))
 
     def _suppress_file_subtitles_for_live(self) -> None:
         """Hide mpv-rendered subtitles while the live-caption overlay is active."""
@@ -1232,6 +1235,27 @@ class Viewer(QWidget):
             a = sub.addAction(t("viewer.sub_font_reset"))
             a.triggered.connect(lambda _=False: self._reset_sub_font())
             sub.addSeparator()
+            # 颜色：一键反色（白↔黑）+ 预设 + 自选，实时生效
+            a = sub.addAction(t("viewer.sub_invert_color"))
+            a.triggered.connect(lambda _=False: self._invert_sub_colors())
+            presets = sub.addMenu(t("viewer.sub_pick_color"))
+            for c, name in (("#ffffff", "⚪"),
+                            ("#000000", "⚫"),
+                            ("#ffe065", "🟡"),
+                            ("#00e5ff", "🔵"),
+                            ("#ff5252", "🔴"),
+                            ("#69f0ae", "🟢")):
+                pa = presets.addAction(f"{name} {c}")
+                pa.triggered.connect(
+                    lambda _=False, cc=c: self._set_sub_colors(cc))
+            a = presets.addAction(t("viewer.sub_custom_color"))
+            a.triggered.connect(lambda _=False: self._pick_sub_color_dialog())
+            # 描边
+            a = sub.addAction(
+                t("viewer.sub_outline_cycle").format(
+                    n=int(settings["sub_outline"])))
+            a.triggered.connect(lambda _=False: self._cycle_sub_outline())
+            sub.addSeparator()
             a = sub.addAction(
                 t("viewer.sub_hide") if self.video_view.sub_visible else t("viewer.sub_show")
             )
@@ -1274,6 +1298,44 @@ class Viewer(QWidget):
         self.video_view.set_sub_font_size(int(settings["sub_font_size"]))
         self._show_toast(t("viewer.sub_font_toast").format(size=self.video_view.sub_font_size))
 
+    # ---- 字幕颜色/描边（右键菜单）：正常字幕与实时字幕同步修改
+    def _set_sub_colors(self, color: str, outline: int | None = None) -> None:
+        """同时设置正常字幕（mpv）与实时字幕（覆盖层）的颜色。"""
+        settings["sub_color"] = color
+        settings["live_caption_color"] = color
+        if outline is not None:
+            settings["sub_outline"] = outline
+            settings["live_caption_outline"] = outline
+        self.video_view.apply_sub_color_style()
+        self._apply_live_caption_style()
+        self._show_toast(t("viewer.sub_color_toast").format(color=color))
+
+    def _invert_sub_colors(self) -> None:
+        """一键反色：白→黑 / 黑→白 / 其他色→补色。"""
+        cur = str(settings["sub_color"] or "#ffffff")
+        try:
+            r, g, b = int(cur[1:3], 16), int(cur[3:5], 16), int(cur[5:7], 16)
+        except (ValueError, IndexError):
+            cur, r, g, b = "#ffffff", 255, 255, 255
+        inverse = f"#{255 - r:02x}{255 - g:02x}{255 - b:02x}"
+        self._set_sub_colors(inverse)
+
+    def _pick_sub_color_dialog(self) -> None:
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QColorDialog
+
+        cur = str(settings["sub_color"] or "#ffffff")
+        c = QColorDialog.getColor(QColor(cur), self,
+                                  t("settings.pick_sub_color"))
+        if c.isValid():
+            self._set_sub_colors(c.name())
+
+    def _cycle_sub_outline(self) -> None:
+        """描边档位循环：0→1→2→3→4→0。"""
+        nxt = (int(settings["sub_outline"] or 0) + 1) % 5
+        self._set_sub_colors(str(settings["sub_color"] or "#ffffff"), outline=nxt)
+        self._show_toast(t("viewer.sub_outline_toast").format(n=nxt))
+
     def _pick_subtitle_file(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
@@ -1313,20 +1375,48 @@ class Viewer(QWidget):
         return max(lo, min(hi, value))
 
     def _apply_live_caption_style(self, relayout: bool = True) -> None:
-        """Apply the user-editable live-caption font and readable backdrop."""
+        """Apply the user-editable live-caption font/color/outline."""
         size = self._live_caption_display_value("font")
-        self._live_label.setStyleSheet(
+        color = str(settings["live_caption_color"] or "#ffffff")
+        outline = int(settings["live_caption_outline"] or 0)
+        style = (
             "QLabel#LiveCaption {"
             "background: transparent;"
-            "color: #ffffff;"
+            f"color: {color};"
             "border: none;"
             "padding: 0;"
             f"font-size: {size}px;"
             "font-weight: 600;"
             "}"
         )
+        # 反色描边（白色字黑边等）：QLabel 无 text-outline——用
+        # QGraphicsDropShadowEffect（零偏移 + 模糊）合成描边光晕，
+        # 粗细=outline 档位。注意它在 QtWidgets 而不是 QtGui：从 QtGui
+        # 导入会 ImportError，而本方法在 Viewer.__init__ 里就会调用，
+        # 于是 live_caption_outline>0 时整个播放器页面打不开（实测）。
+        if outline > 0:
+            from PySide6.QtGui import QColor
+            from PySide6.QtWidgets import QGraphicsDropShadowEffect
+
+            eff = QGraphicsDropShadowEffect(self._live_label)
+            bc = QColor(color)
+            inverse = QColor(255 - bc.red(), 255 - bc.green(), 255 - bc.blue())
+            eff.setColor(inverse)
+            eff.setOffset(0, 0)
+            eff.setBlurRadius(max(1.5, outline * 1.5))
+            self._live_label.setGraphicsEffect(eff)
+        else:
+            self._live_label.setGraphicsEffect(None)
+        self._live_label.setStyleSheet(style)
         if relayout:
             self._relayout()
+
+    def refresh_live_caption_style(self) -> None:
+        """公开入口：设置页改了实时字幕字号/颜色/描边/覆盖范围后调用。
+
+        字号走样式表，覆盖范围走 _relayout 的几何计算，一次调用全覆盖。
+        """
+        self._apply_live_caption_style()
 
     def _step_live_caption_display(self, key: str, delta: int) -> None:
         setting = "live_caption_font_size" if key == "font" else f"live_caption_{key}"
@@ -1606,6 +1696,8 @@ class Viewer(QWidget):
         # 若走 spawn（引擎已死/来源是系统声音/设置变更），_live_paused 会一直
         # 是 True，轮询里每条字幕行都被丢掉——引擎在跑却永远停在"启动中…"
         self._live_paused = False
+        # 新一轮启动：清掉上一个媒体的"无音轨"结论（换片后要重新判定）
+        self._live_no_audio = False
         source = str(_settings["live_caption_source"])
         self._live_source = source
         current_media = None
@@ -1679,6 +1771,9 @@ class Viewer(QWidget):
             media = self.items[self.index].path
             script = pipe / "live_transcribe.py"
             args = [str(script), str(media)] + common + (["--translate"] if translate_on else [])
+            # 实时字幕人声降噪（设置开关；SRT 路径恒开不受此影响）
+            if bool(_settings["live_caption_denoise"]):
+                args.append("--denoise")
             # 从当前播放位置追赶（seek 跳转后同样用最新位置）
             try:
                 pos = float(self.video_view.position or 0.0)
@@ -1986,7 +2081,16 @@ class Viewer(QWidget):
             self._live_on = False
             self._live_label.hide()
             self._show_toast(t("viewer.live_caption_error").format(err=event_data.detail[:120]))
+        elif event == EngineEvent.NO_AUDIO:
+            # 此视频没有音轨：转写无从下手。必须彻底停掉实时字幕，否则
+            # TASK_DONE 会走"未覆盖全片 → 补洞"分支，同一文件被无限重试
+            #（实测日志里同一片源连刷 18 轮 tuple index out of range）。
+            self._live_no_audio = True
+            self._stop_live_caption()
+            self._show_toast(t("viewer.live_caption_no_audio"))
         elif event == EngineEvent.TASK_DONE:
+            if getattr(self, "_live_no_audio", False):
+                return  # 无音轨的收尾 TASK_DONE：不再调度补洞/预转写
             result = self._live_ctl.task_done(
                 event_data.generation if event_data.generation is not None else -1
             )
@@ -2096,8 +2200,13 @@ class Viewer(QWidget):
                 # 播放位置远超已转写前沿（seek 跳转/转写未追上）→ 自动重转。
                 # 前沿停滞 8 秒才发一次：引擎落后播放时 pos 每秒前移，去重
                 # 条件会频繁失效，原实现约 3 秒就 cancel 在途任务重提一次，
-                # 反而永远追不上，toast 也全程常驻
-                if rows and pos > front + 5.0:
+                # 反而永远追不上，toast 也全程常驻。
+                # task_running 门禁：引擎任务在途（人声降噪 ~45s/15min 片 或
+                # 转写中）时严禁追赶重启——降噪期间无行产出，前沿恒 0，旧逻辑
+                # 8 秒即顶掉在途任务，新任务又从头降噪又被顶，死循环风暴
+                #（实测 Nyles 15 分钟片反复重启 6+ 轮零产出）。
+                if rows and pos > front + 5.0 \
+                        and not self._live_ctl.task_running:
                     if front != getattr(self, "_live_catch_front", None):
                         self._live_catch_front = front
                         self._live_catch_since = _time.time()

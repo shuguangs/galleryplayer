@@ -37,7 +37,10 @@ _PLAYER = [
     ("Home / End", t("help.jump")),
     ("M", t("help.mute")),
     ("L", t("help.loop")),
-    ("V", t("help.subtitle")),
+    # help.subtitle 是帮助页副标题；这里要的是"字幕显隐"快捷键说明。
+    # 两者曾同用 help.subtitle 键，dict 后定义者覆盖前者——帮助页副标题
+    # 位置显示的是"字幕显隐"（实测）。
+    ("V", t("help.sub_toggle")),
     ("J", t("help.subtitle_track")),
     ("A", t("help.audio_track")),
     ("[ / ]", t("help.speed")),

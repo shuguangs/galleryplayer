@@ -205,9 +205,16 @@ class LiveCaptionTests(unittest.TestCase):
         self.assertTrue(ctl.span_covered(80.0))
         self.assertFalse(ctl.is_covered(80.0))
         self.assertEqual(ctl.handle_position(80.0, audio_mode=True), "covered")
-        # 超出前沿才算需要追赶
+        # 超出前沿且任务已收尾（task_running=False）才追赶：
+        # 引擎任务在途时严禁追赶重启（降噪期无行产出，旧逻辑 8 秒顶掉
+        # 在途任务 → 从头降噪 → 再被顶，死循环风暴，实测 Nyles 6+ 轮）
         self.assertFalse(ctl.span_covered(200.0))
+        ctl.task_running = False
         self.assertEqual(ctl.handle_position(200.0, audio_mode=True), "restart")
+        # 任务在途：同一位置不再 restart
+        ctl.task_running = True
+        ctl.last_position = 100.0  # 制造跳变（handle_position 需要 pos 变化 >2s）
+        self.assertEqual(ctl.handle_position(200.0, audio_mode=True), "normal")
 
 
 class LangRewriteTests(unittest.TestCase):

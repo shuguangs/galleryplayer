@@ -459,6 +459,10 @@ class MainWindow(QMainWindow):
         self.btn_tree.clicked.connect(self._toggle_tree)
         lay.addWidget(self.btn_tree)
 
+        btn_tools = _icon_button(icons.TOOLS, t("main_window.tools_tip"), 32)
+        btn_tools.clicked.connect(self._show_tools)
+        lay.addWidget(btn_tools)
+
         btn_settings = _icon_button(icons.SETTINGS, t("main_window.settings_tip"), 32)
         # The Fluent/MDL2 gear glyph (E713) is taller than the em box, so at the
         # toolbar's 14px icon size Qt clips its top and bottom to the text line box.
@@ -619,6 +623,12 @@ class MainWindow(QMainWindow):
         sc("Alt+Right", self._nav_forward)
         sc("F1", self._show_help)
         sc("Ctrl+,", self._show_settings)
+
+    def _show_tools(self) -> None:
+        """批量工具面板：跨文件夹聚合视频，批量 SRT / 缩略图网格。"""
+        from .tools_dialog import ToolsDialog
+
+        ToolsDialog.show_for(self)
 
     def _show_settings(self) -> None:
         from .settings_dialog import SettingsDialog
@@ -974,6 +984,8 @@ class MainWindow(QMainWindow):
             "seek": 0.0,
             "translate_model": str(settings["srt_translate_model"] or "live"),
             "format": fmt,
+            # 人声降噪随任务下发（设置可关；模型缺失引擎侧自动下载）
+            "denoise": "on" if bool(settings["srt_denoise"]) else "off",
             # 场景随任务下发（与 translate_model 同等）：引擎不必为改场景重建，
             # 也不会在 start_preload 的 30s 冷却窗口里悄悄用上一次的场景
             "scenario": str(settings["translate_scenario"]),
@@ -1262,6 +1274,7 @@ class MainWindow(QMainWindow):
                     "seek": 0.0,
                     "translate_model": str(settings["srt_translate_model"] or "live"),
                     "format": str(nxt.get("format", "srt")),
+                    "denoise": "on" if bool(settings["srt_denoise"]) else "off",
                     "scenario": str(settings["translate_scenario"]),
                 })
                 if generation:
@@ -1433,7 +1446,7 @@ class MainWindow(QMainWindow):
 
     def _maybe_restore_playlist(self) -> None:
         """上次会话未正常退出 → 询问是否恢复播放列表（路径收集在后台线程）。"""
-        from .runtime import USERDATA_DIR
+        from .runtime import USERDATA_DIR, automation_mode
 
         # 外部打开（命令行/双击/转发）时用户意图明确：直接播给定的文件。
         # 恢复弹窗是模态的，此刻弹出来只会挡住刚打开的播放器。
@@ -1451,6 +1464,11 @@ class MainWindow(QMainWindow):
             return
         if not paths:
             return
+        if automation_mode():
+            # 自动化模式：不弹模态框（会把无人值守的脚本卡死），按"不恢复"
+            # 处理并清掉脏标记，等价于用户点了"否"。
+            self._clear_restore_flag()
+            return
         ret = QMessageBox.question(
             self, t("main_window.title"),
             t("main_window.restore_playlist").format(n=len(paths)),
@@ -1458,12 +1476,7 @@ class MainWindow(QMainWindow):
         )
         if ret != QMessageBox.Yes:
             # 拒绝恢复也要清掉脏标记，否则之后每次启动都会再弹
-            try:
-                (USERDATA_DIR / "last_playlist.json").write_text(
-                    json.dumps({"clean": True, "index": 0, "paths": []}),
-                    encoding="utf-8")
-            except Exception:
-                pass
+            self._clear_restore_flag()
             return
         # 选“是”同样消费掉脏标记：恢复是一次性动作。之后再次异常退出时，
         # open_playlist 落盘的 clean=False 会重新计——但只要本次恢复过，
@@ -1484,6 +1497,18 @@ class MainWindow(QMainWindow):
             self._playlist_restored.emit(items, index)
 
         threading.Thread(target=_collect, daemon=True).start()
+
+    @staticmethod
+    def _clear_restore_flag() -> None:
+        """消费掉"未正常退出"脏标记，避免下次启动继续弹恢复框。"""
+        from .runtime import USERDATA_DIR
+
+        try:
+            (USERDATA_DIR / "last_playlist.json").write_text(
+                json.dumps({"clean": True, "index": 0, "paths": []}),
+                encoding="utf-8")
+        except Exception:
+            pass
 
     def _on_playlist_restored(self, items, index: int) -> None:
         if not items:
@@ -1651,6 +1676,23 @@ class MainWindow(QMainWindow):
         if menu.actions():
             menu.exec(global_pos)
 
+    def _open_thumbgrid_dialog(self, videos: list) -> None:
+        """打开缩略图网格参数配置（多选视频批量生成）。"""
+        from .thumb_grid_dialog import ThumbGridDialog
+        from .thumb_grid_progress import ThumbGridProgressDialog
+
+        videos = [Path(v) for v in videos if Path(v).is_file()]
+        if not videos:
+            return
+        dlg = ThumbGridDialog(videos, self)
+        dlg.startRequested.connect(
+            lambda vs, out_dir, width, fmt, quality, opts:
+                ThumbGridProgressDialog(
+                    vs, out_dir, width, fmt, quality, options=opts,
+                    on_exists=dlg.cb_exists.currentData(), parent=self).show()
+        )
+        dlg.exec()
+
     def _open_selection_playlist(self, rows: tuple) -> None:
         """多选打开：把选中项作为独立播放列表在播放器中打开。
 
@@ -1705,6 +1747,11 @@ class MainWindow(QMainWindow):
                 lambda _=False, r=tuple(rows):
                     self._batch_generate_srt([self.model.item(x) for x in r
                                               if self.model.item(x) is not None]))
+            menu.addAction(
+                t("main_window.multi_thumbgrid").format(n=len(video_paths))
+            ).triggered.connect(
+                lambda _=False, ps=tuple(video_paths):
+                    self._open_thumbgrid_dialog([Path(p) for p in ps]))
         menu.addSeparator()
         menu.addAction(
             t("main_window.multi_recycle").format(n=n)).triggered.connect(
@@ -1750,6 +1797,9 @@ class MainWindow(QMainWindow):
                 )
                 menu.addAction(t("main_window.gen_srt_pick")).triggered.connect(
                     lambda _=False: self._pick_videos_for_srt()
+                )
+                menu.addAction(t("main_window.thumbgrid")).triggered.connect(
+                    lambda _=False, p=item.path: self._open_thumbgrid_dialog([p])
                 )
                 menu.addSeparator()
             if not item.is_video and not item.is_archive:
@@ -2469,8 +2519,13 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMessageBox
 
         from . import live_engine
+        from .runtime import automation_mode
 
-        if live_engine.alive():
+        # 自动化模式：不问"模型保留还是释放"，直接杀掉引擎干净退出
+        # （不杀会留着占显存的子进程，脚本跑完机器上还挂着）
+        if live_engine.alive() and automation_mode():
+            live_engine.kill()
+        elif live_engine.alive():
             box = QMessageBox(self)
             box.setWindowTitle(t("viewer.live_caption_quit_title"))
             box.setText(t("viewer.live_caption_quit_text").format(

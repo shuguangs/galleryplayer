@@ -51,8 +51,9 @@ def main() -> int:
 
     # First launch: ask for the interface language before any window shows.
     from app.config import flush, settings
+    from app.runtime import automation_mode
 
-    if not settings["language"]:
+    if not settings["language"] and not automation_mode():
         from PySide6.QtWidgets import QMessageBox
 
         box = QMessageBox()
@@ -66,6 +67,10 @@ def main() -> int:
         box.setDefaultButton(btn_zh)
         box.exec()
         settings["language"] = "zh" if box.clickedButton() is btn_zh else "en"
+        flush()
+    elif not settings["language"]:
+        # 自动化模式：不弹首启语言选择（无人点击会永久卡住），默认中文
+        settings["language"] = "zh"
         flush()
 
     from app.main_window import MainWindow

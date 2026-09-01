@@ -21,7 +21,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from asr_engines import audio_stream_start
+from asr_engines import audio_stream_start, has_audio_stream
 from ollama_service import ensure_ollama
 from translate_service import Translator
 
@@ -210,6 +210,8 @@ def main() -> None:
                     help="翻译目标语言: zh / zh-Hant / en（translate_service.TARGET_NAMES）")
     ap.add_argument("--idle-unload", type=float, default=0.0,
                     help="空闲 N 秒后自动卸载模型释放显存（0=不卸载）")
+    ap.add_argument("--denoise", action="store_true",
+                    help="实时字幕人声降噪（整段先降噪再 VAD；SRT 路径恒开不受此开关影响）")
     args = ap.parse_args()
     if not args.media and not args.preload:
         ap.error("必须提供媒体文件，或使用 --preload")
@@ -261,6 +263,7 @@ def main() -> None:
             "target": args.target_lang,
             "scenario": args.scenario,
             "idle": int(args.idle_unload),
+            "denoise": bool(getattr(args, "denoise", False)),
             "engine": 7,
         }
         state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
@@ -568,19 +571,70 @@ def main() -> None:
 
         write_srt_file(path, rows, fmt)
 
-    def _prefetch_key(media: Path):
+    def _media_key(media: Path):
+        """媒体身份键：路径+大小+修改时间。文件被替换/重编码即失效。"""
         try:
             stat = media.stat()
         except OSError:
             return None
         return (str(media), stat.st_size, stat.st_mtime)
 
+    # 语言探测缓存：同一文件的主导语言不会因为 seek 而改变。实时字幕每
+    # 跳到未覆盖区就开一个新任务，而语言判定状态全是任务内局部变量——
+    # 不缓存的话每个任务都要重新攒 3 张长段票、重新攒 12 个内容行、再抽
+    # 12 段做一次全量探测（每次几秒 GPU，且这 1-2 分钟里短段仍可能误判
+    # 出汉字噪音，最后靠 LANG_REWRITE 回溯重写）。缓存后 seek 任务从第一
+    # 段起就有锁，探测整个跳过。
+    # 缓存只作初始值：长段仍恒 auto 自识别并投票，3 个一致的长段即可推翻
+    # 它（不会把一次误探测永久固化），被推翻时按旧语言解码过的短段会重跑。
+    # full=True 表示结论来自整片音频；seek 窗口/滑动锁的结论 full=False，
+    # SRT/预转写这类一次成型的离线任务只复用 full=True（探测才几秒，
+    # 赌错要毁掉整份字幕）。
+    # 按媒体键存多条：连播里上下集来回切不会互相挤掉。
+    _lang_cache: dict = {}
+    _LANG_CACHE_MAX = 8
+
+    def _lang_cache_get(media: Path, need_full: bool = False) -> str | None:
+        key = _media_key(media)
+        entry = _lang_cache.get(key) if key is not None else None
+        if entry is None:
+            return None
+        if need_full and not entry[1]:
+            return None
+        return entry[0]
+
+    def _lang_cache_strong(media: Path) -> bool:
+        """缓存结论是否来自整片抽样探测（强证据）。"""
+        key = _media_key(media)
+        entry = _lang_cache.get(key) if key is not None else None
+        return bool(entry and entry[1])
+
+    def _lang_cache_put(media: Path, lang: str | None, full: bool) -> None:
+        if not lang:
+            return
+        key = _media_key(media)
+        if key is None:
+            return
+        old = _lang_cache.get(key)
+        # 整片结论不被 seek 窗口/滑动锁的弱结论降级覆盖（证据强度不同）
+        if old is not None and old[1] and not full:
+            return
+        _lang_cache.pop(key, None)          # 重新插入 = 置为最近使用
+        _lang_cache[key] = (str(lang), bool(full))
+        while len(_lang_cache) > _LANG_CACHE_MAX:
+            _lang_cache.pop(next(iter(_lang_cache)))
+
     def _prefetch_job(job: dict) -> None:
         """转写下一集并缓存结果（不写 log、不排队翻译）。"""
         media = job["media"]
         if not media.is_file():
             return
-        key = _prefetch_key(media)
+        if not has_audio_stream(str(media)):
+            # 无音轨的下一集：预转写直接跳过（否则解码抛 IndexError，
+            # 被主循环记成"任务异常"，日志里满是与用户无关的报错）
+            status(f"PREFETCH_SKIP（无音轨）{media.name}")
+            return
+        key = _media_key(media)
         if key is None:
             return
         if _prefetch["key"] == key:
@@ -601,13 +655,24 @@ def main() -> None:
 
         audio = decode_audio(str(media), sampling_rate=16000)
         audio_off = audio_stream_start(media)  # 缓存行存媒体时间，命中即用
+        # 预转写与 SRT 同构：同样人声降噪（默认开），缓存命中行为才一致
+        denoiser = asr_engines.load_denoiser(status=status)
+        if denoiser is not None:
+            audio = asr_engines.denoise_audio(denoiser, audio)
         prefetch_lang = args.lang or "auto"
         if prefetch_lang == "auto" and args.model == "qwen":
-            # 预转写也是全片离线任务：先探测主导语言（同 _generate_srt）
-            dom = asr_engines.detect_dominant_language(model, vad, audio,
-                                                       status=status)
-            if dom:
-                prefetch_lang = dom
+            # 预转写也是全片离线任务：先探测主导语言（同 _generate_srt）。
+            # 同一文件已有整片结论（此前 SRT/预转写做过）时直接复用。
+            cached = _lang_cache_get(media, need_full=True)
+            if cached:
+                status(f"语言探测: 复用整片结论 {cached}")
+                prefetch_lang = cached
+            else:
+                dom = asr_engines.detect_dominant_language(model, vad, audio,
+                                                           status=status)
+                if dom:
+                    prefetch_lang = dom
+                    _lang_cache_put(media, dom, full=True)
         rows: list[tuple[float, float, str]] = []
         for seg_start, seg_end, text in asr_engines.stream_transcribe(
                 model, vad, args.model, audio, prefetch_lang):
@@ -626,6 +691,15 @@ def main() -> None:
         media = job["media"]
         output = job["output"]
         generation = job["generation"]
+        # 文件/音轨检查先于模型加载：无音轨片源不必白等模型（30s + 6GB 显存）
+        if not media.is_file():
+            _job_status(job, f"SRT_ERROR 文件不存在: {media}")
+            return
+        # 无音轨视频：解码会抛 IndexError，SRT 进度窗只认终止标记，
+        # 不先判定就会显示成一句意义不明的"任务异常: tuple index out of range"
+        if not has_audio_stream(str(media)):
+            _job_status(job, f"SRT_ERROR 此视频没有音轨: {media.name}")
+            return
         try:
             _ensure_model()
         except Exception as exc:  # noqa: BLE001
@@ -633,9 +707,6 @@ def main() -> None:
             return
         if cancel_generation > generation:
             _job_status(job, "SRT_CANCELLED")
-            return
-        if not media.is_file():
-            _job_status(job, f"SRT_ERROR 文件不存在: {media}")
             return
 
         _job_status(job, f"SRT_STARTED {media.name}")
@@ -648,16 +719,43 @@ def main() -> None:
             audio = decode_audio(str(media), sampling_rate=16000)
             audio_off = audio_stream_start(media)  # 缓冲区首样本≠媒体 0 时补差
             duration = max(1.0, len(audio) / 16000.0)
+            # 人声降噪（默认开）：VAD 前整段过 gtcrn，削环境音——嘈杂片源
+            # 实测语音段 22→71（弱语音不再被噪音淹没）。0.5MB CPU，全片
+            # RTF 0.05，1 小时片约 3 分钟。不可用时静默跳过。
+            if str(job.get("denoise", "on")) != "off":
+                denoiser = asr_engines.load_denoiser(
+                    status=lambda m: _job_status(job, m))
+                if denoiser is not None:
+                    total_secs = len(audio) / 16000.0
+                    _job_status(job, f"人声降噪中（约 {total_secs/60:.0f} 分钟音频）...")
+                    cleaned = asr_engines.denoise_audio(
+                        denoiser, audio,
+                        progress=lambda d, t: _job_status(
+                            job, f"人声降噪 {d/60:.0f}/{t/60:.0f} 分钟 ..."),
+                        should_cancel=lambda: cancel_generation > generation)
+                    if cleaned is None:
+                        # 降噪中取消：立即终止（旧实现要等整段降噪完才检查，
+                        # 30 分钟片取消要干等 2-4 分钟）
+                        _job_status(job, "SRT_CANCELLED")
+                        return
+                    audio = cleaned
             lang_note = args.lang or "auto"
             if lang_note == "auto" and args.model == "qwen":
                 # SRT 是离线任务全片在手：先抽样探测主导语言再全文转写，
                 # 不赌逐段顺序锁（开场杂乱/快节奏对白的短段误判会把锁带偏，
-                # 实测日语片第 8 段锁 zh 后全片汉字噪音）
-                dom = asr_engines.detect_dominant_language(
-                    model, vad, audio,
-                    status=lambda m: _job_status(job, m))
-                if dom:
-                    lang_note = dom
+                # 实测日语片第 8 段锁 zh 后全片汉字噪音）。
+                # 同一文件已有整片结论（此前 SRT/预转写做过）时直接复用。
+                cached = _lang_cache_get(media, need_full=True)
+                if cached:
+                    _job_status(job, f"语言探测: 复用整片结论 {cached}")
+                    lang_note = cached
+                else:
+                    dom = asr_engines.detect_dominant_language(
+                        model, vad, audio,
+                        status=lambda m: _job_status(job, m))
+                    if dom:
+                        lang_note = dom
+                        _lang_cache_put(media, dom, full=True)
             last_pct = -10
             for seg_start, seg_end, text in asr_engines.stream_transcribe(
                     model, vad, args.model, audio, lang_note):
@@ -789,6 +887,19 @@ def main() -> None:
         if cancel_generation > generation:
             status("模型加载期间收到切换，跳过旧转写任务 ...")
             return
+        # 文件与音轨检查放在模型加载之前：无音轨的片源本来就转不了，
+        # 先加载模型纯属白等 30 秒（还占 6GB 显存）。
+        # 无音轨时解码入口会以 IndexError(tuple index out of range) 崩掉，
+        # 播放器把它当"转写失败"继续补洞/追赶，同一文件反复重试（实测 18 轮
+        # 零产出）。这里先判定并发 NO_AUDIO，播放器据此直接关掉实时字幕。
+        if not media.is_file():
+            status("✗ 媒体文件不存在: %s" % media)
+            status(f"TASK_DONE {generation}")
+            return
+        if not has_audio_stream(str(media)):
+            status(f"NO_AUDIO {media.name}")
+            status(f"TASK_DONE {generation}")
+            return
         try:
             _ensure_model()
         except Exception as exc:  # noqa: BLE001
@@ -796,10 +907,6 @@ def main() -> None:
             status(f"TASK_DONE {generation}")  # 不发会让播放器的补洞/重启调度停摆
             return
         write_state(media)
-        if not media.is_file():
-            status("✗ 媒体文件不存在: %s" % media)
-            status(f"TASK_DONE {generation}")
-            return
         status(f"音轨模式：转写 {media.name} ...")
 
         def _decode_cancelled() -> bool:
@@ -857,7 +964,7 @@ def main() -> None:
 
             # 预转写缓存命中（从片头开始播且文件未变）：直接出结果
             if seek <= 0.5:
-                key = _prefetch_key(media)
+                key = _media_key(media)
                 if key is not None and _prefetch["key"] == key:
                     cached = _prefetch["rows"]
                     _prefetch["key"] = None
@@ -898,6 +1005,27 @@ def main() -> None:
                 status("切换媒体，中断当前转写 ...")
                 status(f"TASK_DONE {generation}")
                 return
+            # 人声降噪（实时字幕，可选）：整段先降噪再 VAD——嘈杂片源 VAD
+            # 能捞出被噪音淹没的弱语音段（实测 22→71 段）。代价：追赶首段
+            # +全段 RTF 0.05 的延迟（1 分钟音频约 3s，用户已接受）。
+            # 引擎启动参数 --denoise 由播放器设置下发；不传时默认关
+            #（实时质量增益不稳定的实测结论，SRT 路径不受此开关影响恒开）。
+            if getattr(args, "denoise", False):
+                denoiser = asr_engines.load_denoiser(status=status)
+                if denoiser is not None:
+                    total_secs = len(audio) / 16000.0
+                    status(f"人声降噪中（约 {total_secs/60:.0f} 分钟音频）...")
+                    cleaned = asr_engines.denoise_audio(
+                        denoiser, audio,
+                        progress=lambda d, t: status(
+                            f"人声降噪 {d/60:.0f}/{t/60:.0f} 分钟 ..."),
+                        should_cancel=lambda: cancel_generation > generation
+                        or pending_job is not None)
+                    if cleaned is None:
+                        status("降噪中取消/被新任务取代 ...")
+                        status(f"TASK_DONE {generation}")
+                        return
+                    audio = cleaned
             status(f"{args.model} 引擎转写中 ...")
 
             # 延迟探测+精准重跑：逐段转写照常出字幕，同时记录每个 auto
@@ -918,12 +1046,32 @@ def main() -> None:
                     self.lang = lang
 
             seg_records: list[tuple[float, float, str]] = []
-            probed = [False]
+            # 强制解码段（用缓存锁解码的短段）：缓存判错时按此定位重跑区间
+            forced_records: list[tuple[float, float, str]] = []
+            # 同一文件的语言缓存（见 _lang_cache）：seek 任务拿它当初始锁，
+            # 跳过重新攒 3 张长段票 + 重新攒 12 个内容行 + 整片抽样探测
+            initial_lock: str | None = None
+            lock_is_strong = False
+            if args.model == "qwen" and (args.lang or "auto") == "auto":
+                initial_lock = _lang_cache_get(media)
+                lock_is_strong = _lang_cache_strong(media)
+                if initial_lock:
+                    note = "整片探测结论" if lock_is_strong else "此前任务结论"
+                    status(f"语言沿用 {initial_lock}（{note}，"
+                           f"{'跳过重新探测' if lock_is_strong else '仍会做一次探测复核'}）")
+            # 强证据（整片抽样）才跳过延迟探测；弱证据（seek 窗口/滑动锁）
+            # 只当初始锁，仍让延迟探测跑一次拿到整片结论
+            probed = [bool(initial_lock) and lock_is_strong]
             content_rows = [0]
-            dom_lang: list[str | None] = [None]
+            flipped = [False]
+            # 沿用缓存被推翻时收集的重跑区间（不中断主流程，跑完再补）
+            pending_rewrites: list[tuple[list[tuple[float, float]], str]] = []
 
             def _seg_sink(s, e, code):
                 seg_records.append((s, e, code))
+
+            def _forced_sink(s, e, used):
+                forced_records.append((s, e, used))
 
             def _merge_ranges(spans: list[tuple[float, float]],
                               gap: float = 1.0) -> list[tuple[float, float]]:
@@ -937,6 +1085,39 @@ def main() -> None:
                     else:
                         merged.append([a, b])
                 return [(a, b) for a, b in merged]
+
+            def _on_lock_change(new_lock: str | None) -> None:
+                """长段投票推翻了沿用的缓存锁 → 缓存判错，纠正并重跑被带偏的段。
+
+                这是"复用缓存"的纠错出口：缓存只是初始值，长段恒 auto
+                自识别，窗口内 3 个一致的长段就能翻锁（一次误探测不会被
+                永久固化）。翻锁后按旧语言强制解码过的短段排进重跑队列。
+                与 _maybe_probe 不同，这里**不中断本任务**：生成器内部的锁
+                已经更新，后续段自然按新语言解码，主流程跑完再补重跑区间——
+                没有必要丢掉已解码的音频让播放器重排一个新任务。
+                """
+                if new_lock:
+                    # 滑动锁本身也是结论（弱证据）：存缓存，让后续 seek 任务
+                    # 即使这次没触发整片探测也有初始锁可用
+                    _lang_cache_put(media, new_lock, full=False)
+                if not initial_lock or not new_lock or new_lock == initial_lock \
+                        or flipped[0]:
+                    return
+                flipped[0] = True
+                mis = [(s, e) for s, e, used in forced_records if used != new_lock]
+                mis += [(s, e) for s, e, c in seg_records
+                        if c != new_lock and (e - s) < asr_engines.LOCK_MIN_SECS]
+                ranges = _merge_ranges(mis)
+                if not ranges:
+                    status(f"语言改判 {new_lock}（沿用的 {initial_lock} 被长段推翻）："
+                           f"无需重跑")
+                    return
+                total_bad = sum(b - a for a, b in ranges)
+                status(f"LANG_REWRITE {new_lock};"
+                       + ";".join(f"{a:.1f}-{b:.1f}" for a, b in ranges))
+                status(f"语言改判 {new_lock}（沿用的 {initial_lock} 被长段推翻）："
+                       f"重跑 {len(ranges)} 段区间共 {total_bad:.0f}s")
+                pending_rewrites.append((ranges, new_lock))
 
             def _maybe_probe(row_text: str, row_start: float,
                              cur_pos: float) -> None:
@@ -956,12 +1137,23 @@ def main() -> None:
                     model, vad, audio, status=status)
                 if not dom:
                     return
-                dom_lang[0] = dom
+                # 结论存缓存：同一文件后续的 seek 任务直接沿用。seek 任务的
+                # audio 只是解码窗口（不含片头），结论标 full=False——
+                # SRT/预转写这类一次成型的离线任务只认整片证据
+                _lang_cache_put(media, dom, full=(seek <= 0.5))
                 # 探测/重跑只在【本任务音频】内做（见上方注释：seek 任务
                 # 音频不含片头，整体重跑会清掉别的任务的正确行且无法回填）
                 mis = [(s, e) for s, e, c in seg_records
                        if c != dom
                        and (e - s) < asr_engines.LOCK_MIN_SECS]
+                # 用缓存锁强制解码过、而锁与探测结论不符的段：这些段整段
+                # 都是按错语言解出来的，必须重跑（沿用缓存的代价出口）
+                mis += [(s, e) for s, e, used in forced_records if used != dom]
+                # 之前"缓存锁被长段推翻"排下的重跑区间并进来：探测结论证据
+                # 更强，统一用 dom 重转；否则抛异常离开主流程会把它们丢掉
+                for _ranges, _lang in pending_rewrites:
+                    mis += _ranges
+                pending_rewrites.clear()
                 ranges = _merge_ranges(mis)
                 if not ranges:
                     return
@@ -972,10 +1164,30 @@ def main() -> None:
                        f"共 {total_bad:.0f}s")
                 raise _LangRewrite(ranges, dom)
 
+            def _rerun_ranges(ranges: list[tuple[float, float]], lang: str) -> bool:
+                """逐区间用给定语言强制重转；播放器已按 LANG_REWRITE 清掉
+                这些区间的行，新行时间戳相同位置自然覆盖。返回是否跑完。"""
+                base = max(seek, audio_off)
+                for a, b in ranges:
+                    for piece_start, piece_end, piece_text in asr_engines.stream_transcribe(
+                            model, vad, args.model,
+                            audio[int(a * asr_engines.SR):int(b * asr_engines.SR)],
+                            lang):
+                        if cancel_generation > generation:
+                            status("切换媒体，中断当前转写 ...")
+                            return False
+                        if piece_text:
+                            _emit(base + a + piece_start,
+                                  base + a + piece_end, piece_text)
+                return True
+
             try:
                 for piece_start, piece_end, piece_text in asr_engines.stream_transcribe(
                         model, vad, args.model, audio, args.lang or "auto",
-                        seg_lang_sink=_seg_sink):
+                        seg_lang_sink=_seg_sink,
+                        forced_seg_sink=_forced_sink,
+                        lang_observer=_on_lock_change,
+                        initial_lock=initial_lock):
                     if cancel_generation > generation:
                         status("切换媒体，中断当前转写 ...")
                         return
@@ -984,20 +1196,14 @@ def main() -> None:
                               max(seek, audio_off) + piece_end, piece_text)
                     _maybe_probe(piece_text or "", piece_start, piece_end)
             except _LangRewrite as rw:
-                # 逐区间用探测语言强制重转；播放器已按 LANG_REWRITE 清掉
-                # 这些区间的行，新行时间戳相同位置自然覆盖
-                base = max(seek, audio_off)
-                for a, b in rw.ranges:
-                    for piece_start, piece_end, piece_text in asr_engines.stream_transcribe(
-                            model, vad, args.model,
-                            audio[int(a * asr_engines.SR):int(b * asr_engines.SR)],
-                            rw.lang):
-                        if cancel_generation > generation:
-                            status("切换媒体，中断当前转写 ...")
-                            return
-                        if piece_text:
-                            _emit(base + a + piece_start,
-                                  base + a + piece_end, piece_text)
+                if not _rerun_ranges(rw.ranges, rw.lang):
+                    return
+            else:
+                # 沿用的缓存锁被长段推翻：主流程已按新语言跑完剩余段，
+                # 这里只补跑早期被旧语言带偏的区间
+                for ranges, lang in pending_rewrites:
+                    if not _rerun_ranges(ranges, lang):
+                        return
             if translator is not None:
                 # 同 whisper 路径：收尾前等译文写出，但有新任务在等就让路
                 _drain_translations(generation=generation)

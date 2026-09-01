@@ -232,15 +232,21 @@ class MpvGrabber:
         m.pause = True
         return m.duration, m.width, m.height
 
-    def frame_at(self, seconds: float, timeout: float = 6.0) -> Image.Image | None:
+    def frame_at(self, seconds: float, timeout: float = 6.0,
+                 precise: bool = False) -> Image.Image | None:
         """Seek to roughly `seconds` and return the frame the decoder lands on.
 
-        Deliberately a keyframe seek, not an exact one. An exact seek decodes forward
-        from the preceding keyframe to the requested timestamp, which on a long H.264
-        file with sparse keyframes is seconds of work -- often more than the timeout,
-        and then the file got no thumbnail at all. Landing on the nearest keyframe is
-        ~20x faster (measured: 391 ms -> 21 ms on a 143 MB clip) and for a cover frame
-        the difference is invisible.
+        Deliberately a keyframe seek by default, not an exact one. An exact seek
+        decodes forward from the preceding keyframe to the requested timestamp, which
+        on a long H.264 file with sparse keyframes is seconds of work -- often more
+        than the timeout, and then the file got no thumbnail at all. Landing on the
+        nearest keyframe is ~20x faster (measured: 391 ms -> 21 ms on a 143 MB clip)
+        and for a cover frame the difference is invisible.
+
+        `precise=True` opts into the exact seek for the callers that need the frame to
+        be the one at that timestamp -- the thumbnail-grid "exact timestamps" mode,
+        where the user typed the position and a keyframe several seconds away is the
+        wrong frame. Pass a longer timeout with it; the caller decides that trade.
 
         mpv's seek is asynchronous, so polling is what makes the returned frame belong
         to the new position rather than the old one.
@@ -249,7 +255,7 @@ class MpvGrabber:
 
         m = self._instance()
         target = max(0.0, seconds)
-        m.command("seek", target, "absolute+keyframes")
+        m.command("seek", target, "absolute+exact" if precise else "absolute+keyframes")
         deadline = time.monotonic() + timeout
         settled_since: float | None = None
         while time.monotonic() < deadline:

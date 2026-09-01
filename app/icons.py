@@ -80,6 +80,7 @@ CHEVRON_RIGHT = chr(0xE76C)
 CHEVRON_LEFT = chr(0xE76B)
 HELP = chr(0xE897)
 SETTINGS = chr(0xE713)
+TOOLS = chr(0xE90F)          # 工具箱（Fluent "Developer Tools" 字形近似）
 
 
 class ArrowComboBox(QComboBox):

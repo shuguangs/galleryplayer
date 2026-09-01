@@ -17,6 +17,7 @@ class EngineEvent(Enum):
     TRANSLATE_READY = auto()
     TRANSLATE_ERROR = auto()
     LANG_REWRITE = auto()
+    NO_AUDIO = auto()
     MODEL_ERROR = auto()
     ERROR = auto()
 
@@ -54,6 +55,10 @@ def parse_engine_line(line: str) -> EngineEventData | None:
         # 延迟探测改判：detail = "<lang>;<a1>-<b1>;<a2>-<b2>..."——
         # 丢弃这些区间内的行，引擎正按探测语言逐区间重转
         return EngineEventData(EngineEvent.LANG_REWRITE, text[13:].strip())
+    if text.startswith("NO_AUDIO"):
+        # 此视频没有音轨：转写无从下手。必须在 TASK_DONE 之前被识别，
+        # 否则播放器会把它当普通"任务未覆盖全片"继续补洞、无限重试。
+        return EngineEventData(EngineEvent.NO_AUDIO, text[8:].strip())
     if text.startswith("TASK_DONE "):
         try:
             generation = int(text.split()[1])

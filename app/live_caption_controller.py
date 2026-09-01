@@ -38,6 +38,7 @@ class LiveCaptionController(QObject):
         self.task_start_seek = 0.0
         self.full_pass_running = False
         self.full_pass_done = False
+        self.task_running = False
         self._media_duration: float | None = None
         self.last_position: float | None = None
         self._last_restart_pos = -10_000.0
@@ -60,6 +61,7 @@ class LiveCaptionController(QObject):
         self.media_path = None
         self.full_pass_running = False
         self.full_pass_done = False
+        self.task_running = False
         self.task_start_seek = 0.0
         self.last_position = None
         self._pending_restart = None
@@ -87,6 +89,7 @@ class LiveCaptionController(QObject):
         self.full_pass_running = self.task_start_seek <= 0.5
         self.full_pass_done = False
         self.catching = catching
+        self.task_running = True   # 引擎任务在途（降噪/转写中）
         self.last_position = seek
         self._last_submit_at = time.time()
         self._last_submit_seek = seek
@@ -158,7 +161,6 @@ class LiveCaptionController(QObject):
             }
             self.data_version += 1
         self.rows_changed.emit()
-        return removed
         return removed
 
     def is_covered(self, pos: float) -> bool:
@@ -233,6 +235,10 @@ class LiveCaptionController(QObject):
             self._pending_restart = None
             self.catching = False
             return "covered"
+        # 引擎任务在途（降噪/转写中）：不当追赶失败——降噪期间无行产出，
+        # 前沿恒 0，旧逻辑 8 秒即顶掉在途任务又从头降噪，死循环风暴
+        if self.task_running:
+            return "normal"
 
         self.request_restart(pos)
         return "restart"
@@ -258,6 +264,7 @@ class LiveCaptionController(QObject):
     def task_done(self, generation: int) -> str:
         if generation != self.generation:
             return "ignored"
+        self.task_running = False  # 引擎任务收尾（追赶检测恢复判定资格）
         self.full_pass_running = False
         # 是否已覆盖全片：行级覆盖的前沿 ≥ 媒体时长（无时长信息时保守
         # 认为没完）。追赶任务（seek≤0.5）只转了一个解码窗口（~900s）

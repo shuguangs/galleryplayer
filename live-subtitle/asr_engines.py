@@ -40,6 +40,9 @@ QWEN_DIR = _resolve_model_dir(BASE / "models" / "models" / "Qwen3-ASR-1.7B")
 SV_DIR = _resolve_model_dir(BASE / "models" / "models" / "iic--SenseVoiceSmall")
 VAD_DIR = _resolve_model_dir(BASE / "models" / "models" / "fsmn-vad")
 VAD_MODELSCOPE_ID = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+GTCRN_PATH = BASE / "models" / "models" / "gtcrn_simple.onnx"
+GTCRN_URL = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/"
+             "speech-enhancement-models/gtcrn_simple.onnx")
 SR = 16000
 
 # 播放器语言码 → 引擎语言参数
@@ -213,6 +216,80 @@ def detect_dominant_language(model, vad, audio16k, sample_n: int = 12,
     return top if n * 2 > len(votes) else None
 
 
+# ------------------------------------------------------------- 人声降噪
+def load_denoiser(status: Callable[[str], None] = print):
+    """gtcrn 人声降噪（常驻，0.5MB CPU 流式，实测段级 52ms/整段 RTF 0.05）。
+
+    模型缺失时自动从 sherpa-onnx 官方 release 下载（0.5MB，秒级）。
+    返回 None 表示不可用（调用方跳过降噪）。
+    """
+    import sherpa_onnx
+
+    if not GTCRN_PATH.is_file():
+        status("降噪模型缺失，自动下载 gtcrn（0.5MB）...")
+        import urllib.request
+
+        GTCRN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            req = urllib.request.Request(GTCRN_URL, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=60) as resp, \
+                    open(GTCRN_PATH, "wb") as fp:
+                fp.write(resp.read())
+        except Exception as exc:  # noqa: BLE001
+            status(f"✗ 降噪模型下载失败: {exc}")
+            return None
+    try:
+        cfg = sherpa_onnx.OfflineSpeechDenoiserConfig(
+            model=sherpa_onnx.OfflineSpeechDenoiserModelConfig(
+                gtcrn=sherpa_onnx.OfflineSpeechDenoiserGtcrnModelConfig(
+                    model=str(GTCRN_PATH))))
+        if not cfg.validate():
+            return None
+        return sherpa_onnx.OfflineSpeechDenoiser(cfg)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def denoise_audio(denoiser, audio16k, progress=None,
+                  should_cancel=None) -> "np.ndarray":
+    """整段人声降噪（削环境音；VAD 前置用——降噪后 VAD 能捞出被噪音
+    淹没的弱语音段，实测嘈杂片源语音段 22→71）。失败原样返回。
+
+    progress(done_secs, total_secs)：分块进度回调（SRT 进度窗显示，
+    避免长片 2-4 分钟静默被当成卡死）。分块与整段结果一致（gtcrn
+    流式模型按块独立，实测零差异），单块失败跳过该块。
+    should_cancel()：块间检查——取消 SRT/实时任务时立即中止降噪，
+    返回 None 表示已取消（调用方按取消处理，不再进入转写）。
+    """
+    if denoiser is None:
+        return audio16k
+    import numpy as _np
+
+    total = len(audio16k)
+    chunk = int(300 * SR)  # 5 分钟/块：32 分钟片约 7 块，每块 ~20s
+
+    def _run_block(block):
+        out = denoiser.run(block, SR)
+        cleaned = _np.asarray(out.samples, dtype=_np.float32)
+        return cleaned if cleaned.size == block.size else block
+
+    try:
+        if total <= chunk:
+            if should_cancel is not None and should_cancel():
+                return None
+            return _run_block(audio16k)
+        pieces = []
+        for pos in range(0, total, chunk):
+            if should_cancel is not None and should_cancel():
+                return None
+            pieces.append(_run_block(audio16k[pos:pos + chunk]))
+            if progress is not None:
+                progress(min(total, pos + chunk) / SR, total / SR)
+        return _np.concatenate(pieces)
+    except Exception:  # noqa: BLE001
+        return audio16k
+
+
 # ------------------------------------------------------------- sensevoice
 def load_sensevoice(device: str = "cuda", status: Callable[[str], None] = print):
     """返回 funasr AutoModel(SenseVoiceSmall)。"""
@@ -244,6 +321,26 @@ def sv_transcribe(model, audio16k, lang: str | None) -> str:
 
 
 # ------------------------------------------------------- 容器音频时间轴
+def has_audio_stream(media: str) -> bool:
+    """媒体是否含可解码的音频流。
+
+    无音轨的视频（纯画面录屏、抽掉音轨的片源）在解码入口会以
+    `container.streams.audio[0]` → IndexError: tuple index out of range
+    崩掉任务；调用方先问一句，就能给出"此视频没有音轨"的明确结论，
+    而不是把底层索引错误抛给用户，也不会让播放器把它当成"转写失败、
+    继续补洞"而无限重试（实测同一文件连刷 18 轮）。
+
+    读取失败（文件损坏/无权限）时返回 False——同样不该进入转写。
+    """
+    try:
+        import av
+
+        with av.open(str(media), mode="r", metadata_errors="ignore") as container:
+            return len(container.streams.audio) > 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def audio_stream_start(media: str) -> float:
     """音频流在媒体时间轴上的起始偏移（秒），用于把 ASR 时间戳修正到媒体时间。
 
@@ -284,18 +381,35 @@ def load_vad(status: Callable[[str], None] = print):
                      disable_update=True, **kw)
 
 
+# fsmn-vad 单次调用的输入上限（秒）：超长整段偶发 funasr streaming-cache bug
+#（lfr_splice_cache 空列表崩溃，SRT 长片实测）——分块调用彻底绕开，
+# 且分块与整段结果完全一致（300s 实测 22 段 / 25.1s 语音零差异）。
+VAD_CHUNK_SECS = 120.0
+
+
 def vad_segments(vad, audio16k) -> list[tuple[float, float]]:
-    """VAD 语音段（秒）；单段 ≤10s 由模型保证，MAX_SEG_SECS 兜底。"""
+    """VAD 语音段（秒）；单段 ≤10s 由模型保证，MAX_SEG_SECS 兜底。
+
+    超过 VAD_CHUNK_SECS 的输入分块调用（块间边界段如实保留——实测
+    与整段调用结果一致），规避 funasr 长输入的偶发崩溃。
+    """
     total = len(audio16k) / SR
     if total <= 0:
         return []
-    res = vad.generate(input=audio16k)
-    raw = []
-    for item in res or []:
-        for start_ms, end_ms in item.get("value") or []:
-            s, e = start_ms / 1000.0, end_ms / 1000.0
-            if e - s >= MIN_SEG_SECS:
-                raw.append((max(0.0, s), min(total, e)))
+    raw: list[tuple[float, float]] = []
+    chunk = int(VAD_CHUNK_SECS * SR)
+    for pos in range(0, len(audio16k), chunk):
+        block = audio16k[pos:pos + chunk]
+        offset = pos / SR
+        try:
+            res = vad.generate(input=block)
+        except Exception:  # noqa: BLE001 单块失败：跳过该块（不炸整任务）
+            continue
+        for item in res or []:
+            for start_ms, end_ms in item.get("value") or []:
+                s, e = offset + start_ms / 1000.0, offset + end_ms / 1000.0
+                if e - s >= MIN_SEG_SECS:
+                    raw.append((max(0.0, s), min(total, e)))
     out: list[tuple[float, float]] = []
     for s, e in raw:
         while e - s > MAX_SEG_SECS:
@@ -336,6 +450,8 @@ def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
                       language_lock_after: int | None = LANGUAGE_LOCK_SEGMENTS,
                       lang_observer=None,
                       seg_lang_sink=None,
+                      forced_seg_sink=None,
+                      initial_lock: str | None = None,
                       ) -> Iterator[tuple[float, float, str]]:
     """按 block_secs 块推进（保持实时产出），块内 VAD 切段逐段转写。
 
@@ -355,6 +471,13 @@ def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
     seg_lang_sink(start, end, code)：每个 **auto 转写段**的检测结果回调
     （强制解码段的 detected 不可信，不回调）。实时字幕用它记录"哪一段
     曾被判成什么语言"，探测确立主导语言后只重跑判错的段。
+    forced_seg_sink(start, end, lang_used)：每个 **强制解码段**回调，记录
+    当时用的语言。initial_lock 来自缓存时，这些段是"赌缓存正确"的产物；
+    一旦后来探测出别的主导语言，调用方要按此记录把它们重跑。
+    initial_lock：预置锁定语言（同一文件此前已探明主导语言时用）。它让
+    短段从第一段起就有上下文兜底，省掉重新攒票/重新抽样探测的开销；
+    只作为初始值，长段仍恒 auto 投票，窗口滑动后可被推翻（缓存万一是
+    错的不会被永久固化）。
     """
     total = len(audio16k) / SR
     pos = 0.0
@@ -364,6 +487,12 @@ def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
         else max(0, int(language_lock_after))
     locked_lang: str | None = None
     votes: list[str] = []
+    if forced_lang is None and lock_after and initial_lock:
+        # 预置锁：塞满 lock_after 张票让它立刻生效，但只占投票窗口的一部分——
+        # 后续长段（恒 auto，自识别可靠）会把这些票挤出窗口，缓存判错时
+        # 3 个一致的长段就能翻锁
+        locked_lang = str(initial_lock)
+        votes = ([locked_lang] * lock_after)[-LANGUAGE_VOTE_WINDOW:]
 
     def _tally() -> str | None:
         """投票窗口的多数语言（票数 ≥ lock_after 才算锁定）。"""
@@ -395,6 +524,9 @@ def stream_transcribe(model, vad, kind: str, audio16k, lang: str | None,
                     code = detected_language_code(detected)
                     if code is not None:
                         seg_lang_sink(pos + s, pos + e, code)
+                elif ask is not None and forced_seg_sink is not None:
+                    # 强制解码段：记录当时用的语言，供"缓存锁判错"时定位重跑区间
+                    forced_seg_sink(pos + s, pos + e, str(ask))
                 if forced_lang is None and lock_after and long_seg:
                     code = detected_language_code(detected)
                     if code is not None:

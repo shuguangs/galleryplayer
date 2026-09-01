@@ -68,3 +68,19 @@ CODE_MAP.md
 
 # ---------- 本地临时测试脚本（含真实媒体路径，不上传） ----------
 _thumb_bug_test/
+
+# ---------- Spark 评测存档（模型+脚本+结果，本地保留，不提交） ----------
+_spark_archive/
+
+# ---------- 本地未发布测试（仅本地保留，不提交） ----------
+tests/conftest.py
+tests/test_automation_mode.py
+tests/test_i18n_and_live_style.py
+tests/test_no_audio_handling.py
+tests/test_settings_layout.py
+tests/test_thumb_grid_plan.py
+tests/test_thumb_grid_ui.py
+tests/_mutation_check_thumbgrid.py
+live-subtitle/tests/_mutation_check.py
+live-subtitle/tests/test_lang_cache.py
+live-subtitle/tests/test_no_audio.py

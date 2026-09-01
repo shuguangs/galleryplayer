@@ -22,6 +22,10 @@ DEFAULTS: dict[str, Any] = {
     "muted": False,
     "speed": 1.0,
     "sub_font_size": 42,
+    "sub_color": "#ffffff",          # 正常字幕颜色（mpv sub-color）
+    "sub_outline": 0,                # 反色描边档位 0=关 1-4=粗细
+    "live_caption_color": "#ffffff", # 实时字幕颜色（覆盖层）
+    "live_caption_outline": 0,       # 实时字幕反色描边 0=关 1-4=粗细
     "sub_visible": True,
     "resume_enabled": True,
     "autoplay_next": False,
@@ -63,12 +67,32 @@ DEFAULTS: dict[str, Any] = {
     "live_caption_resident": True,     # 实时字幕常驻：停止时保留模型进程（重开秒出）
     "live_caption_source": "audio",    # 字幕来源: audio=文件音轨（本地播放，推荐）/ loopback=系统声音
     "live_caption_lang": "auto",        # 字幕识别语言: zh/yue/en/ja/ko/fr/de/es/auto
+    "live_caption_denoise": False,      # 实时字幕人声降噪（嘈杂片源推荐；首段延迟按片长×0.05 增加）
+    "srt_denoise": True,                # 生成 SRT 人声降噪（离线默认开；gtcrn 0.5MB 自动下载）
     "live_asr_model": "qwen",          # 识别引擎: qwen/sensevoice/tiny/base/small/medium/large-v3
     "live_model_preset": "accurate",   # fast/balanced/accurate/custom
     "live_asr_dir": "",                # 字幕模型目录（空=HF 缓存下载；可指向本地 faster-whisper 模型文件夹）
     "live_model_preload": True,        # 启动播放器时后台预载字幕模型（不阻塞界面）
     "hardware_aware_model": False,     # 根据显存自动选择合适识别模型
     "archive_no_thumbs": False,        # 压缩包浏览时不加载缩略图（加快浏览）
+    # 缩略图网格（拼接图）默认参数
+    "thumbgrid_save_dir": "",          # 全局默认输出目录（空=视频所在目录/Thumbnails）
+    "thumbgrid_cols": 5,               # 列数 1-10
+    "thumbgrid_rows": 5,               # 行数 1-10（1×1 = 单张截图）
+    "thumbgrid_width": 160,            # 单格宽 px
+    "thumbgrid_format": "jpg",         # jpg / png
+    "thumbgrid_quality": 88,           # JPG 质量 40-100（PNG 无损，不改这个值）
+    # 抓帧方式（可多选，一次生成里每种模式各出一张图）：
+    # even 均匀 / trim 跳过片头尾 / interval 固定间隔 / range 自定义时间段 /
+    # random 随机 / exact 精确时间点 / cover 封面单帧
+    "thumbgrid_modes": ["even"],
+    "thumbgrid_trim_head": 5.0,        # 跳过片头百分比
+    "thumbgrid_trim_tail": 5.0,        # 跳过片尾百分比
+    "thumbgrid_interval": 30.0,        # 固定间隔秒数
+    "thumbgrid_range_start": "",       # 自定义时间段起（支持 90 / 1:30 / 1:02:03）
+    "thumbgrid_range_end": "",         # 自定义时间段止（空=到片尾）
+    "thumbgrid_random_count": 1,       # 随机模式产出几张结果图 1-10
+    "thumbgrid_exact_times": "",       # 精确时间点，逗号分隔
     "filter_show_image": True,         # 筛选复选框：显示图片
     "filter_show_video": True,         # 筛选复选框：显示视频
     "filter_show_archive": True,       # 筛选复选框：显示压缩包

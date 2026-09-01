@@ -252,6 +252,7 @@ def matches() -> bool:
         and current.get("translate") == str(settings["live_ollama_model"])
         and current.get("target") == str(settings["live_translate_target"])
         and current.get("idle") == int(settings["live_caption_idle_unload"])
+        and current.get("denoise") == bool(settings["live_caption_denoise"])
         # scenario 不参与比较：它随每个任务下发（job["scenario"]），改场景无需
         # 重建引擎（否则要白等一次 20-60s 的模型重载）。state 里仍写它便于诊断
     )
@@ -349,6 +350,8 @@ def start_preload() -> bool:
         "--scenario", str(settings["translate_scenario"]),
         "--idle-unload", str(int(settings["live_caption_idle_unload"])),
     ]
+    if bool(settings["live_caption_denoise"]):
+        args.append("--denoise")
     if model_dir_arg():
         args += ["--model-dir", model_dir_arg()]
     if str(settings["live_ollama_model"]) != "none":

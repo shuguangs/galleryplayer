@@ -22,6 +22,28 @@ APP_DIR = app_dir()
 VENDOR_DIR = APP_DIR / "vendor"
 USERDATA_DIR = APP_DIR / "userdata"
 
+# 自动化/测试模式：置 PLAYER_AUTOMATION=1 后，所有"等用户点一下"的模态
+# 询问框都不再弹出，而是走各自的安全默认分支（见 automation_mode 的调用点）。
+# 起因：截图/回归脚本每次启动都被"上次未正常退出，是否恢复播放列表"和
+# 退出时的"实时字幕模型是否保留"挡住，必须手点才能继续。
+_AUTOMATION_ENV = "PLAYER_AUTOMATION"
+
+
+def automation_mode() -> bool:
+    """当前是否为自动化模式（不弹任何需要用户确认的模态框）。
+
+    每次都读环境变量而不是缓存成模块常量：测试可以在导入之后再打开它。
+    """
+    return os.environ.get(_AUTOMATION_ENV, "") not in ("", "0", "false", "False")
+
+
+def set_automation_mode(enabled: bool) -> None:
+    """供测试/脚本在进程内开关自动化模式。"""
+    if enabled:
+        os.environ[_AUTOMATION_ENV] = "1"
+    else:
+        os.environ.pop(_AUTOMATION_ENV, None)
+
 
 def init_libmpv() -> None:
     """Make the bundled libmpv discoverable. Raises with a clear message if absent."""

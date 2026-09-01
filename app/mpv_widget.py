@@ -80,6 +80,7 @@ class MpvWidget(QOpenGLWidget):
                 "sub-font-size": str(int(settings["sub_font_size"])),
                 "sub-border-size": "2.4",
                 "sub-shadow-offset": "0.6",
+                "sub-color": str(settings["sub_color"] or "#ffffff"),
                 "sub-visibility": "yes" if settings["sub_visible"] else "no",
                 "demuxer-max-bytes": "32MiB",  # plenty for local files
                 "cache": "yes",
@@ -354,6 +355,30 @@ class MpvWidget(QOpenGLWidget):
         size = max(16, min(96, size))
         self.mpv.sub_font_size = size
         settings["sub_font_size"] = size
+
+    def apply_sub_color_style(self) -> None:
+        """字幕颜色 + 反色描边（sub-color/sub-border-color），实时生效。
+
+        白色字幕在白色画面上不可见（用户实测）——允许改颜色；描边档位
+        0=关，>0=反色描边（白字黑边/黑字白边）且粗细随档位放大。
+        """
+        color = str(settings["sub_color"] or "#ffffff")
+        outline = int(settings["sub_outline"] or 0)
+        try:
+            self.mpv.sub_color = color
+            if outline > 0:
+                # 反色（mpv 的 sub-border-color 同为 #RRGGBB）
+                r = int(color[1:3], 16)
+                g = int(color[3:5], 16)
+                b = int(color[5:7], 16)
+                inverse = f"#{255 - r:02x}{255 - g:02x}{255 - b:02x}"
+                self.mpv.sub_border_color = inverse
+                self.mpv.sub_border_size = 1.2 + outline * 0.9
+            else:
+                self.mpv.sub_border_size = 2.4  # 默认黑边
+                self.mpv.sub_border_color = "#000000"
+        except Exception:
+            pass
 
     @property
     def sub_font_size(self) -> int:

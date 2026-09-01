@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QVBoxLayout,
@@ -34,9 +36,10 @@ from PySide6.QtWidgets import (
 class FlowLayout(QLayout):
     """按钮空间不足时自动换行，避免窗口缩窄后控件被吞掉。"""
 
-    def __init__(self, parent=None, margin=0, spacing=6):
+    def __init__(self, parent=None, margin=0, spacing=6, align_right=False):
         super().__init__(parent)
         self._items = []
+        self._align_right = bool(align_right)
         self.setContentsMargins(margin, margin, margin, margin)
         self.setSpacing(spacing)
 
@@ -66,9 +69,19 @@ class FlowLayout(QLayout):
         self._do_layout(rect, False)
 
     def sizeHint(self):
-        return self.minimumSize()
+        """一行排开的宽度作为建议值：宽窗口下不无谓换行。"""
+        margins = self.contentsMargins()
+        width = 0
+        height = 0
+        for i, item in enumerate(self._items):
+            hint = item.sizeHint()
+            width += hint.width() + (self.spacing() if i else 0)
+            height = max(height, hint.height())
+        return QSize(width + margins.left() + margins.right(),
+                     height + margins.top() + margins.bottom())
 
     def minimumSize(self):
+        """最窄只需容纳最宽的一个控件——其余靠换行，不再顶宽整页。"""
         size = QSize()
         for item in self._items:
             size = size.expandedTo(item.minimumSize())
@@ -76,26 +89,48 @@ class FlowLayout(QLayout):
         return size + QSize(margins.left() + margins.right(),
                             margins.top() + margins.bottom())
 
+    def _lines(self, area_width):
+        """把控件切成若干行，返回 [(行内 (item, 宽) 列表, 行宽, 行高), ...]。"""
+        lines = []
+        cur, cur_w, cur_h = [], 0, 0
+        spacing = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            width = min(hint.width(), area_width)
+            add_w = width + (spacing if cur else 0)
+            if cur and cur_w + add_w > area_width:
+                lines.append((cur, cur_w, cur_h))
+                cur, cur_w, cur_h = [], 0, 0
+                add_w = width
+            cur.append((item, width))
+            cur_w += add_w
+            cur_h = max(cur_h, hint.height())
+        if cur:
+            lines.append((cur, cur_w, cur_h))
+        return lines
+
     def _do_layout(self, rect, test_only):
         margins = self.contentsMargins()
         area = rect.adjusted(margins.left(), margins.top(),
                              -margins.right(), -margins.bottom())
-        x, y = area.x(), area.y()
-        line_height = 0
         spacing = self.spacing()
-        for item in self._items:
-            hint = item.sizeHint()
-            next_x = x + hint.width() + spacing
-            if line_height and next_x - spacing > area.right() + 1:
-                x = area.x()
-                y += line_height + spacing
-                next_x = x + hint.width() + spacing
-                line_height = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x = next_x
-            line_height = max(line_height, hint.height())
-        return y + line_height - rect.y() + margins.bottom()
+        y = area.y()
+        total = y
+        lines = self._lines(max(1, area.width()))
+        for index, (cells, line_w, line_h) in enumerate(lines):
+            if index:
+                y += spacing
+            x = area.x()
+            if self._align_right and line_w < area.width():
+                x += area.width() - line_w  # 靠右：与旧 addStretch 行为一致
+            for item, width in cells:
+                if not test_only:
+                    item.setGeometry(QRect(QPoint(x, y), QSize(width, line_h)))
+                x += width + spacing
+            y += line_h
+            total = y
+        return total - rect.y() + margins.bottom()
+
 
 from . import assoc, theme
 from .config import (
@@ -135,18 +170,224 @@ def _section(title: str) -> QLabel:
     return lab
 
 
+# 行首标签宽度：对齐用的"建议宽"，但最小宽必须小于它，否则每一行都
+# 把整页最小宽顶高 150px，窄窗口下右侧控件被推出滚动视口（实测）。
+_CAP_HINT_W = 150
+_CAP_MIN_W = 84
+
+
+class _CapLabel(QLabel):
+    """建议宽 150（列对齐）+ 最小宽 84（可压缩）的行首标签。"""
+
+    def sizeHint(self):  # noqa: N802
+        hint = super().sizeHint()
+        return QSize(max(hint.width(), _CAP_HINT_W), hint.height())
+
+    def minimumSizeHint(self):  # noqa: N802
+        hint = super().minimumSizeHint()
+        return QSize(min(hint.width(), _CAP_MIN_W), hint.height())
+
+
+class _FlexLabel(QLabel):
+    """网格里的字段标签：可换行，最小宽封顶 84。
+
+    普通 QLabel 即便开了 wordWrap，最小宽仍是"最长单词"宽（英文
+    "Translation target" ≈ 132px）。几列这样的标签叠加就能把分组最小宽
+    顶过窗口宽度，右侧下拉/按钮被推出滚动视口。
+    """
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+
+    def minimumSizeHint(self):  # noqa: N802
+        hint = super().minimumSizeHint()
+        width = min(hint.width(), _CAP_MIN_W)
+        return QSize(width, max(hint.height(), self.heightForWidth(width)))
+
+
+def _flow_row(*widgets: QWidget, spacing: int = 8, align_right: bool = False) -> QWidget:
+    """按钮组容器：窄窗口自动换行，且容器高度跟着换行增长。
+
+    普通 QWidget 的 sizePolicy 不声明 heightForWidth，父布局按 sizeHint
+    高度（单行）给高——换行后的第二行被切在容器外，按钮"消失"（实测）。
+    """
+    from PySide6.QtWidgets import QSizePolicy
+
+    box = QWidget()
+    lay = FlowLayout(box, spacing=spacing, align_right=align_right)
+    for w in widgets:
+        lay.addWidget(w)
+    policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+    policy.setHeightForWidth(True)
+    box.setSizePolicy(policy)
+    return box
+
+
+class _WrapCheckBox(QCheckBox):
+    """文字可换行的复选框。
+
+    QCheckBox 不支持 wordWrap：它的最小宽 = 指示器 + 整句文字宽。本页有
+    十来个整句说明式选项，英文界面下单个复选框最小宽可达 876px，直接把
+    设置页内容最小宽顶到 984px——远超默认窗口 640，右侧按钮和下拉全被
+    推出滚动视口（就是"按钮显示不全 / 改变窗口大小挡住按钮"）。
+
+    这里自绘：指示器交给当前样式画（外观与原生一致），文字用 TextWordWrap
+    自己排版，并向布局声明 heightForWidth，换行后行高自动增长。
+    仍是真正的 QCheckBox——toggled/isChecked/setToolTip 等用法完全不变。
+    """
+
+    _MAX_MIN_TEXT_W = 160  # 最小宽里给文字留的上限
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        # 水平策略必须带 ShrinkFlag（Preferred/Ignored 才有），否则布局用
+        # qSmartMinSize 取 max(minimumSizeHint, sizeHint) —— 自定义的小
+        # 最小宽会被整句 sizeHint 盖掉（实测 MinimumExpanding 下英文仍是
+        # 876px）。Preferred + heightForWidth 才真的允许压缩换行。
+        policy = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def _style_option(self):
+        from PySide6.QtWidgets import QStyleOptionButton
+
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        return opt
+
+    def _decoration_width(self) -> int:
+        """指示器 + 间距占宽（文字可用宽 = 控件宽 - 这个值）。"""
+        from PySide6.QtWidgets import QStyle
+
+        opt = self._style_option()
+        style = self.style()
+        return (style.pixelMetric(QStyle.PM_IndicatorWidth, opt, self)
+                + style.pixelMetric(QStyle.PM_CheckBoxLabelSpacing, opt, self)
+                + 2 * style.pixelMetric(QStyle.PM_FocusFrameHMargin, opt, self))
+
+    def _indicator_height(self) -> int:
+        from PySide6.QtWidgets import QStyle
+
+        return self.style().pixelMetric(QStyle.PM_IndicatorHeight,
+                                        self._style_option(), self)
+
+    def _text_rect(self, width: int) -> QRect:
+        if not self.text():
+            return QRect()
+        return self.fontMetrics().boundingRect(
+            QRect(0, 0, max(1, width), 0), Qt.TextWordWrap, self.text())
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        text_h = self._text_rect(width - self._decoration_width()).height()
+        # 下限用原生 sizeHint 高度：单行时与普通复选框一样高（含样式内边距），
+        # 否则布局会把它压到 16px，比同页其它选项矮一截。
+        return max(super().sizeHint().height(),
+                   max(self._indicator_height(), text_h) + 2)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        """最小宽只保证指示器 + 一小段文字，其余交给换行。"""
+        metrics = self.fontMetrics()
+        words = [w for w in self.text().split() if w]
+        longest = max((metrics.horizontalAdvance(w) for w in words), default=0)
+        if longest <= 0 or longest > self._MAX_MIN_TEXT_W:
+            # 中文无空格：整句算一个"词"，退回固定小宽度
+            longest = min(metrics.horizontalAdvance("中文四字"),
+                          self._MAX_MIN_TEXT_W)
+        width = self._decoration_width() + min(longest, self._MAX_MIN_TEXT_W)
+        return QSize(width, self.heightForWidth(width))
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        from PySide6.QtGui import QPainter
+        from PySide6.QtWidgets import QStyle, QStyleOptionButton
+
+        painter = QPainter(self)
+        opt = self._style_option()
+        # 只让样式画指示器：文字摘掉，避免样式按不换行裁剪
+        indicator_opt = QStyleOptionButton(opt)
+        indicator_opt.text = ""
+        # 指示器与第一行文字对齐（多行时不要垂直居中到整块中间）
+        first_line = max(self._indicator_height(), self.fontMetrics().height())
+        indicator_opt.rect = QRect(0, 0, self.width(), first_line)
+        self.style().drawControl(QStyle.CE_CheckBox, indicator_opt, painter, self)
+
+        if not self.text():
+            return
+        left = self._decoration_width()
+        painter.setPen(self.palette().color(
+            QPalette.Normal if self.isEnabled() else QPalette.Disabled,
+            QPalette.WindowText))
+        painter.drawText(QRect(left, 0, max(1, self.width() - left), self.height()),
+                         Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop,
+                         self.text())
+
+
+def _mini_field(label: str, widget: QWidget) -> QWidget:
+    """紧凑的"小标签 + 小控件"组，作为 FlowLayout 的换行单元。"""
+    from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QWidget
+
+    box = QWidget()
+    lay = QHBoxLayout(box)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(6)
+    cap = QLabel(label)
+    lay.addWidget(cap)
+    widget.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+    lay.addWidget(widget)
+    return box
+
+
+def _dir_row(label: str, edit: QLineEdit, *buttons: QPushButton) -> QWidget:
+    """目录行：标签 + 竖排两行（输入框全宽 / 按钮横排靠右）。
+
+    旧行结构（标签+输入+2 按钮挤一行 5 列网格）的最小宽 ~724px 超过
+    窗口最小宽 520——按钮被滚动区裁掉完全点不到（实测复现）。竖排后
+    groupbox 最小宽贴合窗口，窄窗口下输入框仍可用、按钮永不下岗。
+
+    按钮行用 FlowLayout：窄窗口下按钮换行而不是被挤出视口。
+    """
+    from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
+
+    wrap = QWidget()
+    lay = QHBoxLayout(wrap)
+    lay.setContentsMargins(0, 2, 0, 2)
+    lay.setSpacing(8)
+    cap = _CapLabel(label)
+    cap.setWordWrap(True)
+    cap.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+    lay.addWidget(cap, 0, Qt.AlignTop)
+
+    panel = QWidget()
+    pl = QVBoxLayout(panel)
+    pl.setContentsMargins(0, 0, 0, 0)
+    pl.setSpacing(4)
+    # 输入框最小宽不能跟着内容走（长路径会把整页顶宽）
+    edit.setMinimumWidth(80)
+    pl.addWidget(edit)
+    for b in buttons:
+        b.setFocusPolicy(Qt.NoFocus)
+    pl.addWidget(_flow_row(*buttons, spacing=6, align_right=True))
+    lay.addWidget(panel, 1)
+    return wrap
+
+
 def _row(label: str, widget: QWidget, hint: str = "") -> QWidget:
     wrap = QWidget()
     lay = QHBoxLayout(wrap)
     lay.setContentsMargins(0, 2, 0, 2)
     lay.setSpacing(8)
-    cap = QLabel(label)
-    cap.setMinimumWidth(150)
+    cap = _CapLabel(label)
+    cap.setWordWrap(True)
     lay.addWidget(cap)
-    lay.addWidget(widget)
+    lay.addWidget(widget, 2 if not hint else 0)  # 无提示行：控件吃余量（拉伸自适应）
     if hint:
         h = QLabel(hint)
         h.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        # 不换行的提示 QLabel 最小宽 = 整段文字宽，是窄窗口超宽的隐形推手
+        h.setWordWrap(True)
         lay.addWidget(h, 1)
     else:
         lay.addStretch(1)
@@ -162,6 +403,8 @@ class SettingsDialog(QDialog):
         super().__init__(None)
         self.setWindowFlag(Qt.Window, True)
         self.setWindowTitle(t("settings.title"))
+        # 设计下限；首次 show 时 _fit_minimum_width 会按内容真实最小宽抬高，
+        # 保证"缩到最小"时所有按钮/下拉仍完整可见。
         self.setMinimumWidth(520)
         self.resize(640, 480)
         self.setStyleSheet(
@@ -186,7 +429,10 @@ class SettingsDialog(QDialog):
         self._scroll_area = scroll  # 滚轮转发目标（见 eventFilter）
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 横向滚动只作最后兜底：内容最小宽已能压到窗口最小宽以内
+        # （见 _fit_minimum_width / _apply_text_wrap），正常不会出现。
+        # 曾用 AlwaysOff——内容被静默裁掉，右侧按钮物理上点不到。
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         scroll.setStyleSheet(
             "QScrollArea { background: transparent; }"
             f"QScrollBar:vertical {{ background: {theme.BG_BASE}; width: 10px; margin: 0; }}"
@@ -195,6 +441,12 @@ class SettingsDialog(QDialog):
             f"QScrollBar::handle:vertical:hover {{ background: {theme.ACCENT_DIM}; }}"
             f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}"
             f"QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}"
+            f"QScrollBar:horizontal {{ background: {theme.BG_BASE}; height: 10px; margin: 0; }}"
+            f"QScrollBar::handle:horizontal {{ background: {theme.BG_HOVER};"
+            f" border-radius: 5px; min-width: 30px; }}"
+            f"QScrollBar::handle:horizontal:hover {{ background: {theme.ACCENT_DIM}; }}"
+            f"QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}"
+            f"QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: none; }}"
         )
         content = QWidget()
         content.setObjectName("SettingsContent")
@@ -220,22 +472,22 @@ class SettingsDialog(QDialog):
 
         # ---- 播放
         root.addWidget(_section(t("settings.section_play")))
-        self.cb_resume = QCheckBox(t("settings.resume_label"))
+        self.cb_resume = _WrapCheckBox(t("settings.resume_label"))
         self.cb_resume.setChecked(bool(settings["resume_enabled"]))
         self.cb_resume.toggled.connect(lambda v: self._set("resume_enabled", v))
         root.addWidget(self.cb_resume)
 
-        self.cb_autoplay = QCheckBox(t("settings.autoplay_label"))
+        self.cb_autoplay = _WrapCheckBox(t("settings.autoplay_label"))
         self.cb_autoplay.setChecked(bool(settings["autoplay_next"]))
         self.cb_autoplay.toggled.connect(lambda v: self._set("autoplay_next", v))
         root.addWidget(self.cb_autoplay)
 
-        self.cb_native = QCheckBox(t("settings.native_size_label"))
+        self.cb_native = _WrapCheckBox(t("settings.native_size_label"))
         self.cb_native.setChecked(bool(settings["open_native_size"]))
         self.cb_native.toggled.connect(lambda v: self._set("open_native_size", v))
         root.addWidget(self.cb_native)
 
-        self.cb_scroll = QCheckBox(t("settings.remember_scroll_label"))
+        self.cb_scroll = _WrapCheckBox(t("settings.remember_scroll_label"))
         self.cb_scroll.setChecked(bool(settings["remember_scroll"]))
         self.cb_scroll.toggled.connect(lambda v: self._set("remember_scroll", v))
         root.addWidget(self.cb_scroll)
@@ -272,7 +524,72 @@ class SettingsDialog(QDialog):
         self.sp_subsize.valueChanged.connect(lambda v: self._set("sub_font_size", v))
         root.addWidget(_row(t("settings.subsize_label"), self.sp_subsize, t("settings.next_video_hint")))
 
-        self.cb_subvis = QCheckBox(t("settings.sub_visible_label"))
+        # ---- 字幕颜色 / 描边（正常字幕 + 实时字幕）：白色字幕在白色
+        # 画面不可见（实测）——可改颜色；描边档位给反色描边（白字黑边）
+        def _color_row(setting_key: str, outline_key: str, label: str,
+                       on_change) -> QWidget:
+            from PySide6.QtGui import QColor
+            from PySide6.QtWidgets import QColorDialog
+
+            box = QWidget()
+            lay = QHBoxLayout(box)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(6)
+
+            cur = str(settings[setting_key] or "#ffffff")
+
+            def _pick() -> None:
+                nonlocal cur
+                c = QColorDialog.getColor(QColor(cur), self,
+                                          t("settings.pick_sub_color"))
+                if not c.isValid():
+                    return
+                cur = c.name()
+                settings[setting_key] = cur
+                btn.setStyleSheet(
+                    f"QPushButton {{ background:{cur}; border:1px solid #888;"
+                    f" border-radius:4px; min-width:36px; min-height:20px; }}")
+                on_change()
+                self._set(setting_key, cur)
+
+            btn = QPushButton()
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.setToolTip(t("settings.pick_sub_color"))
+            btn.setStyleSheet(
+                f"QPushButton {{ background:{cur}; border:1px solid #888;"
+                f" border-radius:4px; min-width:36px; min-height:20px; }}")
+            btn.clicked.connect(_pick)
+            lay.addWidget(btn)
+
+            sp = QSpinBox()
+            sp.setRange(0, 4)
+            sp.setSpecialValueText(t("settings.outline_off"))
+            sp.setValue(int(settings[outline_key] or 0))
+            sp.setToolTip(t("settings.outline_hint"))
+            sp.valueChanged.connect(lambda v: (self._set(outline_key, v),
+                                               on_change()))
+            lay.addWidget(sp)
+            lay.addStretch(1)
+            wrap = _row(label, box, t("settings.outline_label"))
+            return wrap
+
+        # 正常字幕（mpv）：改动立即作用于正在播放的视频
+        def _apply_mpv_sub_style() -> None:
+            for v in self._viewer_targets():
+                v.video_view.apply_sub_color_style()
+
+        root.addWidget(_color_row("sub_color", "sub_outline",
+                                  t("settings.sub_color_label"), _apply_mpv_sub_style))
+
+        # 实时字幕（覆盖层）
+        def _apply_live_style() -> None:
+            for v in self._viewer_targets():
+                v.refresh_live_caption_style()
+
+        root.addWidget(_color_row("live_caption_color", "live_caption_outline",
+                                  t("settings.live_color_label"), _apply_live_style))
+
+        self.cb_subvis = _WrapCheckBox(t("settings.sub_visible_label"))
         self.cb_subvis.setChecked(bool(settings["sub_visible"]))
         self.cb_subvis.toggled.connect(lambda v: self._set("sub_visible", v))
         root.addWidget(self.cb_subvis)
@@ -298,11 +615,7 @@ class SettingsDialog(QDialog):
         self.sp_width.valueChanged.connect(lambda v: self._set("gif_max_width", v))
         root.addWidget(_row(t("settings.gif_width_label"), self.sp_width, t("settings.pixels_unit")))
 
-        # ---- 截图保存路径
-        shot_box = QWidget()
-        sb = QHBoxLayout(shot_box)
-        sb.setContentsMargins(0, 0, 0, 0)
-        sb.setSpacing(6)
+        # ---- 截图保存路径（竖排两行：窄窗口按钮不裁剪）
         self.edit_shot_path = QLineEdit()
         self.edit_shot_path.setReadOnly(True)
         self.edit_shot_path.setPlaceholderText(t("settings.shot_path_placeholder"))
@@ -313,26 +626,21 @@ class SettingsDialog(QDialog):
         custom = str(settings["capture_path"] or "").strip()
         if custom:
             self.edit_shot_path.setText(custom)
-        sb.addWidget(self.edit_shot_path, 1)
         btn_browse = QPushButton(t("settings.browse_ellipsis"))
-        btn_browse.setFocusPolicy(Qt.NoFocus)
         btn_browse.clicked.connect(self._browse_shot_path)
-        sb.addWidget(btn_browse)
         btn_open = QPushButton(t("settings.open"))
-        btn_open.setFocusPolicy(Qt.NoFocus)
         btn_open.clicked.connect(self._open_shot_folder)
-        sb.addWidget(btn_open)
         btn_clear = QPushButton(t("settings.clear"))
-        btn_clear.setFocusPolicy(Qt.NoFocus)
-        btn_clear.clicked.connect(lambda: (self.edit_shot_path.clear(), self._set("capture_path", "")))
-        sb.addWidget(btn_clear)
-        root.addWidget(_row(t("settings.shot_path_label"), shot_box, t("settings.shot_path_hint")))
+        btn_clear.clicked.connect(lambda: (self.edit_shot_path.clear(),
+                                           self._set("capture_path", "")))
+        root.addWidget(_dir_row(t("settings.shot_path_label"),
+                                self.edit_shot_path, btn_browse, btn_open, btn_clear))
+        shot_hint = QLabel(t("settings.shot_path_hint"))
+        shot_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        shot_hint.setWordWrap(True)
+        root.addWidget(shot_hint)
 
-        # ---- 压缩包解压缓存路径
-        arch_box = QWidget()
-        ab = QHBoxLayout(arch_box)
-        ab.setContentsMargins(0, 0, 0, 0)
-        ab.setSpacing(6)
+        # ---- 压缩包解压缓存路径（竖排两行）
         self.edit_archive_path = QLineEdit()
         self.edit_archive_path.setReadOnly(True)
         self.edit_archive_path.setPlaceholderText(t("settings.archive_path_placeholder"))
@@ -343,24 +651,145 @@ class SettingsDialog(QDialog):
         custom_arch = str(settings["archive_cache"] or "").strip()
         if custom_arch:
             self.edit_archive_path.setText(custom_arch)
-        ab.addWidget(self.edit_archive_path, 1)
         btn_ab = QPushButton(t("settings.browse_ellipsis"))
-        btn_ab.setFocusPolicy(Qt.NoFocus)
         btn_ab.clicked.connect(self._browse_archive_path)
-        ab.addWidget(btn_ab)
         btn_ac = QPushButton(t("settings.clear"))
-        btn_ac.setFocusPolicy(Qt.NoFocus)
-        btn_ac.clicked.connect(lambda: (self.edit_archive_path.clear(), self._set("archive_cache", "")))
-        ab.addWidget(btn_ac)
-        root.addWidget(_row(t("settings.archive_path_label"), arch_box, t("settings.archive_path_hint")))
+        btn_ac.clicked.connect(lambda: (self.edit_archive_path.clear(),
+                                        self._set("archive_cache", "")))
+        root.addWidget(_dir_row(t("settings.archive_path_label"),
+                                self.edit_archive_path, btn_ab, btn_ac))
+        arch_hint = QLabel(t("settings.archive_path_hint"))
+        arch_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        arch_hint.setWordWrap(True)
+        root.addWidget(arch_hint)
 
-        self.cb_archive_no_thumbs = QCheckBox(t("settings.archive_no_thumbs_label"))
+        self.cb_archive_no_thumbs = _WrapCheckBox(t("settings.archive_no_thumbs_label"))
         self.cb_archive_no_thumbs.setChecked(bool(settings["archive_no_thumbs"]))
         self.cb_archive_no_thumbs.toggled.connect(lambda v: self._set("archive_no_thumbs", v))
         root.addWidget(self.cb_archive_no_thumbs)
         no_thumbs_hint = QLabel(t("settings.archive_no_thumbs_hint"))
         no_thumbs_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         root.addWidget(no_thumbs_hint)
+
+        # ---- 缩略图网格（全局默认值：右键生成时的预填参数）
+        from PySide6.QtWidgets import QGridLayout, QGroupBox
+
+        tg = QGroupBox(t("settings.section_thumbgrid"))
+        tg.setStyleSheet(
+            f"QGroupBox {{ border:1px solid {theme.BORDER}; border-radius:6px;"
+            f" margin-top:6px; padding-top:2px; }}"
+            f"QGroupBox::title {{ subcontrol-origin:margin; left:10px;"
+            f" padding:0 4px; color:{theme.TEXT_DIM}; }}"
+        )
+        tgl = QGridLayout(tg)
+        tgl.setContentsMargins(8, 6, 8, 6)
+        tgl.setSpacing(4)
+        tgl.setColumnStretch(0, 0)
+        tgl.setColumnStretch(1, 2)
+        tgl.setColumnStretch(2, 1)
+        tgl.setColumnStretch(3, 0)
+
+        self.edit_thumbgrid_dir = QLineEdit()
+        self.edit_thumbgrid_dir.setPlaceholderText(t("settings.thumbgrid_save_hint"))
+        self.edit_thumbgrid_dir.setText(str(settings["thumbgrid_save_dir"] or "").strip())
+        self.edit_thumbgrid_dir.editingFinished.connect(
+            lambda: self._set("thumbgrid_save_dir",
+                              self.edit_thumbgrid_dir.text().strip()))
+        btn_tg = QPushButton(t("settings.browse_ellipsis"))
+        btn_tg.setFocusPolicy(Qt.NoFocus)
+        btn_tg.clicked.connect(self._browse_thumbgrid_dir)
+        tg_dir_box = QHBoxLayout()
+        tg_dir_box.setContentsMargins(0, 0, 0, 0)
+        tg_dir_box.addWidget(self.edit_thumbgrid_dir, 1)
+        tg_dir_box.addWidget(btn_tg)
+        tg_dir_box.addWidget(QLabel())  # 占位对齐清除按钮
+        tgl.addWidget(_FlexLabel(t("thumbgrid.save_dir")), 0, 0)
+        tgl.addLayout(tg_dir_box, 0, 1, 1, 3)
+
+        self.sp_tg_cols = QSpinBox()
+        self.sp_tg_cols.setRange(1, 10)
+        self.sp_tg_cols.setValue(int(settings["thumbgrid_cols"] or 5))
+        self.sp_tg_cols.valueChanged.connect(
+            lambda v: self._set("thumbgrid_cols", v))
+        tgl.addWidget(_FlexLabel(t("thumbgrid.columns")), 1, 0)
+        tgl.addWidget(self.sp_tg_cols, 1, 1)
+
+        self.sp_tg_rows = QSpinBox()
+        self.sp_tg_rows.setRange(1, 10)
+        self.sp_tg_rows.setValue(int(settings["thumbgrid_rows"] or 5))
+        self.sp_tg_rows.valueChanged.connect(
+            lambda v: self._set("thumbgrid_rows", v))
+        tgl.addWidget(_FlexLabel(t("thumbgrid.rows")), 1, 2)
+        tgl.addWidget(self.sp_tg_rows, 1, 3)
+
+        self.sp_tg_width = QSpinBox()
+        self.sp_tg_width.setRange(80, 640)
+        self.sp_tg_width.setSingleStep(20)
+        self.sp_tg_width.setSuffix(" px")
+        self.sp_tg_width.setValue(int(settings["thumbgrid_width"] or 160))
+        self.sp_tg_width.valueChanged.connect(
+            lambda v: self._set("thumbgrid_width", v))
+        tgl.addWidget(_FlexLabel(t("thumbgrid.cell_width")), 2, 0)
+        tgl.addWidget(self.sp_tg_width, 2, 1)
+
+        self.cb_tg_fmt = QComboBox()
+        self.cb_tg_fmt.addItem("JPG", "jpg")
+        self.cb_tg_fmt.addItem("PNG", "png")
+        _fi = self.cb_tg_fmt.findData(str(settings["thumbgrid_format"] or "jpg"))
+        self.cb_tg_fmt.setCurrentIndex(max(0, _fi))
+        self.cb_tg_fmt.currentIndexChanged.connect(
+            lambda _i: self._set("thumbgrid_format", self.cb_tg_fmt.currentData()))
+        tgl.addWidget(_FlexLabel(t("thumbgrid.format")), 2, 2)
+        tgl.addWidget(self.cb_tg_fmt, 2, 3)
+
+        self.sp_tg_quality = QSpinBox()
+        self.sp_tg_quality.setRange(40, 100)
+        self.sp_tg_quality.setValue(int(settings["thumbgrid_quality"] or 88))
+        self.sp_tg_quality.setToolTip(t("thumbgrid.quality_tip"))
+        self.sp_tg_quality.valueChanged.connect(
+            lambda v: self._set("thumbgrid_quality", v))
+        # 质量说明原先只挂在 spinbox 的 tooltip 上，标签是裸的——用户在
+        # 标签上悬停什么也不出现，等于没实装。补一个可见的 `?` 说明入口。
+        from .thumb_grid_options import _HelpDot as _TgHelpDot
+
+        tg_quality_label = _FlexLabel(t("thumbgrid.quality"))
+        tg_quality_label.setToolTip(t("thumbgrid.quality_tip"))
+        tgl.addWidget(tg_quality_label, 3, 0)
+        tg_q_box = QHBoxLayout()
+        tg_q_box.setContentsMargins(0, 0, 0, 0)
+        tg_q_box.setSpacing(4)
+        tg_q_box.addWidget(self.sp_tg_quality, 1)
+        tg_q_box.addWidget(_TgHelpDot(t("thumbgrid.quality_tip")))
+        tgl.addLayout(tg_q_box, 3, 1)
+
+        # 抓帧方式（多选）：与生成对话框共用同一个控件，这里存的是全局默认
+        from .thumb_grid_options import _ModeMultiCombo, _modes_from_settings
+
+        self.cb_tg_modes = _ModeMultiCombo()
+        self.cb_tg_modes.setSelectedModes(_modes_from_settings())
+        self.cb_tg_modes.changed.connect(
+            lambda: self._set("thumbgrid_modes",
+                              list(self.cb_tg_modes.selectedModes())))
+        tg_modes_label = _FlexLabel(t("thumbgrid.modes"))
+        tg_modes_label.setToolTip(t("thumbgrid.modes_hint"))
+        tgl.addWidget(tg_modes_label, 3, 2)
+        tg_m_box = QHBoxLayout()
+        tg_m_box.setContentsMargins(0, 0, 0, 0)
+        tg_m_box.setSpacing(4)
+        tg_m_box.addWidget(self.cb_tg_modes, 1)
+        tg_m_box.addWidget(_TgHelpDot(t("thumbgrid.modes_hint")))
+        tgl.addLayout(tg_m_box, 3, 3)
+
+        tg_modes_hint = QLabel(t("settings.thumbgrid_modes_hint"))
+        tg_modes_hint.setWordWrap(True)
+        tg_modes_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        tgl.addWidget(tg_modes_hint, 4, 0, 1, 4)
+
+        tg_hint = QLabel(t("settings.thumbgrid_save_hint"))
+        tg_hint.setWordWrap(True)
+        tg_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        tgl.addWidget(tg_hint, 5, 0, 1, 4)
+        root.addWidget(tg)
 
         # ---- 字幕引擎 + 实时字幕（分组网格）
         from PySide6.QtWidgets import QGridLayout, QGroupBox
@@ -375,26 +804,30 @@ class SettingsDialog(QDialog):
         gg = QGridLayout(grp)
         gg.setContentsMargins(8, 6, 8, 6)
         gg.setSpacing(4)
+        # 列拉伸：窗口拉大时输入框/下拉跟随变宽（QGridLayout 默认列宽固定在
+        # 初始 sizeHint——曾导致拉伸设置窗控件纹丝不动，实测复现）
+        gg.setColumnStretch(0, 0)   # 标签列：固定
+        gg.setColumnStretch(1, 2)   # 输入/下拉主列：吃掉余量
+        gg.setColumnStretch(2, 1)
+        gg.setColumnStretch(3, 0)
+        gg.setColumnStretch(4, 0)
 
-        # 引擎目录
+        # 引擎目录（竖排两行：输入框全宽 + 按钮行——单行 5 列结构最小宽
+        # 724px 超出窗口最小宽，按钮被裁剪点不到）
         self.edit_subtitle_dir = QLineEdit()
         self.edit_subtitle_dir.setReadOnly(True)
         self.edit_subtitle_dir.setPlaceholderText(t("settings.subtitle_dir_placeholder"))
         self.edit_subtitle_dir.setToolTip(t("settings.subtitle_dir_hint"))
         self.edit_subtitle_dir.setText(str(settings["subtitle_pipeline_dir"] or "").strip())
         btn_sb = QPushButton(t("settings.browse_ellipsis"))
-        btn_sb.setFocusPolicy(Qt.NoFocus)
         btn_sb.clicked.connect(self._browse_subtitle_dir)
         btn_sc = QPushButton(t("settings.detect"))
-        btn_sc.setFocusPolicy(Qt.NoFocus)
         btn_sc.clicked.connect(self._detect_subtitle_dir)
-        gg.addWidget(QLabel(t("settings.subtitle_dir_label")), 0, 0)
-        gg.addWidget(self.edit_subtitle_dir, 0, 1, 1, 2)
-        gg.addWidget(btn_sb, 0, 3)
-        gg.addWidget(btn_sc, 0, 4)
+        root.addWidget(_dir_row(t("settings.subtitle_dir_label"),
+                                self.edit_subtitle_dir, btn_sb, btn_sc))
         self.sub_status = QLabel("")
         self.sub_status.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        gg.addWidget(self.sub_status, 1, 0, 1, 5)
+        root.addWidget(self.sub_status)
         self._refresh_subtitle_status()
 
         # 识别引擎（下拉）：Qwen3-ASR / SenseVoice / whisper 各档位
@@ -453,6 +886,11 @@ class SettingsDialog(QDialog):
         self.cb_live_lang.setCurrentIndex(max(0, idx))
         self.cb_live_lang.currentIndexChanged.connect(
             lambda _i: self._set("live_caption_lang", self.cb_live_lang.currentData()))
+        # 这个下拉以前建好后忘了 addWidget——控件从未进入任何布局，
+        # "识别语言"在设置页里完全看不到（settings 里只能手改 JSON）。
+        # 放在识别引擎（第 2 行）之前的第 1 行。
+        gg.addWidget(_CapLabel(t("settings.live_lang_label")), 1, 0)
+        gg.addWidget(self.cb_live_lang, 1, 1, 1, 2)
 
         # 生成 SRT 的翻译模型：与实时字幕分开；可选用 llama.cpp 大模型（仅 SRT 时启动）
         self.cb_srt_translate = QComboBox()
@@ -470,7 +908,7 @@ class SettingsDialog(QDialog):
         self.cb_srt_translate.setToolTip(t("settings.srt_translate_hint"))
         self.cb_srt_translate.currentIndexChanged.connect(
             lambda _i: self._set("srt_translate_model", self.cb_srt_translate.currentData()))
-        gg.addWidget(QLabel(t("settings.srt_translate_label")), 14, 0)
+        gg.addWidget(_FlexLabel(t("settings.srt_translate_label")), 14, 0)
         gg.addWidget(self.cb_srt_translate, 14, 1, 1, 2)
         srt_hint = QLabel(t("settings.srt_translate_hint"))
         srt_hint.setWordWrap(True)
@@ -487,7 +925,7 @@ class SettingsDialog(QDialog):
         self.cb_translate_target.currentIndexChanged.connect(
             lambda _i: self._set("live_translate_target",
                                  self.cb_translate_target.currentData()))
-        gg.addWidget(QLabel(t("settings.translate_target_label")), 16, 0)
+        gg.addWidget(_FlexLabel(t("settings.translate_target_label")), 16, 0)
         gg.addWidget(self.cb_translate_target, 16, 1)
 
         self.cb_srt_format = QComboBox()
@@ -497,7 +935,7 @@ class SettingsDialog(QDialog):
         self.cb_srt_format.setCurrentIndex(max(0, idx))
         self.cb_srt_format.currentIndexChanged.connect(
             lambda _i: self._set("srt_export_format", self.cb_srt_format.currentData()))
-        gg.addWidget(QLabel(t("settings.srt_format_label")), 16, 2)
+        gg.addWidget(_FlexLabel(t("settings.srt_format_label")), 16, 2)
         gg.addWidget(self.cb_srt_format, 16, 3)
 
         # 空闲自动释放显存（引擎侧 N 分钟无任务即卸载模型，下次任务自动重载）
@@ -509,13 +947,11 @@ class SettingsDialog(QDialog):
         self.spin_idle_unload.setToolTip(t("settings.idle_unload_hint"))
         self.spin_idle_unload.valueChanged.connect(
             lambda v: self._set("live_caption_idle_unload", int(v) * 60))
-        gg.addWidget(QLabel(t("settings.idle_unload_label")), 17, 0)
+        gg.addWidget(_FlexLabel(t("settings.idle_unload_label")), 17, 0)
         gg.addWidget(self.spin_idle_unload, 17, 1)
 
-        # 内容场景提示词组：按片源类型微调翻译语气与术语策略。放第 17 行的空
-        # 单元格（col 2/3）——这张表其余行只有 0-4 五列、跨行说明都是 colspan=5，
-        # 另开第 6 列会把分组最小宽度再拉宽近 200px，而新控件正好落在默认窗宽
-        # 之外（要横向滚动才看得到）
+        # 内容场景提示词组：按片源类型微调翻译语气与术语策略。独占第 21 行
+        # （旧 17 行 col2/3 与空闲释放并排——4 列一行是窄窗口超宽的主要来源）
         self.cb_translate_scenario = QComboBox()
         for scenario in load_scenarios():
             labels = scenario["label"]
@@ -527,27 +963,37 @@ class SettingsDialog(QDialog):
         self.cb_translate_scenario.currentIndexChanged.connect(
             lambda _i: self._set("translate_scenario",
                                  self.cb_translate_scenario.currentData()))
-        gg.addWidget(QLabel(t("settings.translate_scenario_label")), 17, 2)
-        gg.addWidget(self.cb_translate_scenario, 17, 3)
+        gg.addWidget(_FlexLabel(t("settings.translate_scenario_label")), 21, 0)
+        gg.addWidget(self.cb_translate_scenario, 21, 1, 1, 4)
 
         # 实时字幕覆盖层：字号 + 覆盖范围（按播放区域百分比）
+        # 三个值都必须回灌到已打开的播放器：字号走样式表，覆盖范围走
+        # Viewer._relayout 的几何计算。旧版只写 settings 不通知 Viewer——
+        # 用户改完字号"对实时字幕无效"，要重开播放器才生效（实测）。
+        def _push_live_display() -> None:
+            for v in self._viewer_targets():
+                v.refresh_live_caption_style()
+
         self.spin_live_font = QSpinBox()
         self.spin_live_font.setRange(12, 96)
         self.spin_live_font.setValue(int(settings["live_caption_font_size"]))
         self.spin_live_font.valueChanged.connect(
-            lambda v: self._set("live_caption_font_size", int(v)))
+            lambda v: (self._set("live_caption_font_size", int(v)),
+                       _push_live_display()))
         self.spin_live_width = QSpinBox()
         self.spin_live_width.setRange(40, 100)
         self.spin_live_width.setSuffix("%")
         self.spin_live_width.setValue(int(settings["live_caption_width"]))
         self.spin_live_width.valueChanged.connect(
-            lambda v: self._set("live_caption_width", int(v)))
+            lambda v: (self._set("live_caption_width", int(v)),
+                       _push_live_display()))
         self.spin_live_height = QSpinBox()
         self.spin_live_height.setRange(8, 40)
         self.spin_live_height.setSuffix("%")
         self.spin_live_height.setValue(int(settings["live_caption_height"]))
         self.spin_live_height.valueChanged.connect(
-            lambda v: self._set("live_caption_height", int(v)))
+            lambda v: (self._set("live_caption_height", int(v)),
+                       _push_live_display()))
         for widget, key in (
             (self.spin_live_font, "live_caption_font_size"),
             (self.spin_live_width, "live_caption_width"),
@@ -555,18 +1001,18 @@ class SettingsDialog(QDialog):
         ):
             widget.setToolTip(t("settings.live_caption_display_hint"))
 
-        gg.addWidget(QLabel(t("settings.live_asr_label")), 2, 0)
+        gg.addWidget(_FlexLabel(t("settings.live_asr_label")), 2, 0)
         gg.addWidget(self.cb_live_asr, 2, 1)
-        gg.addWidget(QLabel(t("settings.live_model_preset_label")), 13, 0)
+        gg.addWidget(_FlexLabel(t("settings.live_model_preset_label")), 13, 0)
         gg.addWidget(self.cb_live_preset, 13, 1)
-        self.cb_hardware_model = QCheckBox(t("settings.hardware_aware_model_label"))
+        self.cb_hardware_model = _WrapCheckBox(t("settings.hardware_aware_model_label"))
         self.cb_hardware_model.setToolTip(t("settings.hardware_aware_model_hint"))
         self.cb_hardware_model.setChecked(bool(settings["hardware_aware_model"]))
         self.cb_hardware_model.toggled.connect(
             lambda value: self._set("hardware_aware_model", value)
         )
         gg.addWidget(self.cb_hardware_model, 13, 2, 1, 3)
-        gg.addWidget(QLabel(t("settings.live_translate_label")), 2, 2)
+        gg.addWidget(_FlexLabel(t("settings.live_translate_label")), 2, 2)
         gg.addWidget(self.cb_live_translate, 2, 3, 1, 2)
         # 所选引擎的资源需求 / 本机是否够（选择时即时更新）
         self.asr_hint = QLabel("")
@@ -576,23 +1022,35 @@ class SettingsDialog(QDialog):
         self._warn_model_resources(str(settings["live_asr_model"]))
         self._update_combo_resources()
 
-        # 模型目录（读取本地模型文件夹）
+        # 人声降噪：实时字幕（可选，默认关）与 SRT 生成（默认开）。
+        # 独占行（19/20）——曾加在 4/5 行与"模型目录""来源/保存"撞格，
+        # 控件叠放完全点不开（实测）。
+        self.cb_live_denoise = _WrapCheckBox(t("settings.live_denoise_label"))
+        self.cb_live_denoise.setChecked(bool(settings["live_caption_denoise"]))
+        self.cb_live_denoise.setToolTip(t("settings.live_denoise_hint"))
+        self.cb_live_denoise.toggled.connect(
+            lambda v: self._set("live_caption_denoise", v))
+        gg.addWidget(self.cb_live_denoise, 19, 0, 1, 5)
+        self.cb_srt_denoise = _WrapCheckBox(t("settings.srt_denoise_label"))
+        self.cb_srt_denoise.setChecked(bool(settings["srt_denoise"]))
+        self.cb_srt_denoise.setToolTip(t("settings.srt_denoise_hint"))
+        self.cb_srt_denoise.toggled.connect(
+            lambda v: self._set("srt_denoise", v))
+        gg.addWidget(self.cb_srt_denoise, 20, 0, 1, 5)
+
+        # 模型目录（同引擎目录：竖排两行，窄窗口按钮不裁剪）
         self.edit_asr_dir = QLineEdit()
         self.edit_asr_dir.setReadOnly(True)
         self.edit_asr_dir.setPlaceholderText(t("settings.live_asr_dir_hint"))
         self.edit_asr_dir.setToolTip(t("settings.live_asr_dir_hint"))
         self.edit_asr_dir.setText(str(settings["live_asr_dir"] or ""))
         btn_ad = QPushButton(t("settings.browse_ellipsis"))
-        btn_ad.setFocusPolicy(Qt.NoFocus)
         btn_ad.clicked.connect(self._browse_asr_dir)
         btn_ac = QPushButton(t("settings.clear"))
-        btn_ac.setFocusPolicy(Qt.NoFocus)
         btn_ac.clicked.connect(lambda: (self.edit_asr_dir.clear(),
                                         self._set("live_asr_dir", "")))
-        gg.addWidget(QLabel(t("settings.live_asr_dir_label")), 4, 0)
-        gg.addWidget(self.edit_asr_dir, 4, 1, 1, 2)
-        gg.addWidget(btn_ad, 4, 3)
-        gg.addWidget(btn_ac, 4, 4)
+        gg.addWidget(_dir_row(t("settings.live_asr_dir_label"),
+                              self.edit_asr_dir, btn_ad, btn_ac), 4, 0, 1, 5)
 
         # 来源 + 保存位置（下拉）
         self.cb_live_source = QComboBox()
@@ -611,12 +1069,13 @@ class SettingsDialog(QDialog):
         self.cb_subtitle_save.setCurrentIndex(max(0, idx))
         self.cb_subtitle_save.currentIndexChanged.connect(
             lambda _i: self._set("subtitle_save_dir", self.cb_subtitle_save.currentData()))
-        gg.addWidget(QLabel(t("settings.live_source_label")), 5, 0)
+        gg.addWidget(_FlexLabel(t("settings.live_source_label")), 5, 0)
         gg.addWidget(self.cb_live_source, 5, 1)
-        gg.addWidget(QLabel(t("settings.subtitle_save_label")), 5, 2)
-        gg.addWidget(self.cb_subtitle_save, 5, 3, 1, 2)
+        # 保存位置挪到独立行 6（旧 5 行 col2/3 并排：4 列一行是窄窗口超宽来源）
+        gg.addWidget(_FlexLabel(t("settings.subtitle_save_label")), 6, 0)
+        gg.addWidget(self.cb_subtitle_save, 6, 1)
 
-        self.cb_live_resident = QCheckBox(t("settings.live_resident_label"))
+        self.cb_live_resident = _WrapCheckBox(t("settings.live_resident_label"))
         # 显存占用随实际引擎变化，不写死数字
         from .live_engine import model_label, vram_footprint_gb
 
@@ -624,27 +1083,34 @@ class SettingsDialog(QDialog):
             model=model_label(), vram=f"{vram_footprint_gb():g}GB"))
         self.cb_live_resident.setChecked(bool(settings["live_caption_resident"]))
         self.cb_live_resident.toggled.connect(lambda v: self._set("live_caption_resident", v))
-        gg.addWidget(self.cb_live_resident, 6, 0, 1, 5)
+        gg.addWidget(self.cb_live_resident, 7, 0, 1, 5)
 
-        self.cb_live_preload = QCheckBox(t("settings.live_model_preload_label"))
+        self.cb_live_preload = _WrapCheckBox(t("settings.live_model_preload_label"))
         self.cb_live_preload.setToolTip(t("settings.live_model_preload_hint"))
         self.cb_live_preload.setChecked(bool(settings["live_model_preload"]))
         self.cb_live_preload.toggled.connect(lambda v: self._set("live_model_preload", v))
-        gg.addWidget(self.cb_live_preload, 9, 0, 1, 5)
+        gg.addWidget(self.cb_live_preload, 9, 0, 1, 6)
         preload_hint = QLabel(t("settings.live_model_preload_hint"))
         preload_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         preload_hint.setWordWrap(True)
-        gg.addWidget(preload_hint, 10, 0, 1, 5)
-        gg.addWidget(QLabel(t("settings.live_caption_display_label")), 7, 0)
-        gg.addWidget(self.spin_live_font, 7, 1)
-        gg.addWidget(QLabel(t("settings.live_caption_width_label")), 7, 2)
-        gg.addWidget(self.spin_live_width, 7, 3)
-        gg.addWidget(QLabel(t("settings.live_caption_height_label")), 8, 2)
-        gg.addWidget(self.spin_live_height, 8, 3)
+        gg.addWidget(preload_hint, 10, 0, 1, 6)
+        # 三个数值一行 6 列（标签+spin ×3）最小宽 389px，是本组第二大的顶宽
+        # 来源；改成可换行的 3 组小控件，窄窗口自动折成多行、不再挤出视口。
+        gg.addWidget(
+            _flow_row(
+                _mini_field(t("settings.live_caption_display_label"), self.spin_live_font),
+                _mini_field(t("settings.live_caption_width_label"), self.spin_live_width),
+                _mini_field(t("settings.live_caption_height_label"), self.spin_live_height),
+                spacing=10,
+            ),
+            8, 0, 1, 6,
+        )
         display_hint = QLabel(t("settings.live_caption_display_hint"))
         display_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         display_hint.setWordWrap(True)
-        gg.addWidget(display_hint, 8, 0, 1, 2)
+        # 旧版和 preload_hint 同占 (10,0)——两个 QLabel 直接叠在一起，
+        # 后加的把前一个盖掉（实测第 10 行只看得到一段文字）。独占 22 行。
+        gg.addWidget(display_hint, 22, 0, 1, 6)
 
         self.slider_bilingual = QSlider(Qt.Horizontal)
         self.slider_bilingual.setRange(0, 100)
@@ -653,14 +1119,14 @@ class SettingsDialog(QDialog):
         self.slider_bilingual.valueChanged.connect(
             lambda v: self._set("caption_bilingual_ratio", v / 100.0)
         )
-        gg.addWidget(QLabel(t("settings.caption_bilingual_label")), 11, 0)
+        gg.addWidget(_FlexLabel(t("settings.caption_bilingual_label")), 11, 0)
         gg.addWidget(self.slider_bilingual, 11, 1, 1, 4)
 
         self.edit_glossary = QLineEdit()
         self.edit_glossary.setPlaceholderText(t("settings.caption_glossary_hint"))
         self.edit_glossary.setText(self._format_glossary(settings["caption_glossary"]))
         self.edit_glossary.editingFinished.connect(self._save_glossary)
-        gg.addWidget(QLabel(t("settings.caption_glossary_label")), 12, 0)
+        gg.addWidget(_FlexLabel(t("settings.caption_glossary_label")), 12, 0)
         gg.addWidget(self.edit_glossary, 12, 1, 1, 4)
         root.addWidget(grp)
 
@@ -685,17 +1151,21 @@ class SettingsDialog(QDialog):
         self.install_mirror.addItem("huggingface.co", "huggingface")
         self.install_mirror.addItem("hf-mirror.com（国内快）", "hf-mirror")
         self.install_mirror.setToolTip(t("settings.install_mirror_hint"))
-        ig.addWidget(QLabel(t("settings.install_model_label")), 0, 0)
+        # 三个下拉竖排（一行一个）：旧 6 列单行结构最小宽 ~724px 超出窗口
+        # 最小宽 520，右侧镜像下拉在窄窗口被裁掉（实测）
+        ig.setColumnStretch(0, 0)
+        ig.setColumnStretch(1, 1)
+        ig.addWidget(_FlexLabel(t("settings.install_model_label")), 0, 0)
         ig.addWidget(self.install_model, 0, 1)
-        ig.addWidget(QLabel(t("settings.install_translate_label")), 0, 2)
-        ig.addWidget(self.install_translate, 0, 3)
-        ig.addWidget(QLabel(t("settings.install_mirror_label")), 0, 4)
-        ig.addWidget(self.install_mirror, 0, 5)
+        ig.addWidget(_FlexLabel(t("settings.install_translate_label")), 1, 0)
+        ig.addWidget(self.install_translate, 1, 1)
+        ig.addWidget(_FlexLabel(t("settings.install_mirror_label")), 2, 0)
+        ig.addWidget(self.install_mirror, 2, 1)
 
         self.install_hint = QLabel("")
         self.install_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         self.install_hint.setWordWrap(True)
-        ig.addWidget(self.install_hint, 1, 0, 1, 6)
+        ig.addWidget(self.install_hint, 3, 0, 1, 2)
 
         self.btn_install = QPushButton(t("settings.install_start"))
         self.btn_install.setFocusPolicy(Qt.NoFocus)
@@ -705,10 +1175,15 @@ class SettingsDialog(QDialog):
         self.btn_install_llama.setToolTip(t("settings.install_llama_hint"))
         self.btn_install_llama.clicked.connect(self._start_install_llama)
         self.install_status = QLabel("")
+        self.install_status.setWordWrap(True)
         self.install_status.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        ig.addWidget(self.btn_install, 2, 0)
-        ig.addWidget(self.btn_install_llama, 2, 2)
-        ig.addWidget(self.install_status, 2, 3, 1, 3)
+        # 按钮行：窄窗口自动换行（旧版并排放在两个网格格子里，窄窗口下
+        # 第二个按钮被推出滚动视口点不到）。不设 maximumWidth——英文
+        # 标题比中文长得多，限宽会把文字截断（实测 "Install SRT LLM
+        # translate" 需要 314px，旧上限 160px）。
+        ig.addWidget(_flow_row(self.btn_install, self.btn_install_llama, spacing=6),
+                     4, 0, 1, 2)
+        ig.addWidget(self.install_status, 5, 0, 1, 2)
 
         self.install_log = QPlainTextEdit()
         self.install_log.setReadOnly(True)
@@ -718,7 +1193,7 @@ class SettingsDialog(QDialog):
             f" border:1px solid {theme.BORDER}; border-radius:4px;"
             f" font-family:Consolas; font-size:11px; }}"
         )
-        ig.addWidget(self.install_log, 3, 0, 1, 6)
+        ig.addWidget(self.install_log, 6, 0, 1, 2)
         root.addWidget(inst_grp)
         self._update_install_hint()
 
@@ -744,31 +1219,25 @@ class SettingsDialog(QDialog):
             f" font-family:Consolas; font-size:11px; }}"
         )
         dg.addWidget(self.live_diag_log, 2, 0, 1, 4)
-        diag_buttons = QWidget()
-        diag_buttons_layout = FlowLayout(diag_buttons, spacing=6)
         btn_diag_refresh = QPushButton(t("settings.live_diagnostics_refresh"))
         btn_diag_refresh.setFocusPolicy(Qt.NoFocus)
         btn_diag_refresh.clicked.connect(self._refresh_live_diagnostics)
-        diag_buttons_layout.addWidget(btn_diag_refresh)
         btn_diag_restart = QPushButton(t("settings.live_diagnostics_restart"))
         btn_diag_restart.setFocusPolicy(Qt.NoFocus)
         btn_diag_restart.clicked.connect(self._restart_live_engine)
-        diag_buttons_layout.addWidget(btn_diag_restart)
-        dg.addWidget(diag_buttons, 3, 0, 1, 4)
+        dg.addWidget(_flow_row(btn_diag_refresh, btn_diag_restart, spacing=6),
+                     3, 0, 1, 4)
         root.addWidget(diag_grp)
         self._refresh_live_diagnostics()
         # ---- 文件关联
         root.addWidget(_section(t("settings.section_assoc")))
-        assoc_box = QWidget()
-        ab = FlowLayout(assoc_box, spacing=8)
         self.btn_assoc = QPushButton(t("settings.assoc_register"))
         self.btn_assoc.setFocusPolicy(Qt.NoFocus)
         self.btn_assoc.clicked.connect(self._register_assoc)
-        ab.addWidget(self.btn_assoc)
         self.btn_unassoc = QPushButton(t("settings.assoc_unregister"))
         self.btn_unassoc.setFocusPolicy(Qt.NoFocus)
         self.btn_unassoc.clicked.connect(self._unregister_assoc)
-        ab.addWidget(self.btn_unassoc)
+        assoc_box = _flow_row(self.btn_assoc, self.btn_unassoc, spacing=8)
         root.addWidget(assoc_box)
         self.assoc_hint = QLabel("")
         self.assoc_hint.setWordWrap(True)
@@ -793,6 +1262,12 @@ class SettingsDialog(QDialog):
         root.addStretch(1)
         scroll.setWidget(content)
         root_outer.addLayout(footer)
+
+        # 全部控件构建完成：应用下拉弹性策略（曾放在安装组后面——
+        # 之后创建的诊断/关联等组的下拉漏掉，且 widget 进滚动区前的
+        # 策略在部分布局路径下不生效，实测安装下拉恒 160px）
+        self._apply_text_wrap()
+        self._apply_flex_policies()
 
         # 悬停在下拉框/滑动条上滚轮会误改设置并卡住界面滚动——统一禁用，
         # 滚轮事件转发给设置页滚动区。安装动作放 showEvent 里反复执行，
@@ -1028,6 +1503,16 @@ class SettingsDialog(QDialog):
             self._set("subtitle_pipeline_dir", d)
             self._refresh_subtitle_status()
 
+    def _browse_thumbgrid_dir(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+
+        start = self.edit_thumbgrid_dir.text() or str(APP_DIR)
+        d = QFileDialog.getExistingDirectory(
+            self, t("thumbgrid.save_dir"), start)
+        if d:
+            self.edit_thumbgrid_dir.setText(d)
+            self._set("thumbgrid_save_dir", d)
+
     def _detect_subtitle_dir(self) -> None:
         from .config import find_subtitle_pipeline_dir
 
@@ -1077,6 +1562,9 @@ class SettingsDialog(QDialog):
     def showEvent(self, e) -> None:  # noqa: N802
         super().showEvent(e)
         self._install_wheel_filter()
+        # 控件 polish 之后才有可信的 minimumSizeHint（构造期偏大近一倍），
+        # 所以最小宽在这里定；语言切换后重开也会重新贴合。
+        self._fit_minimum_width()
 
     def eventFilter(self, watched, event) -> bool:  # noqa: N802
         from PySide6.QtCore import QEvent
@@ -1356,6 +1844,90 @@ class SettingsDialog(QDialog):
             self.assoc_hint.setText(t("settings.assoc_status_registered"))
         else:
             self.assoc_hint.setText(t("settings.assoc_status_unregistered"))
+
+    def _fit_minimum_width(self) -> None:
+        """窗口最小宽跟随内容真实最小宽，永不让控件被挤出可视区。
+
+        布局能压缩到什么程度有硬下限（按钮文字、SpinBox 数字都要完整显示）。
+        与其把窗口最小宽写死 520、让内容溢出后靠水平滚动"藏"住右侧按钮，
+        不如让窗口最小宽 = 内容最小宽 + 边距：用户最多只能缩到"刚好全部
+        可见"，再拖也不会遮住按钮。宽度足够时布局照常自适应。
+
+        必须在首次 show 之后调用：控件 polish（样式表生效）前 minimumSizeHint
+        偏大得多（实测英文 1130 vs 508），构造期取值会把最小宽定成两倍。
+        """
+        scroll = self._scroll_area
+        content = scroll.widget()
+        margins = self.layout().contentsMargins()
+        chrome = margins.left() + margins.right() + 2 * scroll.frameWidth()
+        # 竖向滚动条常驻（内容一定超高），它的宽度也要算进去
+        bar = scroll.verticalScrollBar().sizeHint().width()
+        needed = content.minimumSizeHint().width() + chrome + bar
+        # 520 是原有的设计下限（再窄纯属难用）；内容需要更宽时以内容为准。
+        needed = max(520, needed)
+        if needed == self.minimumWidth():
+            return
+        self.setMinimumWidth(needed)
+        if self.width() < needed:
+            self.resize(needed, self.height())
+
+    def _apply_text_wrap(self) -> None:
+        """所有说明性 QLabel 一律允许换行。
+
+        不换行的 QLabel 最小宽 = 整句像素宽。本页有几十条整句说明，
+        英文界面下单条可达 900px，把内容区最小宽顶到 914px——默认 640
+        窗口里右侧按钮/下拉直接被推出滚动视口。行首标签（_CapLabel）和
+        分节标题另有自己的宽度策略，跳过。
+        """
+        for lab in self.findChildren(QLabel):
+            if isinstance(lab, _CapLabel) or lab.wordWrap() or not lab.text():
+                continue
+            lab.setWordWrap(True)
+
+    def _viewer_targets(self) -> list:
+        """当前打开的 Viewer 实例（字幕样式/字号实时生效用）。
+
+        主窗口持有 viewer（懒创建）；设置对话框刻意不带 parent（独立窗口），
+        所以从 QApplication 的顶层窗口里找主窗口再取它的 viewer。
+
+        返回的是 Viewer 而不是 Viewer.video_view：实时字幕覆盖层挂在 Viewer
+        上，mpv 字幕在 video_view 上，两边都要能拿到（旧版只返回 video_view，
+        于是 `v._apply_live_caption_style()` 必然 AttributeError，实时字幕的
+        颜色/描边/字号在设置页里改完毫无反应）。
+        """
+        from PySide6.QtWidgets import QApplication
+
+        targets = []
+        for w in QApplication.topLevelWidgets():
+            viewer = getattr(w, "viewer", None)
+            if viewer is not None and hasattr(viewer, "refresh_live_caption_style"):
+                targets.append(viewer)
+        return targets
+
+    def _apply_flex_policies(self) -> None:
+        """下拉框弹性策略：Expanding（拉大窗口时吃满列宽）+ 可压缩最小宽。
+
+        QComboBox 默认水平 sizePolicy 是 Preferred——列拉伸设了它也不主动
+        占满格子（实测 920 宽窗口安装下拉恒 160px，选项文字显示不全）。
+
+        最小宽不能设 200：一行两个下拉的行最小宽 ≈ 标签+200+标签+200
+        ≈ 550px，直接把整页内容最小宽顶到 750px 以上——默认 640 窗口右侧
+        控件和按钮全被推出滚动视口（实测复现，用户反馈的"按钮显示不全"）。
+        改为 AdjustToMinimumContentsLength + 最小宽 108：窄窗口文字自动省略
+        号截断（有 tooltip 兜底），宽窗口仍由 Expanding 吃满列宽。
+        """
+        from PySide6.QtWidgets import QComboBox, QSizePolicy
+
+        for c in self.findChildren(QComboBox):
+            c.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            c.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+            c.setMinimumContentsLength(6)
+            c.setMinimumWidth(108)
+            if not c.toolTip():
+                # 无专属说明的下拉：tooltip 显示当前选项全文（窄窗口被省略号
+                # 截断时仍可读），并随选择变化更新。已有说明的不覆盖。
+                c.setToolTip(c.currentText())
+                c.currentTextChanged.connect(c.setToolTip)
 
     def closeEvent(self, e):  # noqa: ANN001
         flush()
