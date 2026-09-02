@@ -5,7 +5,7 @@
 ![平台](https://img.shields.io/badge/平台-Windows-0078D6?logo=windows&logoColor=white)
 ![便携](https://img.shields.io/badge/便携-免安装-green)
 ![实时字幕](https://img.shields.io/badge/实时字幕-AI双语-8A2BE2)
-![版本](https://img.shields.io/badge/版本-2.0-orange)
+![版本](https://img.shields.io/badge/版本-2.2-orange)
 ![License](https://img.shields.io/badge/License-保留所有权利-lightgrey)
 
 **English version: [README.md](README.md)**

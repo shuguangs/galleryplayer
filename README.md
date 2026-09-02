@@ -5,7 +5,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows&logoColor=white)
 ![Portable](https://img.shields.io/badge/Portable-No%20Install-green)
 ![Live%20Captions](https://img.shields.io/badge/Live_Captions-AI_Bilingual-8A2BE2)
-![Version](https://img.shields.io/badge/Version-2.1-orange)
+![Version](https://img.shields.io/badge/Version-2.2-orange)
 ![License](https://img.shields.io/badge/License-All%20Rights%20Reserved-lightgrey)
 
 **中文版：[README.zh-CN.md](README.zh-CN.md)**
