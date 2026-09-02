@@ -1245,6 +1245,17 @@ class SettingsDialog(QDialog):
         root.addWidget(self.assoc_hint)
         self._refresh_assoc_hint()
 
+        # ---- 诊断日志导出（启动日志：排查"打开软件白屏/未响应"用）
+        btn_export_log = QPushButton(t("settings.export_log"))
+        btn_export_log.setFocusPolicy(Qt.NoFocus)
+        btn_export_log.setToolTip(t("settings.export_log_hint"))
+        btn_export_log.clicked.connect(self._export_diagnostic_log)
+        export_hint = QLabel(t("settings.export_log_hint"))
+        export_hint.setWordWrap(True)
+        export_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        root.addWidget(_flow_row(btn_export_log, spacing=8))
+        root.addWidget(export_hint)
+
         # ---- footer
         root.addSpacing(8)
         note = QLabel(t("settings.footer_note"))
@@ -1795,6 +1806,57 @@ class SettingsDialog(QDialog):
             self.btn_install_llama.setEnabled(True)
             return
         proc.start(exe, [*prefix, str(script), "--dir", str(pipe), "--llamacpp-only"])
+
+    def _export_diagnostic_log(self) -> None:
+        """把诊断日志打包成 zip 放到播放器根文件夹。
+
+        日志平时一直在自动写（userdata/logs/startup_*.log，每次启动一份），
+        白屏/未响应发生时文件已经在盘上——这里只是把最近 5 份启动日志 +
+        引擎日志 + 环境信息打成 zip，落在播放器根目录，方便直接发回去。
+        """
+        import platform
+        import zipfile
+        from datetime import datetime
+        from PySide6.QtWidgets import QMessageBox
+
+        from . import startup_log
+        from .config import find_subtitle_pipeline_dir
+        from .runtime import USERDATA_DIR
+
+        zip_path = APP_DIR / f"播放器诊断日志_{datetime.now():%Y%m%d_%H%M%S}.zip"
+        candidates: list = startup_log.recent_logs(5)
+        candidates.append(USERDATA_DIR / "last_playlist.json")
+        pipe = find_subtitle_pipeline_dir()
+        if pipe is not None:
+            candidates += [
+                pipe / "live-caption.log",
+                pipe / "live-caption.err",
+                pipe / "live-caption.state",
+            ]
+        written = 0
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for src in candidates:
+                    if src.is_file():
+                        try:
+                            zf.write(src, src.name)
+                            written += 1
+                        except OSError:
+                            pass
+                zf.writestr("环境信息.txt",
+                            f"platform: {platform.platform()}\n"
+                            f"python: {platform.python_version()}\n"
+                            f"frozen: {bool(getattr(sys, 'frozen', False))}\n"
+                            f"exe: {sys.executable}\n"
+                            f"导出时间: {datetime.now():%Y-%m-%d %H:%M:%S}\n"
+                            f"包含文件数: {written}\n")
+            QMessageBox.information(
+                self, t("settings.export_log"),
+                t("settings.export_log_done").format(path=zip_path))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self, t("settings.export_log"),
+                t("settings.export_log_failed").format(err=exc))
 
     def _browse_archive_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog
