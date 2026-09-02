@@ -259,8 +259,8 @@ class MainWindow(QMainWindow):
         # 定时归位：元数据排序（时长/大小/时间）下，新探到数据的项
         # 累积在错误位置（如时长 None 区）——每 RESORT_INTERVAL 秒做一次
         # keep="anchor" 的完整重排，让它们回到应在的排序位置。锚定项=
-        # 当前选中项（无选中则视口首项）：用户看着的内容重排后仍在
-        # 原地，新探到项在其周围归位（用户明确要求的"定时刷新归位"）。
+        # 视口首项（绝不用选中项：选中一个项后继续下滑浏览是常态，
+        # 锚选中项会把视口弹回它的位置）。
         self._resort_interval_timer = QTimer(self)
         self._resort_interval_timer.setInterval(5000)
         self._resort_interval_timer.timeout.connect(self._periodic_resort)
@@ -1853,12 +1853,20 @@ class MainWindow(QMainWindow):
         return menu
 
     def _rename_media(self, path: Path) -> None:
-        if fileops.rename(self, path) is None:
+        new = fileops.rename(self, path)
+        if new is None:
             return
         # The name is part of the cached directory record, so the listing has to be
         # rebuilt from disk rather than from what the cache still believes.
         dircache.cache.forget(path.parent)
-        self.set_folder(self.folder, force=True)
+        # 就地改名 + keep="anchor" 重排：原来 set_folder(force) 全量重进，
+        # 模型先清空再铺回——视口回顶。retarget 顺带清掉旧排序键/缓存键
+        # （缩略图键含路径，改名后本来就要重探）。
+        for it in self.all_items:
+            if it.path == path:
+                it.retarget(new)
+                break
+        self._apply_view()
 
     def _recycle_media(self, paths: list[Path]) -> None:
         if not fileops.confirm_recycle(self, paths):
@@ -1869,7 +1877,14 @@ class MainWindow(QMainWindow):
             return
         for p in {p.parent for p in paths}:
             dircache.cache.forget(p)
-        self.set_folder(self.folder, force=True)
+        # 就地剔除 + keep="anchor" 重排（与五秒归位同一语义：锚定视口首
+        # 项，原地更新，不回顶）。原来 set_folder(force) 全量重进：模型
+        # 先清空、缓存相位走"全新内容"分支，观感是"删一个跳回顶部"。
+        # dircache 已 forget，下次进目录/F5 的全量扫描照常校正。
+        gone = {p for p in paths if not p.exists()}
+        if gone:
+            self.all_items = [it for it in self.all_items if it.path not in gone]
+            self._apply_view()
 
     def _tree_menu(self, pos) -> None:
         if self.tree is None:
@@ -2227,7 +2242,10 @@ class MainWindow(QMainWindow):
         if keep_path is not None and self.tiles is not None:
             for i, it in enumerate(items):
                 if it.path == keep_path:
-                    self.tiles.set_current_row(i)
+                    # 只恢复选中态，不滚动：选中项常已滚出视口（选中后
+                    # 继续下滑是常态），scroll_to 会把视口拽回它——定时
+                    # 归位/防抖重排/改排序全都会"跳回选中的视频"
+                    self.tiles.set_current_row(i, scroll=False)
                     break
 
     # ------------------------------------------------------------ 后台预热

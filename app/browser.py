@@ -339,15 +339,26 @@ class TileView(QAbstractScrollArea):
         bar.setValue(int(bar.maximum() * r))
 
     def _first_visible_item(self) -> MediaItem | None:
-        """视口顶部第一个可见项（重排前的锚点）。"""
+        """视口顶部第一个可见项（重排前的锚点）。
+
+        取"顶边在视口顶之下"的第一行：_visible_rows 带 200px 上余量，
+        直接取第一行常锚到视口上方一整行的项，重排把它对齐到视口顶时
+        视口每次下坠约一行——元数据排序的定时归位期间持续漂移。找不到
+        （如整个余量带被一个高 tile 跨越）才退回余量带首行。
+        """
         items = self.model.items
         if not items:
             return None
         off = self.verticalScrollBar().value()
+        first = None
         for row in self._visible_rows():
-            if 0 <= row < len(items):
+            if not (0 <= row < len(items)):
+                continue
+            if first is None:
+                first = items[row]
+            if self.rect_for(row).top() >= off - TILE_GAP:
                 return items[row]
-        return None
+        return first
 
     def _snapshot_selection(self) -> None:
         """model reset 前快照选中项路径（reset 后按路径重定位行号）。"""
