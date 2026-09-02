@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
     QDir,
+    QEvent,
     QModelIndex,
     QObject,
     QRunnable,
@@ -46,7 +47,7 @@ from .albums import albums, orders
 from .browser import DetailsView, MediaModel, TileView
 from .config import flush, settings
 from .i18n import t
-from .thumbs import ThumbnailCache
+from .thumbs import MAX_QUEUED_JOBS, ThumbnailCache, WARMUP_PRIO
 from .welcome import WelcomePage, remember_recent
 
 if TYPE_CHECKING:  # `viewer` pulls in libmpv; keep it off the startup path
@@ -201,7 +202,11 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self._startup_file: Path | None = startup_file
 
+        from . import startup_log as _slog
+
+        _slog.stage("init", "MainWindow.__init__ 开始")
         self.thumbs = ThumbnailCache(self)
+        _slog.stage("thumbs", "缩略图缓存构建完成")
         self.model = MediaModel(self)
         self.all_items: list[media.MediaItem] = []
         self.folder: Path | None = None
@@ -271,7 +276,11 @@ class MainWindow(QMainWindow):
         self._warmup_cursor = 0
 
         self._build_ui()
+        from . import startup_log as _slog
+
+        _slog.stage("build-ui", "工具栏/目录树/平铺视图构建完成")
         self._restore_state()
+        _slog.stage("restore-state", "窗口状态恢复完成")
         self._install_shortcuts()
 
         # Preferences are saved on close, but a crash or a force-kill would otherwise
@@ -908,8 +917,11 @@ class MainWindow(QMainWindow):
     def _preload_live_model(self) -> None:
         """Silently warm the subtitle engine without blocking the browser UI."""
         from . import live_engine
+        from . import startup_log
 
+        startup_log.stage("preload", "模型预载开始")
         live_engine.start_preload()
+        startup_log.stage("preload", "模型预载提交完成（引擎在后台加载）")
 
     def _gen_srt_for(self, path: Path) -> None:
         """后台生成 SRT 字幕：复用常驻模型，不打开播放器。
@@ -1341,6 +1353,9 @@ class MainWindow(QMainWindow):
         self.splitter.widget(0).setVisible(show)
 
     def _show_welcome(self) -> None:
+        from . import startup_log as _slog
+
+        _slog.stage("welcome", "欢迎页刷新开始")
         self.welcome.refresh_recent()
         self.stack.setCurrentWidget(self.welcome)
         self.col_slider.setVisible(False)
@@ -1348,6 +1363,7 @@ class MainWindow(QMainWindow):
         self.status_path.setText(t("main_window.no_folder"))
         self.status_count.setText("")
         self.setWindowTitle(t("main_window.title"))
+        _slog.stage("welcome", "欢迎页就绪")
 
     def _startup_play(self) -> None:
         """A file was passed on the command line ("open with").
@@ -1447,10 +1463,13 @@ class MainWindow(QMainWindow):
     def _maybe_restore_playlist(self) -> None:
         """上次会话未正常退出 → 询问是否恢复播放列表（路径收集在后台线程）。"""
         from .runtime import USERDATA_DIR, automation_mode
+        from . import startup_log
 
+        startup_log.stage("restore-prompt", "开始检查 last_playlist")
         # 外部打开（命令行/双击/转发）时用户意图明确：直接播给定的文件。
         # 恢复弹窗是模态的，此刻弹出来只会挡住刚打开的播放器。
         if self._startup_file is not None or self._external_open_session:
+            startup_log.stage("restore-prompt", "跳过（外部打开会话）")
             return
 
         try:
@@ -1474,6 +1493,8 @@ class MainWindow(QMainWindow):
             t("main_window.restore_playlist").format(n=len(paths)),
             QMessageBox.Yes | QMessageBox.No,
         )
+        startup_log.stage("restore-prompt",
+                          f"用户选择: {'恢复' if ret == QMessageBox.Yes else '不恢复'}")
         if ret != QMessageBox.Yes:
             # 拒绝恢复也要清掉脏标记，否则之后每次启动都会再弹
             self._clear_restore_flag()
@@ -1925,6 +1946,9 @@ class MainWindow(QMainWindow):
         folder = Path(folder)
         if folder == self.folder and not force:
             return
+        from . import startup_log
+
+        startup_log.stage("set-folder", f"打开文件夹 {folder}")
         # Record navigation history (skip if navigating from history or refreshing)
         if not force and not self._nav_from_history and self.folder is not None:
             self._save_scroll_pos()
@@ -1949,6 +1973,10 @@ class MainWindow(QMainWindow):
         recursive = self.btn_recursive.isChecked()
         self._scan_token += 1
         token = self._scan_token
+        # 种子每个文件夹只掷一次：cache/流式/done 各阶段共用，随机排序
+        # 在扫描各阶段间保持稳定——中途重掷会让列表整体洗牌，既闪一下
+        # 又留下按旧行号排队的过时缩略图请求
+        self._random_seed = secrets.randbits(30)
 
         self._streaming = True
         self._stream_items = []
@@ -2015,7 +2043,6 @@ class MainWindow(QMainWindow):
             # each of them twice when that pass lands.
             self._stream_items = []
             self.all_items = items
-            self._random_seed = secrets.randbits(30)
             if not self._quiet_scan:
                 self._apply_view(count_suffix=t("main_window.verifying_suffix"))
             return
@@ -2038,7 +2065,6 @@ class MainWindow(QMainWindow):
         self.all_items = self._stream_items
         self._stream_items = []
         self._streaming = False
-        self._random_seed = secrets.randbits(30)
         suffix = ""
         if stats is not None and stats.dirs_reused:
             suffix = t("main_window.cache_hit_suffix").format(
@@ -2205,10 +2231,14 @@ class MainWindow(QMainWindow):
                     break
 
     # ------------------------------------------------------------ 后台预热
-    WARMUP_BATCH = 8
-    WARMUP_FAST_MS = 1000      # 首轮消化（游标未走完）；视频解码 ~1s/个，
-                               # 8 项/批 + 1s 间隔≈全速但不压 GUI（meta
-                               # 风暴由 _resort_timer 700ms 防抖兜住）
+    # 预热水位：每轮 tick 把待解码队列补到这个数为止（队列上限的一半，
+    # 留一半给视口请求）。吞吐自动等于 worker 实际消化速度——磁盘命中/
+    # 图片便宜就补得快，视频贵就自动放慢；固定"每轮 8 个"会让 worker
+    # 吃完就空转大半秒，2 万项的文件夹要预热 40 多分钟。
+    WARMUP_QUEUE_TARGET = MAX_QUEUED_JOBS // 2
+    WARMUP_FAST_MS = 1000      # 首轮消化（游标未走完）；水位 + 1s 间隔的
+                               # 吞吐上限 128 项/s，远超 worker 速度且不压
+                               # GUI（meta 风暴由 _resort_timer 700ms 防抖兜住）
     WARMUP_POLL_MS = 15000     # 轮询模式（首轮走完，等失败重试/新增）
     WARMUP_DELAY_MS = 2000     # done 后延迟启动：避开 done 首绘 +
                                # 首批缩略图 ready 的重绘高峰（冷缓存实测
@@ -2231,10 +2261,14 @@ class MainWindow(QMainWindow):
     def _warmup_tick(self) -> None:
         """低优先级逐批请求未缓存项的缩略图/时长。
 
-        priority 用大值（1e17）：视口请求（priority=行号，小值）在调度
+        priority 用 WARMUP_PRIO：视口请求（priority=行号，小值）在调度
         堆里恒排前面——用户滚动时可见项优先，预热只消化余量。request
         内部判重（内存/磁盘命中或已排队都跳过提交，磁盘命中还会顺带
         回填 meta），所以这里无需自己查缓存。
+
+        节流按队列水位（WARMUP_QUEUE_TARGET）而非固定批量：本轮最多把
+        队列补到水位，补满即止——吞吐自动跟上 worker 的消化速度，worker
+        不会吃完工单后空转，GUI 压力也被队列上限封顶。
         """
         items = self.all_items
         if not items:
@@ -2245,8 +2279,9 @@ class MainWindow(QMainWindow):
         # 轮询模式下从 0 重扫（失败重试/新增项）
         if cursor >= n:
             cursor = 0
+        room = max(0, self.WARMUP_QUEUE_TARGET - self.thumbs.queued_count())
         submitted = 0
-        while cursor < n and submitted < self.WARMUP_BATCH:
+        while cursor < n and submitted < room:
             it = items[cursor]
             cursor += 1
             if it.is_archive:
@@ -2255,7 +2290,7 @@ class MainWindow(QMainWindow):
             # （无需处理）。磁盘缓存命中走 request 内部的 _load_from_disk
             # + _backfill_metadata 路径，同样提交。
             before = self.thumbs.peek(it)
-            self.thumbs.request(it, priority=1e17)
+            self.thumbs.request(it, priority=WARMUP_PRIO)
             if before is None:
                 submitted += 1
         self._warmup_cursor = cursor
@@ -2278,11 +2313,22 @@ class MainWindow(QMainWindow):
             from .viewer import Viewer  # imports mpv; deliberately deferred
 
             self.viewer = Viewer(self.thumbs, self._fs_model_for_panel)
+            # Show/Hide 事件驱动缩略图视频解码余量：播放器不可见时放开
+            # 第 2 路通用视频线程（见 ThumbnailCache.set_video_headroom）
+            self.viewer.installEventFilter(self)
             self.viewer.index_changed.connect(self._on_viewer_index)
             self.viewer.folder_requested.connect(self._on_panel_folder_requested)
             self.viewer.playlist_changed.connect(self._on_playlist_changed)
             self.viewer.sort_requested.connect(self._on_panel_sort_requested)
         return self.viewer
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.viewer and event.type() in (QEvent.Show, QEvent.Hide):
+            # 播放器不可见（关闭/隐藏）→ 放开第 2 路通用视频解码；
+            # 可见（含最小化，Qt 语义里 minimized 仍算 visible）→ 收回
+            # 单路，缩略图解码不与播放抢 CPU
+            self.thumbs.set_video_headroom(obj.isVisible())
+        return super().eventFilter(obj, event)
 
     def _on_panel_sort_requested(self, key: str, desc: bool) -> None:
         """The panel's sort combo changed; mirror it into the toolbar and re-sort."""

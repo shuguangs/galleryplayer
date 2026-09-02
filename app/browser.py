@@ -572,12 +572,19 @@ class TileView(QAbstractScrollArea):
             p.drawRect(self._rubber_rect)
         # keep decode work focused on what the user can actually see
         if not self.thumbs_suspended:
+            visible_keys: set[str] = set()
             for i in rows:
                 it = self.model.items[i]
                 if not it.is_archive:
                     # priority=行号：视口内自上而下、行内自左向右的阅读
                     # 顺序渲染（旧"最新优先"会让视口从右下角往上出图）
                     self.thumbs.request(it, priority=i)
+                    visible_keys.add(it.cache_key)
+            # 清废单：滚动/重排/随机洗牌后，堆里残留按旧行号入队的小优先
+            # 级请求（项已不在视口），会排在当前视口请求前面把解码耗在
+            # 屏外——每次绘制把非当前视口的排队请求请出队列，保证解码
+            # 能力始终优先给正在看的项
+            self.thumbs.focus(visible_keys)
 
     def _paint_tile(self, p: QPainter, rect: QRect, it: MediaItem, row: int) -> None:
         selected = row == self._current or row in self._selected_rows

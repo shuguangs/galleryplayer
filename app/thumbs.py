@@ -36,12 +36,17 @@ THUMB_DIR = USERDATA_DIR / "thumbs"
 GRID_THUMB_MAX = 420          # long edge of a cached grid thumbnail
 VIDEO_SEEK_FRACTION = 0.18    # grab the cover this far into the video
 IMAGE_WORKERS = 2
-# Each concurrent video grab holds a libmpv instance (~55 MB), but those are released
-# once the folder settles, so paying for a third worker while covers are being built is
-# worth the ~50% faster fill on video-heavy folders. Remote paths are serialised
-# separately by _REMOTE_GATE regardless of this number.
-# Kept at 1: video thumbnail grabs are the heaviest decode and would compete with
-# the playing video for CPU; one worker keeps browsing usable without stuttering.
+# 视频解码线程布局：
+#   - VIDEO_WORKERS 个通用线程（当前 1）：按优先级取任意视频单；
+#   - 1 个视口专用线程（只取 prio < WARMUP_PRIO）：预热期间空挂，
+#     滚动视口才醒；
+#   - 1 个 gated 通用线程：播放器可见时挂起，隐藏后由
+#     set_video_headroom(True) 放开——此时滚动视口最多三路解码，
+#     纯预热两路；正在播放时保持通用单路，不抢播放的 CPU。
+# 空闲线程只是停在一个 Event.wait 上，且首次取到活之前不会创建
+# mpv 实例，几乎零成本。每个并发视频 grab 持有一个 libmpv 实例
+# （~55 MB），文件夹安定后由 15s sweep 释放。远程路径另由
+# _REMOTE_GATE 串行，与此数无关。
 VIDEO_WORKERS = 1
 # Hard ceiling on decoded thumbnails held in RAM. At ~420x420x3 bytes each this
 # caps the cache near 100 MB; past that, re-reading the small disk JPEG is cheap,
@@ -57,6 +62,9 @@ MEMORY_CACHE_MAX = 200
 MAX_QUEUED_JOBS = 256
 # How many times a file may fail before it is left alone for the rest of the session.
 MAX_ATTEMPTS = 2
+# 预热/侧栏等非视口请求的优先级：恒排在视口请求（priority=行号）之后，
+# 视口专用 worker 以此为界区分"视口单"和"预热单"。
+WARMUP_PRIO = 1e17
 
 
 def pil_to_qimage(img: Image.Image) -> QImage:
@@ -395,16 +403,25 @@ class ThumbnailCache(QObject):
         self._mem_lock = threading.Lock()
         self._generation = 0
         self._video_inflight = 0
+        # 播放器不可见时置 True（set_video_headroom）：放开 gated 的第 2 路
+        # 通用视频线程；正在播放时保持 False，缩略图解码不与播放抢 CPU
+        self._vid_extra_enabled = False
 
         # worker 线程必须最后起：它们立刻访问 _lock/_prio_heap 等属性
-        for name, want_video, n in (
-            ("thumb-vid", True, VIDEO_WORKERS),
-            ("thumb-img", False, IMAGE_WORKERS),
+        # thumb-vid-vp 是视口专用线程：只取视口请求（prio < WARMUP_PRIO），
+        # 预热期间空挂——滚动视口时才醒，视口填充翻倍。
+        # thumb-vid-x 是 gated 的第 2 路通用视频线程：播放器可见时挂起
+        # （解码不与播放抢 CPU），播放器隐藏后由 set_video_headroom 放开。
+        for name, want_video, n, vp_only, gated in (
+            ("thumb-vid", True, VIDEO_WORKERS, False, False),
+            ("thumb-vid-vp", True, 1, True, False),
+            ("thumb-vid-x", True, 1, False, True),
+            ("thumb-img", False, IMAGE_WORKERS, False, False),
         ):
             for i in range(n):
                 t = threading.Thread(
                     target=self._prio_worker_loop,
-                    args=(want_video,), daemon=True,
+                    args=(want_video, vp_only, gated), daemon=True,
                     name=f"{name}-{i}")
                 t.start()
                 self._workers.append(t)
@@ -416,6 +433,11 @@ class ThumbnailCache(QObject):
         self._idle_sweep.start()
 
     def _sweep_idle_grabbers(self) -> None:
+        # 顺带把脏了的元数据落盘。metadata 只在正常退出时 save，强杀/崩溃
+        # 会丢整段会话的记录，造成"缩略图在、时长没了"的缓存漂移——漂移项
+        # 走磁盘命中路径时得内联 mpv open 补时长（最坏 25s/远程 60s），把
+        # 唯一的通用视频 worker 串行拖住。15s 一存，崩溃最多丢最近 15s。
+        metadata.save()
         with self._lock:
             busy = self._video_inflight or any(True for _ in self._pending)
         if busy:
@@ -491,6 +513,50 @@ class ThumbnailCache(QObject):
             self._prio_wake.set()
         return None
 
+    def focus(self, visible_keys: "set[str]") -> None:
+        """只保留当前视口的排队请求，其余请出队列（"清废单"）。
+
+        滚动/重排/随机洗牌后，堆里会残留按旧行号入队的小优先级请求（项
+        已滚出视口）——它们的优先级比当前视口请求还小，会把解码能力耗在
+        没人看的地方，预热（WARMUP_PRIO）也永远排不上。TileView 每次绘制
+        后用当前可见键调这里；被请出的项之后由预热或再次进入视口时的
+        request 重新排队，在途任务照常完成并入缓存，不浪费已开始的解码。
+        """
+        dropped = False
+        with self._lock:
+            for key in [k for k, p in self._key_prio.items()
+                        if p < WARMUP_PRIO]:
+                if key not in visible_keys:
+                    self._pending.discard(key)
+                    self._key_prio.pop(key, None)
+                    dropped = True
+            if dropped:
+                # 重建入队序：驱逐按此序取最旧，顺序本身只影响驱逐公平性
+                self._pending_order.clear()
+                self._pending_order.extend(self._pending)
+
+    def queued_count(self) -> int:
+        """排队（尚未开始解码）的请求数。
+
+        预热用它做水位节流：把队列补到目标水位为止，吞吐自动等于
+        worker 的实际消化速度，而不是按固定批量盲喂。"""
+        with self._lock:
+            return len(self._pending)
+
+    def set_video_headroom(self, enabled: bool) -> None:
+        """播放器不可见时放开 gated 的第 2 路通用视频解码线程。
+
+        视频抓帧是最重的解码负载：正在播放时保持通用线程单路，不与播放
+        抢 CPU；播放器隐藏/关闭后放开，滚动视口最多三路解码
+        （通用×2 + 视口专用×1），纯预热也有两路。gated 线程空挂时不占
+        CPU、不持有 mpv 实例，开关本身零成本。
+        """
+        with self._lock:
+            if self._vid_extra_enabled == enabled:
+                return
+            self._vid_extra_enabled = enabled
+            self._prio_wake.set()
+
     def invalidate_queue(self) -> None:
         """Drop interest in everything queued so far (folder changed).
 
@@ -533,25 +599,32 @@ class ThumbnailCache(QObject):
 
     # -- worker -----------------------------------------------------------
 
-    def _prio_worker_loop(self, want_video: bool) -> None:
+    def _prio_worker_loop(self, want_video: bool,
+                          viewport_only: bool = False,
+                          gated: bool = False) -> None:
         """常驻取件循环：按 (优先级, 新旧) 取请求解码。
 
         堆序：(priority, -seq)——priority 小者先（视口内自上而下的
         阅读顺序），同级最新请求优先（快速滚动后停住时视口插队）。
-        视频线程只取视频项（解码重、VIDEO_WORKERS=1 限流），图片线程
-        跳过视频项。
+        视频线程只取视频项（解码重、通用视频线程 VIDEO_WORKERS=1 限流），
+        图片线程跳过视频项。viewport_only 线程再跳过预热单
+        （prio >= WARMUP_PRIO）——没有视口请求就一直空挂。
+        gated 线程受 _vid_extra_enabled 门控：关闭时只空挂等待开关。
         """
         while not self._closed and not _STOPPING.is_set():
             job = None
             with self._lock:
                 heap = self._prio_heap
-                while heap and job is None:
+                while heap and job is None and not (
+                        gated and not self._vid_extra_enabled):
                     # 找堆里类型匹配且 (priority, -seq) 最小的项。
                     best_i = -1
                     best_key = None
                     for i, entry in enumerate(heap):
                         _prio, _neg_seq, _k, item, _gen = entry
                         if bool(item.is_video) != want_video:
+                            continue
+                        if viewport_only and _prio >= WARMUP_PRIO:
                             continue
                         k = (entry[0], entry[1])
                         if best_key is None or k < best_key:
