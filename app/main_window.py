@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import sys
 import threading
 import time
 from pathlib import Path
@@ -462,17 +463,51 @@ class MainWindow(QMainWindow):
 
         lay.addStretch(1)
 
+        self.btn_locate_current = _icon_button(
+            icons.LOCATE, t("main_window.locate_current_tip"))
+        self.btn_locate_current.clicked.connect(self._locate_to_current)
+        lay.addWidget(self.btn_locate_current)
+
+        # 搜索框双模式：筛选（默认，只显示匹配项）/ 定位（保留全列表，
+        # 跳到匹配处——Enter 下一个、Shift+Enter 上一个，同浏览器页内查找）
+        self._locate_mode = False
+        self.btn_search_mode = QToolButton()
+        self.btn_search_mode.setText(t("main_window.search_mode"))
+        self.btn_search_mode.setCheckable(True)
+        self.btn_search_mode.setToolTip(t("main_window.search_mode_tip"))
+        self.btn_search_mode.setFixedWidth(44)
+        self.btn_search_mode.toggled.connect(self._on_search_mode_toggled)
+        lay.addWidget(self.btn_search_mode)
+
         self.search = QLineEdit()
         self.search.setPlaceholderText(t("main_window.search_placeholder"))
         self.search.setClearButtonEnabled(True)
         self.search.setFixedWidth(190)
-        # 防抖：每击键全量 filter+sort+模型重置（2 万条约 200ms），停顿后再应用
+        # 防抖：每击键全量 filter+sort+模型重置（2 万条约 200ms），停顿后再应用。
+        # 定位模式不做筛选：每个键直接跳到匹配处（便宜，无模型重置）。
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
         self._search_timer.setInterval(300)
         self._search_timer.timeout.connect(self._apply_view)
-        self.search.textChanged.connect(lambda *_: self._search_timer.start())
+        self.search.textChanged.connect(
+            lambda *_: (self._locate_match(1) if self._locate_mode
+                        else self._search_timer.start()))
+        self.search.returnPressed.connect(
+            lambda: self._locate_match(1) if self._locate_mode else None)
+        self.search.installEventFilter(self)  # Shift+Enter=上一个（见 eventFilter）
         lay.addWidget(self.search)
+
+        self.btn_find_prev = _icon_button(
+            icons.PREVIOUS, t("main_window.find_prev_tip"), 28)
+        self.btn_find_prev.clicked.connect(lambda: self._locate_match(-1))
+        self.btn_find_prev.setVisible(False)
+        lay.addWidget(self.btn_find_prev)
+
+        self.btn_find_next = _icon_button(
+            icons.NEXT, t("main_window.find_next_tip"), 28)
+        self.btn_find_next.clicked.connect(lambda: self._locate_match(1))
+        self.btn_find_next.setVisible(False)
+        lay.addWidget(self.btn_find_next)
 
         self.btn_tree = _icon_button(icons.SIDEBAR, t("main_window.tree_toggle_tip"), 32, checkable=True)
         self.btn_tree.clicked.connect(self._toggle_tree)
@@ -1411,13 +1446,98 @@ class MainWindow(QMainWindow):
         self.set_folder(target.parent, quiet=True)
 
     def raise_window(self) -> None:
-        """裸双击 exe 的第二次启动转发来的"唤醒"：把主窗口带回前台。"""
+        """裸双击 exe 的第二次启动转发来的"唤醒"：把主窗口带回前台。
+
+        Windows 不允许后台进程直接抢前台——裸 activateWindow 只闪任务栏
+        （实测）。双保险：转发进程（刚被资源管理器启动，持有前台授权）
+        先 AllowSetForegroundWindow 放行（见 single_instance）；这里再用
+        ALT 键技巧让系统相信本线程持有前台权后 SetForegroundWindow。
+        """
         if self.isMinimized():
             self.showNormal()
         else:
             self.show()
         self.raise_()
         self.activateWindow()
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                user32 = ctypes.windll.user32
+                hwnd = int(self.winId())
+                user32.keybd_event(0x12, 0, 0, 0)          # ALT down
+                ok = bool(user32.SetForegroundWindow(hwnd))
+                user32.keybd_event(0x12, 0, 2, 0)          # ALT up (KEYEVENTF_KEYUP)
+                from . import startup_log
+                startup_log.stage(
+                    "single-inst",
+                    f"唤醒前台化 showMin={self.isMinimized()} "
+                    f"SetForegroundWindow={'成功' if ok else '被拒'}")
+            except Exception as exc:
+                from . import startup_log
+                startup_log.stage("single-inst", f"唤醒前台化异常: {exc}")
+
+    def _reveal_row(self, row: int) -> None:
+        """把模型第 row 行带进视野并选中（定位功能共用：网格/详情两视图同步）。"""
+        if not (0 <= row < len(self.model.items)):
+            return
+        if self.tiles is not None:
+            # scroll=False：只改选中态，滚动交给下面按当前可见视图做
+            self.tiles.set_current_row(row, scroll=False)
+        if self.details is not None and self.stack.currentWidget() is self.details:
+            self.details.clearSelection()
+            self.details.selectRow(row)
+            self.details.scrollTo(self.model.index(row, 0))
+        elif self.tiles is not None:
+            self.tiles.scroll_to(row)
+        if self.stack.currentWidget() is self.welcome:
+            self._show_browser()
+
+    def _locate_to_current(self) -> None:
+        """「定位选中项」按钮：滚回当前选中的视频/图片所在位置。"""
+        row = self.tiles.current_row() if self.tiles is not None else -1
+        if not (0 <= row < len(self.model.items)):
+            self.status_count.setText(t("main_window.locate_none"))
+            return
+        self._reveal_row(row)
+
+    def _on_search_mode_toggled(self, checked: bool) -> None:
+        """搜索框在「筛选 / 定位」两种模式间切换（checked=定位）。"""
+        self._locate_mode = checked
+        self.btn_search_mode.setText(
+            t("main_window.search_mode_locate" if checked
+              else "main_window.search_mode"))
+        self.btn_find_prev.setVisible(checked)
+        self.btn_find_next.setVisible(checked)
+        if checked:
+            self._locate_match(1)
+        else:
+            self._apply_view()  # 切回筛选：现有关键词立即生效
+
+    def _locate_match(self, direction: int) -> None:
+        """定位模式：按方向找下一个/上一个文件名含关键词的项并选中跳转。
+
+        从当前选中项出发（无选中从头按方向起），环形扫描一圈；不筛选
+        列表、不重置模型——一个匹配约 O(n) 字符串查找，即时返回。
+        """
+        q = self.search.text().strip().lower()
+        items = self.model.items
+        if not q or not items:
+            return
+        n = len(items)
+        cur = self.tiles.current_row() if self.tiles is not None else -1
+        if cur < 0:
+            start = 0 if direction > 0 else n - 1
+            steps = n
+        else:
+            start = cur + (1 if direction > 0 else -1)
+            steps = n  # 环形一圈；起点夹在 0..n-1 之外也无妨（取模兜底）
+        for k in range(steps):
+            i = (start + direction * k) % n
+            if q in items[i].name.lower():
+                self._reveal_row(i)
+                return
+        self.status_count.setText(t("main_window.search_no_match"))
 
     def handle_external_paths(self, paths) -> None:
         """Files/folders forwarded by a second launch (single-instance mode).
@@ -2222,7 +2342,10 @@ class MainWindow(QMainWindow):
             flags.add("video")
         if self.chk_archive.isChecked():
             flags.add("archive")
-        items = media.apply_filter(self.all_items, flags, self.search.text().strip())
+        # 定位模式不做筛选（关键词只用于跳转），列表保持全量
+        term = "" if getattr(self, "_locate_mode", False) \
+            else self.search.text().strip()
+        items = media.apply_filter(self.all_items, flags, term)
         sort_key = self.sort_combo.currentData() or "name"
         items = media.sort_items(
             items,
@@ -2381,7 +2504,17 @@ class MainWindow(QMainWindow):
         return self.viewer
 
     def eventFilter(self, obj, event) -> bool:
-        if obj is self.viewer and event.type() in (QEvent.Show, QEvent.Hide):
+        # getattr 防御：搜索框在 __init__ 里注册了本过滤器，addWidget 的
+        # polish/child 事件会立刻派发过来，而 viewer/_locate_mode 尚未创建
+        if obj is getattr(self, "search", None) and event.type() == QEvent.KeyPress \
+                and getattr(self, "_locate_mode", False):
+            if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                # Shift+Enter=上一个匹配（浏览器页内查找语义）
+                self._locate_match(-1 if event.modifiers() & Qt.ShiftModifier
+                                   else 1)
+                return True
+        viewer = getattr(self, "viewer", None)
+        if obj is viewer and event.type() in (QEvent.Show, QEvent.Hide):
             from . import startup_log
 
             startup_log.stage(

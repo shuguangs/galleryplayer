@@ -66,6 +66,7 @@ CHEVRON_DOWN = ""
 
 
 # --- playlist panel (appended by codepoint to keep the literals out of this file)
+LOCATE = chr(0xE707)  # MapPin: 浏览器"定位选中项"按钮
 REPEAT_ALL = chr(0xE8EE)
 SHUFFLE = chr(0xE8B1)
 PLUS = chr(0xE710)

@@ -80,6 +80,16 @@ def forward_to_running(paths: list[str]) -> bool:
     sock.connectToServer(SERVER_NAME)
     if not sock.waitForConnected(500):
         return False
+    # Windows 前台授权：本进程刚被资源管理器启动，持有"设置前台"的权利
+    # ——转手授予任意进程，持有窗口的实例才能真的弹到前台，否则只闪
+    # 任务栏（实测）。非 Windows / 失败静默。
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.user32.AllowSetForegroundWindow(0xFFFFFFFF)  # ASFW_ANY
+        except Exception:
+            pass
     payload = "\n".join(paths).encode("utf-8") if paths else RAISE_PAYLOAD
     sock.write(payload)
     sock.flush()
