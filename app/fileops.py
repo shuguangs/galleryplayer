@@ -13,6 +13,7 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+import sys
 from ctypes import wintypes
 from pathlib import Path
 
@@ -79,9 +80,31 @@ def recycle(paths: list[Path]) -> tuple[int, str]:
 
 
 def reveal(path: Path) -> None:
-    """Open Explorer with `path` selected."""
+    """Open Explorer with `path` selected and scrolled into view.
+
+    `explorer /select,` 是命令行老办法：大文件夹里实测只选中不滚动到
+    该项（视图停在顶部）。SHOpenFolderAndSelectItems 是 Shell 的正规
+    接口——打开文件夹、选中并滚动到该项。API 失败/非 Windows 回退命令行。
+    """
+    if sys.platform == "win32":
+        try:
+            shell = ctypes.windll.shell32
+            pidl = ctypes.c_void_p()
+            # 路径 → PIDL（Shell 的项标识）
+            if shell.SHParseDisplayName(
+                    wintypes.LPCWSTR(str(path)), None,
+                    ctypes.byref(pidl), 0, None) == 0 and pidl.value:
+                try:
+                    # 参数是 PIDL 数组（这里只有一项）
+                    arr = (ctypes.c_void_p * 1)(pidl.value)
+                    if shell.SHOpenFolderAndSelectItems(arr, 1, None, 0) == 0:
+                        return
+                finally:
+                    shell.ILFree(pidl)
+        except Exception:
+            pass
     try:
-        subprocess.Popen(["explorer", "/select,", str(path)])
+        subprocess.Popen(f'explorer /select,"{path}"')
     except Exception:
         pass
 
