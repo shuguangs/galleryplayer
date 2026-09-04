@@ -366,6 +366,86 @@ class MediaListWidget(QListWidget):
         self.setDragDropMode(QAbstractItemView.InternalMove)
         self.viewport().update()
 
+    def _log_sync_fallback(self, total: int) -> None:
+        from . import startup_log
+
+        startup_log.stage(
+            "panel-fill",
+            f"增量同步放弃（顺序变化/混合增删），回退全量重填 {total} 行")
+
+    def _sync_incremental(self, items: list[MediaItem], playing: int) -> bool:
+        """同序增删的增量同步：旧列表在新列表里保持原相对顺序且连续时，
+        只插入新行/删除消失的行，不清空重填（三十万行 clear 实测 19.4s）。
+
+        返回是否已应用；乱序/重排返回 False 由调用方走全量路径。
+        """
+        import time as _time
+
+        t0 = _time.perf_counter()
+        old_count = self.count()
+        old = [self.item(i).data(ITEM_ROLE) for i in range(old_count)]
+        old_pos = {id(it): i for i, it in enumerate(old)}
+        matched = [old_pos.get(id(it), -1) for it in items]
+        # 纯新增：旧项全部按原顺序出现（下标严格 0,1,2,… 连续）；
+        # 纯删除：新项全是旧对象且相对顺序保持（下标严格递增）。
+        # 其余（重排/既有增又有删/洗牌）→ 放弃，回退全量重填。
+        if len(items) > old_count:
+            expect = 0
+            for m in matched:
+                if m == -1:
+                    continue
+                if m != expect:
+                    self._log_sync_fallback(len(items))
+                    return False
+                expect += 1
+            if expect != old_count:
+                self._log_sync_fallback(len(items))
+                return False
+        elif len(items) < old_count:
+            prev = -1
+            for m in matched:
+                if m == -1 or m <= prev:
+                    self._log_sync_fallback(len(items))
+                    return False
+                prev = m
+        else:
+            self._log_sync_fallback(len(items))
+            return False
+        self.setUpdatesEnabled(False)
+        try:
+            self.blockSignals(True)
+            if len(items) > old_count:
+                # 纯新增：顺序遍历，新项插入到当前行位置
+                r = 0
+                for it, m in zip(items, matched):
+                    if m == -1:
+                        self.insertItem(r, self._make_entry(it))
+                    r += 1
+            elif len(items) < old_count:
+                # 纯减少：倒序删除消失的行
+                keep = set(matched)
+                for i in range(old_count - 1, -1, -1):
+                    if i not in keep:
+                        self.takeItem(i)
+        finally:
+            self.blockSignals(False)
+            self.setUpdatesEnabled(True)
+        self._fill_source = []
+        self._fill_pos = 0
+        self._scroll_pending_row = -1
+        self._chunk_rows = self.CHUNK_ROWS
+        self.playing_row = playing
+        if 0 <= playing < self.count():
+            self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
+        self.viewport().update()
+        from . import startup_log
+
+        startup_log.stage(
+            "panel-fill",
+            f"增量同步 {old_count}→{len(items)} 行"
+            f" {(_time.perf_counter() - t0) * 1000:.0f}ms")
+        return True
+
     def set_items(self, items: list[MediaItem], playing: int = -1) -> None:
         self._fill_timer.stop()
         total = len(items)
@@ -386,6 +466,13 @@ class MediaListWidget(QListWidget):
             self.playing_row = playing
             self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
             self.viewport().update()
+            return
+        # 增量同步：列表变了但顺序没乱（扫描新增/文件减少——活跃下载
+        # 文件夹每次打开都长几行），只插/删差异行，绝不清空重填。乱序
+        # （重排/洗牌）返回 False 走全量。行号==序号不变式由顺序遍历保持。
+        if (total and not self._filter_needle and self.count()
+                and not self.is_filling
+                and self._sync_incremental(items, playing)):
             return
         import time as _time
 
