@@ -291,6 +291,11 @@ class MediaListWidget(QListWidget):
         self._fill_timer.setSingleShot(True)
         self._fill_timer.setInterval(self.CHUNK_INTERVAL_MS)
         self._fill_timer.timeout.connect(self._fill_chunk)
+        # 分块替换（顺序变化的大列表：先分块移除旧行再接常规填充，
+        # 避免同步 clear() 三十万行 20s 冻结）
+        self._replace_phase = False
+        self._replace_source: list[MediaItem] = []
+        self._replace_playing = -1
 
     @property
     def is_filling(self) -> bool:
@@ -335,6 +340,49 @@ class MediaListWidget(QListWidget):
         self._fill_pos = end
 
     def _fill_chunk(self) -> None:
+        if self._replace_phase:
+            import time as _time
+
+            t0 = _time.perf_counter()
+            target = max(0, self.count() - self._chunk_rows)
+            # 尾部移除是 O(1) 级操作：一批一批把旧行请出去，GUI 每块之间
+            # 照常处理事件，绝无未响应
+            while self.count() > target:
+                self.takeItem(self.count() - 1)
+            elapsed_ms = (_time.perf_counter() - t0) * 1000
+            if elapsed_ms > self.CHUNK_SLOW_MS and self._chunk_rows > self.CHUNK_MIN_ROWS:
+                self._chunk_rows = self._chunk_rows // 2
+            if self.count():
+                self._fill_timer.start(self.CHUNK_INTERVAL_MS)
+                return
+            # 清空完成 → 接常规大列表填充（立即窗口先填播放行附近）
+            self._replace_phase = False
+            items = self._replace_source
+            self._replace_source = []
+            playing = self._replace_playing
+            self._filter_needle = ""
+            self._had_filter = False
+            self.setUpdatesEnabled(False)
+            try:
+                self.blockSignals(True)
+                self._fill_source = list(items)
+                self._fill_pos = 0
+                self._chunk_rows = self.CHUNK_ROWS
+                self.playing_row = playing
+                immediate = min(self.IMMEDIATE_MAX,
+                                max(self.IMMEDIATE_MIN, playing + self.IMMEDIATE_PLAY_AHEAD))
+                immediate = max(immediate, 0)
+                self._append_rows(0, immediate)
+                self.blockSignals(False)
+            finally:
+                self.setUpdatesEnabled(True)
+            if 0 <= playing < self.count():
+                self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
+            else:
+                self._scroll_pending_row = playing
+            self.viewport().update()
+            self._fill_timer.start(self.CHUNK_INTERVAL_MS)
+            return
         if self._fill_pos >= len(self._fill_source):
             self._finish_fill()
             return
@@ -409,8 +457,22 @@ class MediaListWidget(QListWidget):
                     return False
                 prev = m
         else:
-            self._log_sync_fallback(len(items))
-            return False
+            # 等长：全行按原顺序一一对应才算"无变化"，只更新播放行；
+            # 任何错位都是重排 → 回退全量
+            prev = -1
+            for m in matched:
+                if m == -1 or m <= prev:
+                    self._log_sync_fallback(len(items))
+                    return False
+                prev = m
+            self._fill_source = []
+            self._fill_pos = 0
+            self._scroll_pending_row = -1
+            self._chunk_rows = self.CHUNK_ROWS
+            self.playing_row = playing
+            if 0 <= playing < self.count():
+                self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
+            return True
         self.setUpdatesEnabled(False)
         try:
             self.blockSignals(True)
@@ -449,30 +511,35 @@ class MediaListWidget(QListWidget):
     def set_items(self, items: list[MediaItem], playing: int = -1) -> None:
         self._fill_timer.stop()
         total = len(items)
-        # 快路径：面板里已经是同一份列表（长度一致、首行与播放行是同一批
-        # MediaItem 对象、无过滤词）——只更新播放行，绝不清空重填。同一
-        # 文件夹连续点开视频时，旧路径 clear() 三十万行会冻结 GUI 十几秒
-        # （实测 21.6s 未响应）。对象身份在两次打开之间保持：浏览器重扫
-        # 才会新建 MediaItem，那才是真正需要重填的时刻。
-        if (total and not self._filter_needle
-                and self.count() == total
-                and self.item(0).data(ITEM_ROLE) is items[0]
-                and 0 <= playing < total
-                and self.item(playing).data(ITEM_ROLE) is items[playing]):
-            self._fill_source = []
-            self._fill_pos = 0
-            self._scroll_pending_row = -1
-            self._chunk_rows = self.CHUNK_ROWS
-            self.playing_row = playing
-            self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
-            self.viewport().update()
-            return
-        # 增量同步：列表变了但顺序没乱（扫描新增/文件减少——活跃下载
-        # 文件夹每次打开都长几行），只插/删差异行，绝不清空重填。乱序
-        # （重排/洗牌）返回 False 走全量。行号==序号不变式由顺序遍历保持。
+        # 增量同步：无变化（只更新播放行）/纯新增/纯减少在这里解决，
+        # 顺序变化返回 False 走下面的全量路径。按对象身份全行对比——
+        # 此前的"首行+播放行"两行快路径会漏判局部行序变化，让面板与
+        # 播放器列表脱钩（行号≠序号，双击错位），已废弃。30 万行对比
+        # 约几百 ms，对比 clear 重填的 20s 冻结可忽略。
         if (total and not self._filter_needle and self.count()
                 and not self.is_filling
                 and self._sync_incremental(items, playing)):
+            return
+        # 顺序变化/混合增删的大列表：绝不同步 clear()（三十万行实测 20s
+        # 冻结——元数据排序 + 5s 定时归位让顺序频繁微变，这条路径常走）。
+        # 分块替换：每次 tick 从尾部廉价移除一批旧行，清空后接常规分块
+        # 填充（立即窗口先填播放行附近）。is_filling 全程为真，拖拽/重排
+        # 守卫自动生效。
+        if self.count() > self.SYNC_MAX:
+            from . import startup_log
+
+            startup_log.stage(
+                "panel-fill",
+                f"分块替换 {self.count()}→{total} 行（顺序变化/混合增删）")
+            self._replace_source = list(items)
+            self._replace_playing = playing
+            self._replace_phase = True
+            self.playing_row = -1
+            self._fill_source = []
+            self._fill_pos = 0
+            self._scroll_pending_row = -1
+            self.setDragDropMode(QAbstractItemView.NoDragDrop)
+            self._fill_timer.start(self.CHUNK_INTERVAL_MS)
             return
         import time as _time
 
