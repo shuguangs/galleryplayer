@@ -8,7 +8,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QDir, QEvent, QModelIndex, QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtCore import (
+    QDir,
+    QEvent,
+    QModelIndex,
+    QPoint,
+    QRect,
+    QSize,
+    Qt,
+    Signal,
+    QTimer,
+)
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -224,6 +234,27 @@ class MediaListWidget(QListWidget):
     reordered = Signal()
     activate_row = Signal(int)
 
+    # ---- 大列表分块填充（十万级条目点开视频曾把 GUI 线程堵 2-4 秒：白屏。
+    # ≤SYNC_MAX 的小列表行为与旧版完全一致；更大的先同步填播放行附近的
+    # 立即窗口，其余由 QTimer 后台块填充——视频先播，列表渐满。
+    # 行号==播放列表序号的不变式由"顺序追加"天然保持。
+    SYNC_MAX = 3000            # 同步填充上限（小列表零行为差异）
+    IMMEDIATE_MIN = 1000       # 立即窗口下限（列表顶端上下文）
+    IMMEDIATE_PLAY_AHEAD = 500  # 播放行之后再多填一些（向下翻看）
+    IMMEDIATE_MAX = 4000       # 立即窗口上限（约 80ms）
+    CHUNK_ROWS = 1000          # 后台块起始行数（超时会自适应减半）
+    CHUNK_MIN_ROWS = 250       # 自适应下限
+    CHUNK_SLOW_MS = 150        # 单块超过这个时长 → 下块行数减半
+    CHUNK_INTERVAL_MS = 40
+
+    @property
+    def _chunk_rows(self) -> int:
+        return max(self.CHUNK_MIN_ROWS, self._chunk_rows_v)
+
+    @_chunk_rows.setter
+    def _chunk_rows(self, v: int) -> None:
+        self._chunk_rows_v = max(self.CHUNK_MIN_ROWS, v)
+
     def set_thumbs_paused(self, paused: bool) -> None:
         """Low-priority mode: stop requesting new thumbnails (playback first)."""
         if self.thumbs_paused == paused:
@@ -249,6 +280,22 @@ class MediaListWidget(QListWidget):
         self.doubleClicked.connect(lambda idx: self.activate_row.emit(idx.row()))
         thumbs.ready.connect(self._on_thumb_ready)
         thumbs.meta_ready.connect(self._on_thumb_ready)
+        # 后台填充状态
+        self._fill_source: list[MediaItem] = []
+        self._fill_pos = 0
+        self._filter_needle = ""
+        self._had_filter = False
+        self._scroll_pending_row = -1
+        self._chunk_rows_v = self.CHUNK_ROWS
+        self._fill_timer = QTimer(self)
+        self._fill_timer.setSingleShot(True)
+        self._fill_timer.setInterval(self.CHUNK_INTERVAL_MS)
+        self._fill_timer.timeout.connect(self._fill_chunk)
+
+    @property
+    def is_filling(self) -> bool:
+        """后台填充进行中：items() 回读不完整，重排/删除必须被拦下。"""
+        return self._fill_timer.isActive()
 
     def setDelegateInstance(self, thumbs: ThumbnailCache) -> None:
         self._delegate = MediaRowDelegate(thumbs, self)
@@ -267,19 +314,94 @@ class MediaListWidget(QListWidget):
     def _on_thumb_ready(self, *_args) -> None:
         self.viewport().update()
 
-    def set_items(self, items: list[MediaItem], playing: int = -1) -> None:
-        self.blockSignals(True)
-        self.clear()
+    def _make_entry(self, it: MediaItem) -> QListWidgetItem:
         h = ROW_H_THUMB if self.thumb_mode else ROW_H_COMPACT
-        for it in items:
-            entry = QListWidgetItem()
-            entry.setData(ITEM_ROLE, it)
-            entry.setSizeHint(QSize(60, h))
-            entry.setToolTip(str(it.path))
-            self.addItem(entry)
-        self.blockSignals(False)
-        self.playing_row = playing
+        entry = QListWidgetItem()
+        entry.setData(ITEM_ROLE, it)
+        entry.setSizeHint(QSize(60, h))
+        entry.setToolTip(str(it.path))
+        if self._filter_needle and self._filter_needle not in it.name.lower():
+            entry.setHidden(True)
+        return entry
+
+    def _append_rows(self, start: int, end: int) -> None:
+        """把 source[start:end) 顺序追加（行号==序号的唯一入口）。"""
+        self.setUpdatesEnabled(False)
+        try:
+            for it in self._fill_source[start:end]:
+                self.addItem(self._make_entry(it))
+        finally:
+            self.setUpdatesEnabled(True)
+        self._fill_pos = end
+
+    def _fill_chunk(self) -> None:
+        if self._fill_pos >= len(self._fill_source):
+            self._finish_fill()
+            return
+        import time as _time
+
+        t0 = _time.perf_counter()
+        end = min(len(self._fill_source), self._fill_pos + self._chunk_rows)
+        self._append_rows(self._fill_pos, end)
+        elapsed_ms = (_time.perf_counter() - t0) * 1000
+        # 自适应：单块太慢（列表越大 addItem 越贵）→ 下块减半，间隙封顶
+        if elapsed_ms > self.CHUNK_SLOW_MS and self._chunk_rows > self.CHUNK_MIN_ROWS:
+            self._chunk_rows = self._chunk_rows // 2
+        # 播放行此前不在已填充范围：现在够到了，补滚动
+        if 0 <= self._scroll_pending_row < self.count():
+            row = self._scroll_pending_row
+            self._scroll_pending_row = -1
+            self.scrollToItem(self.item(row), QAbstractItemView.EnsureVisible)
+            self.viewport().update()
+        if self._fill_pos >= len(self._fill_source):
+            self._finish_fill()
+            return
+        self._fill_timer.start(self.CHUNK_INTERVAL_MS)
+
+    def _finish_fill(self) -> None:
+        self._fill_source = []
+        self._fill_pos = 0
+        self._fill_timer.stop()
+        # 恢复拖拽重排（填充期间禁用：dropEvent 回读的是不完整列表）
+        self.setDragDropMode(QAbstractItemView.InternalMove)
         self.viewport().update()
+
+    def set_items(self, items: list[MediaItem], playing: int = -1) -> None:
+        self._fill_timer.stop()
+        self.setUpdatesEnabled(False)
+        try:
+            self.blockSignals(True)
+            self.clear()
+            self._fill_source = list(items)
+            self._fill_pos = 0
+            self._filter_needle = ""
+            self._had_filter = False
+            self._scroll_pending_row = -1
+            self._chunk_rows = self.CHUNK_ROWS
+            self.playing_row = playing
+            total = len(self._fill_source)
+            if total <= self.SYNC_MAX:
+                # 小列表：与旧版完全一致的同步路径
+                if total:
+                    self._append_rows(0, total)
+                self.blockSignals(False)
+                return
+            # 大列表：立即填播放行附近（封顶），其余后台分块
+            immediate = min(self.IMMEDIATE_MAX,
+                            max(self.IMMEDIATE_MIN, playing + self.IMMEDIATE_PLAY_AHEAD))
+            immediate = max(immediate, 0)
+            self._append_rows(0, immediate)
+            self.blockSignals(False)
+        finally:
+            self.setUpdatesEnabled(True)
+        self.viewport().update()
+        if 0 <= playing < self.count():
+            self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
+        elif 0 <= playing < total:
+            # 播放行还没填到：先记下，_fill_chunk 够到时再滚
+            self._scroll_pending_row = playing
+        self.setDragDropMode(QAbstractItemView.NoDragDrop)
+        self._fill_timer.start(self.CHUNK_INTERVAL_MS)
 
     def items(self) -> list[MediaItem]:
         return [self.item(i).data(ITEM_ROLE) for i in range(self.count())]
@@ -288,9 +410,14 @@ class MediaListWidget(QListWidget):
         self.playing_row = row
         if scroll and 0 <= row < self.count():
             self.scrollToItem(self.item(row), QAbstractItemView.EnsureVisible)
+        elif scroll and row >= self.count() and self.is_filling:
+            # 行还没填到：交给填充循环滚动（EnsureVisible 到已填末行也没意义）
+            self._scroll_pending_row = row
         self.viewport().update()
 
     def dropEvent(self, e):
+        if self.is_filling:
+            return  # 填充期禁拖拽的双保险（setDragDropMode 已关）
         super().dropEvent(e)
         self.reordered.emit()
 
@@ -419,6 +546,10 @@ class PlaylistPanel(QWidget):
                 return
 
     def _on_reordered(self) -> None:
+        if self.list.is_filling:
+            # 后台填充中：items() 只有已填充部分，回读会把十万条截断成几千条
+            self._toast(t("panel.list_filling"))
+            return
         order = self.list.items()
         self._all_items = order
         self.playlist_reordered.emit(order)
@@ -888,11 +1019,22 @@ class PlaylistPanel(QWidget):
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
         lst = self._active_list()
+        # 过滤词记到控件上：后台分块填充的新行在 _make_entry 里同步应用，
+        # 否则大列表边填边过滤会漏掉未填到的行
+        lst._filter_needle = needle
+        if not needle:
+            # 空过滤：新 set 的行从不隐藏，跳过全量扫（十万行白花 0.2s）
+            # 只有此前有过滤词时才需要解除隐藏
+            if getattr(lst, "_had_filter", False):
+                for i in range(lst.count()):
+                    lst.item(i).setHidden(False)
+                lst._had_filter = False
+            return
+        lst._had_filter = True
         for i in range(lst.count()):
             entry = lst.item(i)
             item = entry.data(ITEM_ROLE)
-            hide = bool(needle) and needle not in item.name.lower()
-            entry.setHidden(hide)
+            entry.setHidden(needle not in item.name.lower())
 
     def _move_selected(self, delta: int) -> None:
         lst = self._active_list()
@@ -903,6 +1045,10 @@ class PlaylistPanel(QWidget):
             target = row + delta
             if not (0 <= target < lst.count()):
                 return
+        if lst.is_filling:
+            # 填充中移动：_on_reordered 的 items() 回读不完整
+            self._toast(t("panel.list_filling"))
+            return
         moved = []
         for row in rows:
             entry = lst.takeItem(row)
@@ -923,6 +1069,10 @@ class PlaylistPanel(QWidget):
             return
         if lst is self.album_list:
             self._album_remove(tuple(sorted(rows)))
+            return
+        if lst.is_filling:
+            # 填充中删除：items() 回读不完整，会把列表截断
+            self._toast(t("panel.list_filling"))
             return
         for row in rows:
             lst.takeItem(row)
@@ -1045,10 +1195,17 @@ class PlaylistPanel(QWidget):
     def set_current(self, index: int) -> None:
         target = self._all_items[index].path if 0 <= index < len(self._all_items) else None
         row = -1
-        for i in range(self.list.count()):
+        search_upto = self.list.count()
+        for i in range(search_upto):
             if self.list.item(i).data(ITEM_ROLE).path == target:
                 row = i
                 break
+        else:
+            # 大列表后台填充中：行还没填到。行号==播放序号的不变式保证
+            # 直接用 index 即可（填充够到时会自动滚动过去）
+            if self.list.is_filling and 0 <= index < len(self._all_items) \
+                    and target is not None:
+                row = index
         self.list.set_playing(row)
 
     def _restore(self) -> None:

@@ -2080,6 +2080,9 @@ class MainWindow(QMainWindow):
         self.all_items = self._stream_items
         self._stream_items = []
         self._streaming = False
+        from . import startup_log as _slog
+
+        _slog.stage("scan-batch", f"扫描 done：{len(self.all_items)} 项")
         suffix = ""
         if stats is not None and stats.dirs_reused:
             suffix = t("main_window.cache_hit_suffix").format(
@@ -2185,6 +2188,11 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_view(self, count_suffix: str = "", keep: str = "anchor") -> None:
+        import time as _time
+
+        from . import startup_log as _slog
+
+        _t0 = _time.perf_counter()
         flags: set[str] = set()
         if self.chk_image.isChecked():
             flags.add("image")
@@ -2247,6 +2255,9 @@ class MainWindow(QMainWindow):
                     # 归位/防抖重排/改排序全都会"跳回选中的视频"
                     self.tiles.set_current_row(i, scroll=False)
                     break
+        _slog.stage("apply-view",
+                    f"_apply_view 完成 items={len(items)} "
+                    f"耗时 {(_time.perf_counter() - _t0) * 1000:.0f}ms")
 
     # ------------------------------------------------------------ 后台预热
     # 预热水位：每轮 tick 把待解码队列补到这个数为止（队列上限的一半，
@@ -2329,8 +2340,11 @@ class MainWindow(QMainWindow):
     def ensure_viewer(self) -> "Viewer":
         if self.viewer is None:
             from .viewer import Viewer  # imports mpv; deliberately deferred
+            from . import startup_log as _slog
 
+            _slog.stage("ensure-viewer", "开始构建 Viewer")
             self.viewer = Viewer(self.thumbs, self._fs_model_for_panel)
+            _slog.stage("ensure-viewer", "Viewer 构建完成")
             # Show/Hide 事件驱动缩略图视频解码余量：播放器不可见时放开
             # 第 2 路通用视频线程（见 ThumbnailCache.set_video_headroom）
             self.viewer.installEventFilter(self)

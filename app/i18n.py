@@ -379,6 +379,7 @@ _TR: dict[str, dict[str, str]] = {
     "panel.autoplay_tip": {"zh": "一个播完自动接下一个", "en": "Play the next item automatically"},
     "panel.switch_to_album_hint": {"zh": "切到「专辑」标签后即可添加文件", "en": "Switch to the Albums tab to add files"},
     "panel.playlist_empty": {"zh": "当前列表是空的", "en": "The list is empty"},
+    "panel.list_filling": {"zh": "列表仍在加载中（大文件夹），稍候再排序或删除", "en": "The list is still loading (large folder); try reordering or removing again shortly"},
     "panel.export_dialog_title": {"zh": "导出播放列表", "en": "Export playlist"},
     "panel.filter_playlist": {"zh": "播放列表 (*.m3u8 *.m3u)", "en": "Playlists (*.m3u8 *.m3u)"},
     "panel.exported_count": {"zh": "已导出 {count} 项", "en": "Exported {count} item(s)"},

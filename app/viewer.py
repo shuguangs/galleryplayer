@@ -58,6 +58,9 @@ class Viewer(QWidget):
     _drop_resolved = Signal(object)       # 拖放解析结论 (folder?, items)，worker → UI
 
     def __init__(self, thumbs: ThumbnailCache, fs_model_provider=None) -> None:
+        from . import startup_log as _slog
+
+        _slog.stage("viewer-ctor", "Viewer 构造开始")
         super().__init__(None)
         self.setWindowTitle(t("viewer.window_title"))
         self.setObjectName("ViewerRoot")
@@ -111,6 +114,7 @@ class Viewer(QWidget):
         self.image_view.load_failed.connect(self._on_load_failed)
         self.image_view.loaded.connect(self._on_image_loaded)
         self.video_view = MpvWidget()
+        _slog.stage("viewer-ctor", "MpvWidget 构建完成")
         self.video_view.setMouseTracking(True)
         self.stack.addWidget(self.image_view)
         self.stack.addWidget(self.video_view)
@@ -410,10 +414,17 @@ class Viewer(QWidget):
         self.raise_()
         self.activateWindow()
         self.setFocus()
-        self.panel.set_playlist(self.items, index)
+        # 顺序：先起播、后填面板。面板对大列表（十万级条目）是分块后台
+        # 填充，但立即窗口本身也要 ~100ms——视频先上，观感零等待
+        # （旧顺序是先填完再播，大列表点开=白屏数秒）。
+        from . import startup_log as _slog
+
+        _slog.stage("viewer-open", f"items={len(self.items)} index={index}")
         self._relayout()
         self.show_index(index)
+        self.panel.set_playlist(self.items, index)
         self._show_bars()
+        _slog.stage("viewer-open", "起播+面板立即窗口完成")
         self._save_playlist_state(clean=False)
         # Thumbnails for the (possibly huge) new playlist must not compete with
         # playback: pause their generation for a moment, then resume.
@@ -478,8 +489,11 @@ class Viewer(QWidget):
         self.show_index(target)
 
     def show_index(self, index: int) -> None:
+        from . import startup_log as _slog
+
         if not (0 <= index < len(self.items)):
             return
+        _slog.stage("viewer-play", f"show_index({index}) 开始")
         self._at_eof = False                  # 换片后不再处于“播完停帧”状态
         self._remember_position()
         restart_live = self._reset_live_for_media(self.items[index])
@@ -495,11 +509,13 @@ class Viewer(QWidget):
         self.panel.set_current(index)
         self.index_changed.emit(index)
         remember_recent_file(item.path)
+        _slog.stage("viewer-play", "前置状态更新完成")
 
         if item.is_video:
             self.image_view.clear()
             self.stack.setCurrentWidget(self.video_view)
             self.previewer.set_media(item.path)
+            _slog.stage("viewer-play", "previewer.set_media 完成")
             self._loaded_media_path = item.path
             self.controls.set_duration(item.duration or 0.0)
             self.controls.set_cache_end(0.0)
@@ -509,6 +525,7 @@ class Viewer(QWidget):
             self._sync_ab_range()
             start = resume.lookup(item.path) if settings["resume_enabled"] else None
             self.video_view.load(item.path, start)
+            _slog.stage("viewer-play", "video_view.load 完成")
             self.video_view.set_speed(float(settings["speed"]))
             if start:
                 self._show_toast(t("viewer.resume_playback").format(pos=format_duration(start)))
@@ -525,6 +542,7 @@ class Viewer(QWidget):
                     item.width, item.height = w, h
                     self._update_top_bar(item)
         self._show_bars()
+        _slog.stage("viewer-play", "show_index 全部完成")
 
     def _remember_position(self) -> None:
         if not (0 <= self.index < len(self.items)):
