@@ -50,6 +50,10 @@ class MpvWidget(QOpenGLWidget):
     file_loaded = Signal()
     eof_reached = Signal()
     error = Signal(str)
+    # loadfile 下发那一刻同步发出（不等 mpv 解复用）：缩略图/浏览器后台活
+    # 计要在起播前就让路。靠 duration>0 判"在播"要等 mpv 回报，实测慢
+    # 0.8-6.5s，整个卡顿窗口刚好没人管（见 main_window._update_thumb_gates）。
+    playback_starting = Signal()
 
     _redraw = Signal()
 
@@ -61,6 +65,9 @@ class MpvWidget(QOpenGLWidget):
         self._observers: list[tuple[str, object]] = []
         self._event_callbacks: list[object] = []
         self._pending_seek: float | None = None
+        # 有片子在手（loadfile 起播即真，stop() 归假）。判"在播"用它 +
+        # paused，而不是 duration>0——duration 要等解复用完成才有值。
+        self.media_loaded = False
         self.mpv = mpv.MPV(
             vo="libmpv",
             hwdec=str(settings["hwdec"]),
@@ -226,10 +233,15 @@ class MpvWidget(QOpenGLWidget):
             except Exception:
                 pass
         self._pending_seek = float(start_at) if (start_at and start_at > 1) else None
+        self.media_loaded = True
+        # 先让路、再下发：信号是同步的，接收方（后台加载让路）在 loadfile
+        # 之前就已生效，第一帧不用跟三十万行的填充抢 GUI 线程。
+        self.playback_starting.emit()
         self.mpv.loadfile(str(path), "replace")
         self.mpv.pause = False
 
     def stop(self) -> None:
+        self.media_loaded = False
         try:
             self.mpv.command("stop")
         except Exception:

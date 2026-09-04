@@ -289,7 +289,13 @@ class MediaListWidget(QListWidget):
         self.playing_row = -1
         self.thumbs_paused = False  # low-priority mode: skip thumbnail requests
         self.setObjectName("PanelList")
-        self.setUniformItemSizes(False)
+        # 行高全局统一（缩略图模式 54 / 紧凑 26，切换时整表一起改，见
+        # set_thumb_mode 与 MediaRowDelegate.sizeHint）——所以可以开
+        # uniformItemSizes。关着的时候 QListView 每插一批行都要重算全表
+        # 行位置：30 万行分块填充实测 109.3s GUI 时间，开了是 4.5s（24 倍）。
+        # 单块 addItem 本身只 7-13ms，代价全在插完之后的布局，自适应减半
+        # 量不到——这就是播放时每隔 1 秒一条 gui-stall 的来源。
+        self.setUniformItemSizes(True)
         self.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.setDragDropMode(QAbstractItemView.InternalMove)
         self.setDefaultDropAction(Qt.MoveAction)
@@ -319,6 +325,12 @@ class MediaListWidget(QListWidget):
         self._replace_playing = -1
         # 推迟填充（面板隐藏时）：列表内容作废，只记播放行
         self._deferred = False
+        # 最近一次成功应用的列表（按对象身份留档）。下次 set_items 先跟它
+        # 比一次，同序同项就只更新播放行——省掉从控件回读三十万行做对比
+        # （实测每次点开视频 420-510ms，回读本身就是 30 万次 Qt 往返）。
+        # 用户在面板里拖拽/上下移动/删除会绕开这里改行，那些地方调
+        # invalidate_applied() 作废留档，退回回读对比。
+        self._applied: list[MediaItem] | None = None
 
     @property
     def is_filling(self) -> bool:
@@ -335,6 +347,8 @@ class MediaListWidget(QListWidget):
         列表里的旧行原样留着（清掉三十万行本身就是要避开的开销），只记住
         播放行；is_filling 为真挡住一切回读，显示时再按最新内容填。
         """
+        if self._replace_phase or self._fill_timer.isActive():
+            self._applied = None   # 半成品：留档不再代表控件里的内容
         self._fill_timer.stop()
         self._replace_phase = False
         self._replace_source = []
@@ -348,6 +362,69 @@ class MediaListWidget(QListWidget):
         """交出推迟期间记下的播放行，并解除推迟状态。"""
         self._deferred = False
         return self.playing_row
+
+    def invalidate_applied(self) -> None:
+        """用户在面板里直接改了行（拖拽/上下移动/删除）：留档作废。
+
+        留档只用来判断"内容没变、什么都不用干"，作废后退回从控件回读的
+        全行对比——慢一点，但绝不会把控件与播放列表判成一致却其实错位。
+        """
+        self._applied = None
+
+    def _matches_applied(self, items: list[MediaItem]) -> bool:
+        """与留档同序同项？三十万行身份对比约 10-20ms（回读对比要 450ms）。"""
+        applied = self._applied
+        if applied is None or len(applied) != len(items):
+            return False
+        for a, b in zip(applied, items):
+            if a is not b:
+                return False
+        return True
+
+    def _retarget_playing(self, playing: int, total: int) -> None:
+        """内容不变、只换播放行：不碰任何行，正在跑的分块填充照常继续。"""
+        self.playing_row = playing
+        if 0 <= playing < self.count():
+            self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
+        elif 0 <= playing < total:
+            self._scroll_pending_row = playing
+        self.viewport().update()
+
+    def _resume_fill(self, items: list[MediaItem], playing: int) -> bool:
+        """分块填充/替换途中来了新内容：能原地续填就续，别同步补齐。
+
+        控件里此刻只有已填的前 _fill_pos 行，把它当"旧列表"做增量对比，
+        剩下十几万行会被判成"新增"并同步插进去——实测 125000→309054 一次
+        插了 2.1s，正好砸在点开视频那一瞬间（mpv 画面同在 GUI 线程渲染）。
+        已填前缀与新列表逐项同源时，只换填充源、保留 _fill_pos 继续填。
+        """
+        if self._replace_phase:
+            # 清空阶段：一行都还没按源填，直接换目标接着排空
+            self._replace_source = list(items)
+            self._replace_playing = playing
+            self._applied = list(items)
+            self._fill_timer.start(self._chunk_interval())
+            return True
+        pos = self._fill_pos
+        if pos != self.count() or pos > len(items) or len(self._fill_source) < pos:
+            return False
+        for i in range(pos):
+            if self._fill_source[i] is not items[i]:
+                return False
+        self._fill_source = list(items)
+        self._applied = list(items)
+        self.playing_row = playing
+        if 0 <= playing < self.count():
+            self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
+        elif 0 <= playing < len(items):
+            self._scroll_pending_row = playing
+        self._fill_timer.start(self._chunk_interval())
+        from . import startup_log
+
+        startup_log.stage(
+            "panel-fill",
+            f"续填 {pos}/{len(items)} 行（免去 {len(items) - pos} 行同步补齐）")
+        return True
 
     def setDelegateInstance(self, thumbs: ThumbnailCache) -> None:
         self._delegate = MediaRowDelegate(thumbs, self)
@@ -516,6 +593,7 @@ class MediaListWidget(QListWidget):
             self._fill_pos = 0
             self._scroll_pending_row = -1
             self._chunk_rows = self.CHUNK_ROWS
+            self._applied = list(items)
             self.playing_row = playing
             if 0 <= playing < self.count():
                 self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
@@ -543,6 +621,7 @@ class MediaListWidget(QListWidget):
         self._fill_pos = 0
         self._scroll_pending_row = -1
         self._chunk_rows = self.CHUNK_ROWS
+        self._applied = list(items)
         self.playing_row = playing
         if 0 <= playing < self.count():
             self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
@@ -556,15 +635,27 @@ class MediaListWidget(QListWidget):
         return True
 
     def set_items(self, items: list[MediaItem], playing: int = -1) -> None:
-        self._fill_timer.stop()
         total = len(items)
+        # 留档命中（同序同项）：内容压根没变，只换播放行。这是点开视频最常
+        # 走的一条——播放列表就是浏览器那份，一字没动。此时绝不能停正在跑
+        # 的分块填充：目标内容一致，停了列表就永远停在半成品上。
+        if (total and not self._filter_needle and not self._deferred
+                and self._matches_applied(items)):
+            self._retarget_playing(playing, total)
+            return
+        filling = self._fill_timer.isActive() or self._replace_phase
+        self._fill_timer.stop()
+        # 填充途中内容真变了：控件里只有半份，先试原地续填（见 _resume_fill）
+        if filling and self._resume_fill(items, playing):
+            return
         # 增量同步：无变化（只更新播放行）/纯新增/纯减少在这里解决，
         # 顺序变化返回 False 走下面的全量路径。按对象身份全行对比——
         # 此前的"首行+播放行"两行快路径会漏判局部行序变化，让面板与
         # 播放器列表脱钩（行号≠序号，双击错位），已废弃。30 万行对比
         # 约几百 ms，对比 clear 重填的 20s 冻结可忽略。
+        # filling 时禁走：那时回读到的是半成品（见 _resume_fill 的注释）。
         if (total and not self._filter_needle and self.count()
-                and not self.is_filling
+                and not filling and not self._deferred
                 and self._sync_incremental(items, playing)):
             return
         # 顺序变化/混合增删的大列表：绝不同步 clear()（三十万行实测 20s
@@ -581,6 +672,7 @@ class MediaListWidget(QListWidget):
             self._replace_source = list(items)
             self._replace_playing = playing
             self._replace_phase = True
+            self._applied = list(items)   # 留档＝要收敛到的内容（不是当前行）
             self.playing_row = -1
             self._fill_source = []
             self._fill_pos = 0
@@ -603,6 +695,7 @@ class MediaListWidget(QListWidget):
             self._had_filter = False
             self._scroll_pending_row = -1
             self._chunk_rows = self.CHUNK_ROWS
+            self._applied = list(items)
             self.playing_row = playing
             if total <= self.SYNC_MAX:
                 # 小列表：与旧版完全一致的同步路径
@@ -651,6 +744,7 @@ class MediaListWidget(QListWidget):
         if self.is_filling:
             return  # 填充期禁拖拽的双保险（setDragDropMode 已关）
         super().dropEvent(e)
+        self.invalidate_applied()   # 行序被用户改了：留档不再代表控件
         self.reordered.emit()
 
     def keyPressEvent(self, e):
@@ -1286,6 +1380,7 @@ class PlaylistPanel(QWidget):
             entry = lst.takeItem(row)
             lst.insertItem(row + delta, entry)
             moved.append(row + delta)
+        lst.invalidate_applied()
         lst.clearSelection()
         for r in moved:
             lst.item(r).setSelected(True)
@@ -1308,6 +1403,7 @@ class PlaylistPanel(QWidget):
             return
         for row in rows:
             lst.takeItem(row)
+        lst.invalidate_applied()
         remaining = lst.items()
         self._all_items = remaining
         self.playlist_removed.emit(remaining)

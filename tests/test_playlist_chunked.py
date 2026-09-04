@@ -36,7 +36,8 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from app.media import MediaItem
-from app.playlist_panel import MediaListWidget
+from app.playlist_panel import (ITEM_ROLE, ROW_H_COMPACT, ROW_H_THUMB,
+                                MediaListWidget)
 from app.thumbs import ThumbnailCache
 
 BIG = MediaListWidget.SYNC_MAX + 20_000      # 走分块路径
@@ -155,6 +156,153 @@ class ChunkedFillTests(unittest.TestCase):
         back = w.items()
         self.assertEqual(BIG, len(back))
         self.assertEqual(items[123].path, back[123].path)
+
+
+class AppliedMirrorTests(unittest.TestCase):
+    """留档快路径 / 填充中续填 / 统一行高（起播掉帧的三处真凶）。
+
+    背景 bug（用户实测 + 日志实锤，309k 项文件夹）：
+    - `增量同步 125000→309054 行 2058ms`：set_items 开头先 stop() 了填充
+      定时器，紧随其后的 `not self.is_filling` 守卫因此永远为真，于是拿
+      只填了一半的控件当"旧列表"做增量对比，把没填的 18.4 万行同步插了
+      进去——2.1s 硬冻结，正好砸在点开视频那一刻（mpv 画面同在 GUI 线程
+      渲染，见 mpv_widget.MpvWidget.paintGL）。
+    - 同序同项也要从控件回读三十万行做对比：每次点开视频 420-510ms。
+    - uniformItemSizes 关着：QListView 每插一批行都重算全表行位置，30 万
+      行分块填充实测 109.3s GUI 时间（开了 4.5s）——播放期间每隔 1 秒一条
+      gui-stall 的来源。单块 addItem 只 7-13ms，自适应减半量不到它。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+        cls.thumbs = ThumbnailCache()
+
+    def _widget(self) -> MediaListWidget:
+        w = MediaListWidget(self.thumbs)
+        w.resize(360, 800)
+        return w
+
+    def _pump(self, seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            self.app.processEvents()
+            time.sleep(0.002)
+
+    def _wait_fill(self, w: MediaListWidget, total: int, timeout: float = 60.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.app.processEvents()
+            if not w.is_filling and w.count() == total:
+                return
+            time.sleep(0.005)
+        self.fail(f"填充超时: {w.count()}/{total}")
+
+    def _assert_order(self, w: MediaListWidget, src: list[MediaItem]) -> None:
+        for i in (0, 1, len(src) // 3, len(src) // 2, len(src) - 2, len(src) - 1):
+            self.assertIs(src[i], w.item(i).data(ITEM_ROLE),
+                          f"行号≠序号（第 {i} 行）：双击会播错文件")
+
+    def test_uniform_item_sizes_on_and_density_still_switches(self):
+        w = self._widget()
+        self.assertTrue(w.uniformItemSizes(), "关掉它 30 万行填充要多花 100s")
+        w.show()
+        w.set_items(_items(SMALL), playing=0)
+        self.assertEqual(ROW_H_THUMB, w.visualItemRect(w.item(3)).height())
+        w.set_thumb_mode(False)
+        self.app.processEvents()
+        self.assertEqual(ROW_H_COMPACT, w.visualItemRect(w.item(3)).height())
+        w.set_thumb_mode(True)
+        self.app.processEvents()
+        self.assertEqual(ROW_H_THUMB, w.visualItemRect(w.item(3)).height())
+
+    def test_same_content_again_is_cheap_and_keeps_filling(self):
+        """同序同项再来一次：只换播放行，且绝不打断正在跑的填充。
+
+        打断＝列表永远停在半成品（旧版的等长"无变化"分支会清掉填充状态）。
+        """
+        w = self._widget()
+        items = _items(BIG)
+        w.set_items(items, playing=0)
+        self._pump(0.25)
+        mid = w.count()
+        self.assertLess(mid, BIG)
+        t0 = time.perf_counter()
+        w.set_items(list(items), playing=7)      # 新 list 对象，同一批元素
+        took = (time.perf_counter() - t0) * 1000
+        self.assertLess(took, 120, f"留档快路径没命中：{took:.0f}ms")
+        self.assertEqual(7, w.playing_row)
+        self.assertTrue(w.is_filling, "填充被打断，列表会永远停在半成品")
+        self._wait_fill(w, BIG)
+        self._assert_order(w, items)
+
+    def test_midfill_tail_append_resumes_instead_of_sync_catchup(self):
+        """填充中尾部追加：原地续填，不许同步补齐（旧版 2.1s 冻结）。"""
+        w = self._widget()
+        items = _items(BIG)
+        w.set_items(items[:BIG // 2], playing=0)
+        self._pump(0.25)
+        mid = w.count()
+        t0 = time.perf_counter()
+        w.set_items(items, playing=0)
+        took = (time.perf_counter() - t0) * 1000
+        self.assertLess(took, 250, f"同步补齐没被挡住：{took:.0f}ms")
+        self.assertGreaterEqual(w._fill_pos, mid, "续填应保留已填进度")
+        self._wait_fill(w, BIG)
+        self._assert_order(w, items)
+
+    def test_midfill_reorder_falls_back_and_order_is_correct(self):
+        """填充中顺序变了：回退分块替换，最终行号==序号。"""
+        w = self._widget()
+        items = _items(BIG)
+        w.set_items(items, playing=0)
+        self._pump(0.25)
+        shuffled = list(reversed(items))
+        t0 = time.perf_counter()
+        w.set_items(shuffled, playing=0)
+        self.assertLess((time.perf_counter() - t0) * 1000, 250)
+        self._wait_fill(w, BIG)
+        self._assert_order(w, shuffled)
+
+    def test_incremental_sync_still_applies_on_complete_list(self):
+        """控件填满后的纯新增/纯减少仍走增量同步（不整表重填）。"""
+        w = self._widget()
+        base = _items(SMALL)
+        w.set_items(base, playing=0)
+        grown = base[:100] + _items(5) + base[100:]
+        w.set_items(grown, playing=0)
+        self.assertEqual(len(grown), w.count())
+        self._assert_order(w, grown)
+        shrunk = [it for i, it in enumerate(grown) if i % 7]
+        w.set_items(shrunk, playing=0)
+        self.assertEqual(len(shrunk), w.count())
+        self._assert_order(w, shrunk)
+
+    def test_user_edited_rows_invalidate_the_mirror(self):
+        """用户改过行 → 留档作废 → 同内容也要重新对齐（不能判成"没变"）。"""
+        w = self._widget()
+        items = _items(SMALL)
+        w.set_items(items, playing=0)
+        w.insertItem(10, w.takeItem(3))          # 模拟上下移动/拖拽
+        w.invalidate_applied()
+        self.assertIsNone(w._applied)
+        w.set_items(items, playing=0)
+        self._assert_order(w, items)
+
+    def test_deferred_fill_invalidates_mirror_when_incomplete(self):
+        """半成品被推迟：留档不能再声称控件已是完整内容。"""
+        w = self._widget()
+        items = _items(BIG)
+        w.set_items(items, playing=0)
+        self._pump(0.2)
+        self.assertLess(w.count(), BIG)
+        w.mark_deferred(5)
+        self.assertIsNone(w._applied)
+        w.take_deferred_playing()
+        w.set_items(items, playing=5)
+        self._wait_fill(w, BIG)
+        self.assertEqual(BIG, w.count())
+        self._assert_order(w, items)
 
 
 class PanelGuardTests(unittest.TestCase):

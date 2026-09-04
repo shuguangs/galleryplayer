@@ -2540,6 +2540,11 @@ class MainWindow(QMainWindow):
             self.viewer.folder_requested.connect(self._on_panel_folder_requested)
             self.viewer.playlist_changed.connect(self._on_playlist_changed)
             self.viewer.sort_requested.connect(self._on_panel_sort_requested)
+            # 起播即刻让路：信号在 loadfile 之前同步发出，让路措施在第一帧
+            # 之前生效，而不是等 500ms 轮询看见 duration>0（实测晚 0.8-6.5s，
+            # 面板填充/预热/归位正好在那段窗口里全速抢 GUI 线程）。
+            self.viewer.video_view.playback_starting.connect(
+                self._on_playback_starting)
         return self.viewer
 
     def eventFilter(self, obj, event) -> bool:
@@ -2566,12 +2571,32 @@ class MainWindow(QMainWindow):
             self._apply_video_headroom()
         return super().eventFilter(obj, event)
 
+    def _on_playback_starting(self) -> None:
+        """video_view.load() 同步发来的起播通知：立刻把后台活计让开。
+
+        _update_thumb_gates 是 500ms 轮询，判据又要等 mpv 回报 duration，
+        实测起播后 0.8-6.5s 才认出"在播"——而点开视频那一瞬间正是面板填充
+        + 预热 + 归位一起抢 GUI 线程的时刻（mpv 画面同在 GUI 线程渲染）。
+        这里同步走一遍开关，第一帧之前就让路。
+        """
+        if self._playback_active:
+            return
+        self._playback_active = True
+        self.thumbs.set_playback_active(True)
+        self._apply_video_headroom()
+        self._set_browser_background_paused(True)
+        from . import startup_log
+
+        startup_log.stage("thumb-gate", "起播即刻让路（不等轮询）")
+
     def _update_thumb_gates(self) -> None:
         """500ms 轮询播放状态，驱动缩略图让路开关。
 
-        playing 的判据：video_view 有文件（duration>0）且未暂停。图片
-        视图/播放器未开/已停止都视为没在播放，缩略图全速跑。状态变化
-        时同步重算 headroom（播放本身也占着额外解码线程的名额）。
+        playing 的判据：video_view 有片子在手（media_loaded：loadfile 起播
+        即真、stop 归假）且未暂停。判据不用 duration>0——那要等 mpv 解复用
+        完成才有值，起播的让路会整体晚 0.8-6.5s（见 _on_playback_starting）。
+        图片视图/播放器未开/已停止都视为没在播，缩略图全速跑。状态变化时
+        同步重算 headroom（播放本身也占着额外解码线程的名额）。
         """
         playing = False
         v = self.viewer
@@ -2579,7 +2604,7 @@ class MainWindow(QMainWindow):
             mpw = getattr(v, "video_view", None)
             if mpw is not None:
                 try:
-                    playing = mpw.duration > 0 and not mpw.paused
+                    playing = bool(mpw.media_loaded) and not mpw.paused
                 except Exception:
                     playing = False
         if playing == self._playback_active:
