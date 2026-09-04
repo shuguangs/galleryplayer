@@ -384,6 +384,19 @@ def _yield_thread_priority(t: threading.Thread) -> None:
         pass
 
 
+def _log_giveup(item: MediaItem) -> None:
+    """一个文件彻底解码失败（本会话内放弃）：留痕，"格子怎么是空的"类
+    bug 的第一手证据。worker 线程调用，startup_log 的写入自身带兜底。"""
+    try:
+        from . import startup_log
+
+        startup_log.stage(
+            "thumb-fail",
+            f"放弃解码（{MAX_ATTEMPTS} 次尝试）: {item.path}")
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------------------------ cache
 
 
@@ -465,8 +478,22 @@ class ThumbnailCache(QObject):
         # 走磁盘命中路径时得内联 mpv open 补时长（最坏 25s/远程 60s），把
         # 唯一的通用视频 worker 串行拖住。15s 一存，崩溃最多丢最近 15s。
         # 后台线程执行：十万级条目的 json.dumps 在 GUI 线程实测可达上百
-        # ms，播放中每 15s 卡一下的来源之一。
-        threading.Thread(target=metadata.save, daemon=True,
+        # ms，播放中每 15s 卡一下的来源之一。耗时打点（>100ms 才记，
+        # 免得 15s 一条刷屏）。
+        def _save_meta() -> None:
+            t0 = time.monotonic()
+            metadata.save()
+            elapsed = time.monotonic() - t0
+            if elapsed > 0.1:
+                try:
+                    from . import startup_log
+
+                    startup_log.stage(
+                        "meta-save", f"元数据落盘 {elapsed * 1000:.0f}ms（后台线程）")
+                except Exception:
+                    pass
+
+        threading.Thread(target=_save_meta, daemon=True,
                          name="meta-save").start()
         with self._lock:
             busy = self._video_inflight or any(True for _ in self._pending)
@@ -792,6 +819,9 @@ class ThumbnailCache(QObject):
                     self._pending.discard(key)
                     self._key_prio.pop(key, None)
                     self._failed[key] = self._failed.get(key, 0) + 1
+                    gave_up = self._failed[key] >= MAX_ATTEMPTS
+                if gave_up:
+                    _log_giveup(item)
                 return
             qimg = pil_to_qimage(img)
             with self._lock:
@@ -808,6 +838,9 @@ class ThumbnailCache(QObject):
                 self._pending.discard(key)
                 self._key_prio.pop(key, None)
                 self._failed[key] = self._failed.get(key, 0) + 1
+                gave_up = self._failed[key] >= MAX_ATTEMPTS
+            if gave_up:
+                _log_giveup(item)
 
     def _load_from_disk(self, key: str) -> Image.Image | None:
         p = self._disk_path(key)

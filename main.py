@@ -29,12 +29,31 @@ def main() -> int:
     startup_log.attach(app)
     startup_log.stage("qapp", "QApplication 构建完成")
 
-    # 单实例：播放器已在运行时，外部“打开方式 / 双击”启动的第二个进程
-    # 把文件路径转发给已有窗口后直接退出，不再开第二个界面。
-    from app.single_instance import forward_to_running
+    # 单实例（Windows 命名互斥体，见 app/single_instance.py）：已有实例
+    # 在跑时，第二次启动无论带不带文件都转交给它后退出——带文件 = 转发
+    # 路径并播放；裸双击 exe = 把已有窗口唤到前台。此前只查带参数的启动，
+    # 裸双击直接漏过（双开的根因）。互斥体由内核在进程死亡时自动回收：
+    # 没有残留清理，也没有两进程同时自认第一的竞态。
+    # 自动化模式跳过：测试/时间线脚本要能在播放器开着时启动。
+    from app.runtime import automation_mode
+    from app.single_instance import (
+        InstanceServer, acquire_single_instance, forward_to_running)
 
-    if forward_to_running(sys.argv[1:]):
-        startup_log.end("forwarded（转交给已有实例）")
+    server = None
+    if automation_mode():
+        startup_log.stage("server", "自动化模式：跳过单实例（不探测不监听）")
+    elif acquire_single_instance():
+        # 尽早占住单实例管道：下面 libmpv/样式表/首启语言框是好几秒，
+        # 这期间再来的启动必须已经能找到我们。互斥体在手，listen 失败
+        # 只剩崩溃残留一种解释——清掉重听是安全的。
+        server = InstanceServer()
+        server.listen()
+        startup_log.stage("server", "单实例服务就绪")
+    else:
+        # 已有实例持锁：转交（裸启动=唤醒）后退出。即便转发本身失败也
+        # 退出——宁可丢一次转发，不能开第二个窗口。
+        forward_to_running(sys.argv[1:])
+        startup_log.end("已有实例在运行，本进程转交后退出")
         return 0
 
     try:
@@ -87,12 +106,6 @@ def main() -> int:
 
     from app.main_window import MainWindow
 
-    from app.single_instance import InstanceServer
-
-    server = InstanceServer()
-    server.listen()
-    startup_log.stage("server", "单实例服务就绪")
-
     startup_file = None
     if len(sys.argv) > 1:
         target = Path(sys.argv[1])
@@ -101,7 +114,15 @@ def main() -> int:
 
     win = MainWindow(startup_file=startup_file)
     startup_log.stage("mainwindow", "主窗口构建完成")
-    server.paths_received.connect(win.handle_external_paths)
+    if server is not None:
+        server.paths_received.connect(win.handle_external_paths)
+        server.raise_requested.connect(win.raise_window)
+        # 启动早期（listen 到信号接上之间）到达的转发会丢——补投
+        early_paths, early_raise = server.take_early()
+        if early_paths:
+            win.handle_external_paths(early_paths)
+        if early_raise:
+            win.raise_window()
     win.show()
     startup_log.stage("shown", "主窗口 show() 完成，进入事件循环")
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 import traceback
 from datetime import datetime
@@ -105,6 +106,24 @@ def _install_excepthook() -> None:
     sys.excepthook = hook
 
 
+def _install_thread_excepthook() -> None:
+    """子线程的未捕获异常默认只打到 stderr（--windowed 打包版=黑洞）——
+    接进日志。缩略图 worker / 扫描线程 / 预载线程的崩全靠这条留痕，
+    sys.excepthook 只覆盖主线程。"""
+    def hook(args):
+        try:
+            name = getattr(args.thread, "name", "?") if args.thread else "?"
+            tb = "".join(traceback.format_exception(
+                args.exc_type, args.exc_value, args.exc_traceback))[:2000]
+            _write(_fmt("uncaught", f"[线程 {name}] "
+                                    f"{getattr(args.exc_type, '__name__', '?')}: "
+                                    f"{args.exc_value}\n{tb}"))
+        except Exception:
+            pass
+
+    threading.excepthook = hook
+
+
 def _install_stall_detector(app) -> None:
     """GUI 线程卡顿检测：250ms 心跳，回调间隔 > 1s 记一条。
 
@@ -152,6 +171,7 @@ def begin() -> None:
                            f"argv={[a[:80] for a in sys.argv][:4]} "
                            f"frozen={bool(getattr(sys, 'frozen', False))}"))
     _install_excepthook()
+    _install_thread_excepthook()
     _prune_old_logs()
 
 

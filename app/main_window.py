@@ -1410,6 +1410,15 @@ class MainWindow(QMainWindow):
         # background must not switch the UI to (and build) the browser.
         self.set_folder(target.parent, quiet=True)
 
+    def raise_window(self) -> None:
+        """裸双击 exe 的第二次启动转发来的"唤醒"：把主窗口带回前台。"""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+
     def handle_external_paths(self, paths) -> None:
         """Files/folders forwarded by a second launch (single-instance mode).
 
@@ -2102,7 +2111,10 @@ class MainWindow(QMainWindow):
             # 权限/离线盘等导致的读取失败：明确浮出，避免看起来像"空文件夹"
             err_text = t("main_window.scan_errors").format(n=stats.errors)
             suffix = f"{suffix}{err_text}" if suffix else err_text
-            print(f"[scan] {stats.errors} 个目录读取失败，最后: {stats.last_error}")
+            # windowed 打包版的 print 是黑洞——扫描错误必须进日志
+            _slog.stage("scan-errors",
+                        f"{stats.errors} 个目录读取失败，"
+                        f"最后: {stats.last_error}")
         if not self._quiet_scan:
             self._apply_view(count_suffix=suffix)
         else:
@@ -2370,6 +2382,11 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self.viewer and event.type() in (QEvent.Show, QEvent.Hide):
+            from . import startup_log
+
+            startup_log.stage(
+                "viewer-win",
+                f"播放器窗口{'显示' if obj.isVisible() else '隐藏/关闭'}")
             # 播放器显隐变化 → 重算视频解码余量（见 _apply_video_headroom）。
             # 注意不能把 isVisible() 直接传给 set_video_headroom：那正是
             # 此前的反接 bug——播放器可见（多半正在播放）反而放开第 3 路
@@ -2398,6 +2415,11 @@ class MainWindow(QMainWindow):
         self._playback_active = playing
         self.thumbs.set_playback_active(playing)
         self._apply_video_headroom()
+        from . import startup_log
+
+        startup_log.stage(
+            "thumb-gate",
+            "播放开始：视频抓帧整体让路" if playing else "播放结束：视频抓帧恢复")
         if not playing and self.tiles is not None:
             # 播放结束：立即重绘一次，视口里的视频项重新发请求
             # （播放期间 request 拒收了它们，paint 是唯一的请求方）
@@ -2406,7 +2428,15 @@ class MainWindow(QMainWindow):
     def _apply_video_headroom(self) -> None:
         """额外的第 3 路视频解码线程只在「播放器隐藏且没在播放」时放开。"""
         visible = self.viewer is not None and self.viewer.isVisible()
-        self.thumbs.set_video_headroom(not visible and not self._playback_active)
+        enable = not visible and not self._playback_active
+        self.thumbs.set_video_headroom(enable)
+        from . import startup_log
+
+        startup_log.stage(
+            "thumb-gate",
+            f"第3路视频解码={'开' if enable else '关'}"
+            f"（播放器{'隐藏' if not visible else '可见'}，"
+            f"{'播放中' if self._playback_active else '空闲'}）")
 
     def _on_panel_sort_requested(self, key: str, desc: bool) -> None:
         """The panel's sort combo changed; mirror it into the toolbar and re-sort."""
