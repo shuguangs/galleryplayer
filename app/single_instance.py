@@ -93,14 +93,14 @@ def forward_to_running(paths: list[str]) -> bool:
     payload = "\n".join(paths).encode("utf-8") if paths else RAISE_PAYLOAD
     sock.write(payload)
     sock.flush()
+    # 给对端留一点接受时间：对端还在启动时写入会滞留本端缓冲，过早销毁
+    # socket 载荷才会真丢；waitForBytesWritten 对管道完成信号不可靠
+    # （实测误报），只当回旋时间用，不当失败判据。
     deadline = time.monotonic() + 1.5
-    landed = False
-    while not (landed := sock.waitForBytesWritten(100)):
+    while not sock.waitForBytesWritten(100):
         if sock.state() == QLocalSocket.UnconnectedState or time.monotonic() >= deadline:
             break
         QCoreApplication.processEvents()
-    if not landed:
-        startup_log.stage("single-inst", "转发写入未落地（对端无响应），载荷可能丢失")
     sock.disconnectFromServer()
     if sock.state() == QLocalSocket.ConnectedState:
         sock.waitForDisconnected(300)
