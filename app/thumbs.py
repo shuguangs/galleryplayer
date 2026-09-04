@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import heapq
 import queue
+import sys
 import threading
 import time
 from collections import OrderedDict, deque
@@ -362,6 +363,27 @@ def _thread_grabber() -> MpvGrabber:
     return g
 
 
+def _yield_thread_priority(t: threading.Thread) -> None:
+    """Windows：把缩略图 worker 线程降到 BELOW_NORMAL。
+
+    Pillow 的图片解码跑在本线程内，降级后调度上让路给播放/UI 线程——
+    播放期间浏览器图片缩略图照常出但不再抢 CPU。抓帧用的 libmpv 内部
+    线程不受此影响，那部分由 set_playback_active 在播放期间整体让路。
+    非 Windows / 权限不足时静默跳过。"""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenThread(0x0002, False, t.native_id)  # THREAD_SET_INFORMATION
+        if handle:
+            k32.SetThreadPriority(handle, -1)                 # BELOW_NORMAL
+            k32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
 # ------------------------------------------------------------------------ cache
 
 
@@ -406,12 +428,16 @@ class ThumbnailCache(QObject):
         # 播放器不可见时置 True（set_video_headroom）：放开 gated 的第 2 路
         # 通用视频线程；正在播放时保持 False，缩略图解码不与播放抢 CPU
         self._vid_extra_enabled = False
+        # 视频正在播放时置 True（set_playback_active）：所有视频抓帧 worker
+        # 停止取件、request 拒收视频单——抓帧（mpv open+seek+解码）是播放
+        # 期间最重的负载，实测多路并发直接造成播放卡顿
+        self._playback_active = False
 
         # worker 线程必须最后起：它们立刻访问 _lock/_prio_heap 等属性
         # thumb-vid-vp 是视口专用线程：只取视口请求（prio < WARMUP_PRIO），
         # 预热期间空挂——滚动视口时才醒，视口填充翻倍。
-        # thumb-vid-x 是 gated 的第 2 路通用视频线程：播放器可见时挂起
-        # （解码不与播放抢 CPU），播放器隐藏后由 set_video_headroom 放开。
+        # thumb-vid-x 是 gated 的第 2 路通用视频线程：播放器可见或正在
+        # 播放时挂起，播放器隐藏且空闲后由 set_video_headroom 放开。
         for name, want_video, n, vp_only, gated in (
             ("thumb-vid", True, VIDEO_WORKERS, False, False),
             ("thumb-vid-vp", True, 1, True, False),
@@ -424,6 +450,7 @@ class ThumbnailCache(QObject):
                     args=(want_video, vp_only, gated), daemon=True,
                     name=f"{name}-{i}")
                 t.start()
+                _yield_thread_priority(t)
                 self._workers.append(t)
 
         # Reclaim the ~55 MB each idle video grabber holds once a folder is scanned.
@@ -437,7 +464,10 @@ class ThumbnailCache(QObject):
         # 会丢整段会话的记录，造成"缩略图在、时长没了"的缓存漂移——漂移项
         # 走磁盘命中路径时得内联 mpv open 补时长（最坏 25s/远程 60s），把
         # 唯一的通用视频 worker 串行拖住。15s 一存，崩溃最多丢最近 15s。
-        metadata.save()
+        # 后台线程执行：十万级条目的 json.dumps 在 GUI 线程实测可达上百
+        # ms，播放中每 15s 卡一下的来源之一。
+        threading.Thread(target=metadata.save, daemon=True,
+                         name="meta-save").start()
         with self._lock:
             busy = self._video_inflight or any(True for _ in self._pending)
         if busy:
@@ -477,6 +507,11 @@ class ThumbnailCache(QObject):
         prio = 1e18 if priority is None else priority
         with self._lock:
             if self._failed.get(key, 0) >= MAX_ATTEMPTS:
+                return None
+            if self._playback_active and item.is_video:
+                # 播放让路：视频单不入队——入了也没 worker 取，只会占满
+                # 队列水位，把图片预热/视口请求饿死。paint 是请求方，
+                # 播放结束后的下一帧（或预热的下一轮）会重新请求。
                 return None
             if key in self._pending:
                 # 已排队：优先级更高时升级（堆内追加新条目，旧条目出堆时
@@ -557,6 +592,22 @@ class ThumbnailCache(QObject):
             self._vid_extra_enabled = enabled
             self._prio_wake.set()
 
+    def set_playback_active(self, active: bool) -> None:
+        """视频正在播放 → 后台视频抓帧整体让路。
+
+        每路抓帧是一个 mpv 实例（硬解 + 解码线程），播放期间多路并发
+        与播放的解码抢 GPU/CPU——实测播放卡顿的主因。置 True 后：
+        - worker 不再取视频单（在途的一张照常收尾并缓存，不浪费）；
+        - request() 拒收新的视频单（见其注释，防队列水位被占死）；
+        - 图片缩略图（Pillow，线程已降 BELOW_NORMAL）照常出。
+        暂停/停止/关闭后置 False，排队的视频单自动恢复消化。
+        """
+        with self._lock:
+            if self._playback_active == active:
+                return
+            self._playback_active = active
+            self._prio_wake.set()
+
     def invalidate_queue(self) -> None:
         """Drop interest in everything queued so far (folder changed).
 
@@ -610,6 +661,7 @@ class ThumbnailCache(QObject):
         图片线程跳过视频项。viewport_only 线程再跳过预热单
         （prio >= WARMUP_PRIO）——没有视口请求就一直空挂。
         gated 线程受 _vid_extra_enabled 门控：关闭时只空挂等待开关。
+        _playback_active 时视频线程全体空挂（播放让路，见 set_playback_active）。
         """
         while not self._closed and not _STOPPING.is_set():
             job = None
@@ -617,6 +669,8 @@ class ThumbnailCache(QObject):
                 heap = self._prio_heap
                 while heap and job is None and not (
                         gated and not self._vid_extra_enabled):
+                    if want_video and self._playback_active:
+                        break  # 播放中：视频单整体让路（图片单照常）
                     # 找堆里类型匹配且 (priority, -seq) 最小的项。
                     best_i = -1
                     best_key = None

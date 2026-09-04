@@ -275,6 +275,16 @@ class MainWindow(QMainWindow):
         self._warmup_timer.timeout.connect(self._warmup_tick)
         self._warmup_cursor = 0
 
+        # 播放状态轮询 → 缩略图解码让路（播放中视频抓帧全停，见
+        # ThumbnailCache.set_playback_active）。轮询而非信号：停止/关闭/
+        # EOF 等"播放结束"的边缘没有统一信号，漏一次就会把视频缩略图
+        # 永久挂起；500ms 读两个 mpv 属性（duration/paused）开销可忽略。
+        self._playback_active = False
+        self._thumb_gate_timer = QTimer(self)
+        self._thumb_gate_timer.setInterval(500)
+        self._thumb_gate_timer.timeout.connect(self._update_thumb_gates)
+        self._thumb_gate_timer.start()
+
         self._build_ui()
         from . import startup_log as _slog
 
@@ -2315,6 +2325,10 @@ class MainWindow(QMainWindow):
             cursor += 1
             if it.is_archive:
                 continue
+            # 播放让路期间跳过视频项：request 会拒收它们（不入队），但
+            # submitted 计数照加会把水位空烧在无效提交上，饿死图片预热
+            if it.is_video and self._playback_active:
+                continue
             # request 返回 None=已提交解码/已排队；返回 QImage=内存命中
             # （无需处理）。磁盘缓存命中走 request 内部的 _load_from_disk
             # + _backfill_metadata 路径，同样提交。
@@ -2356,11 +2370,43 @@ class MainWindow(QMainWindow):
 
     def eventFilter(self, obj, event) -> bool:
         if obj is self.viewer and event.type() in (QEvent.Show, QEvent.Hide):
-            # 播放器不可见（关闭/隐藏）→ 放开第 2 路通用视频解码；
-            # 可见（含最小化，Qt 语义里 minimized 仍算 visible）→ 收回
-            # 单路，缩略图解码不与播放抢 CPU
-            self.thumbs.set_video_headroom(obj.isVisible())
+            # 播放器显隐变化 → 重算视频解码余量（见 _apply_video_headroom）。
+            # 注意不能把 isVisible() 直接传给 set_video_headroom：那正是
+            # 此前的反接 bug——播放器可见（多半正在播放）反而放开第 3 路
+            # 解码、隐藏反而收回，播放卡顿的主因。
+            self._apply_video_headroom()
         return super().eventFilter(obj, event)
+
+    def _update_thumb_gates(self) -> None:
+        """500ms 轮询播放状态，驱动缩略图让路开关。
+
+        playing 的判据：video_view 有文件（duration>0）且未暂停。图片
+        视图/播放器未开/已停止都视为没在播放，缩略图全速跑。状态变化
+        时同步重算 headroom（播放本身也占着额外解码线程的名额）。
+        """
+        playing = False
+        v = self.viewer
+        if v is not None:
+            mpw = getattr(v, "video_view", None)
+            if mpw is not None:
+                try:
+                    playing = mpw.duration > 0 and not mpw.paused
+                except Exception:
+                    playing = False
+        if playing == self._playback_active:
+            return
+        self._playback_active = playing
+        self.thumbs.set_playback_active(playing)
+        self._apply_video_headroom()
+        if not playing and self.tiles is not None:
+            # 播放结束：立即重绘一次，视口里的视频项重新发请求
+            # （播放期间 request 拒收了它们，paint 是唯一的请求方）
+            self.tiles.viewport().update()
+
+    def _apply_video_headroom(self) -> None:
+        """额外的第 3 路视频解码线程只在「播放器隐藏且没在播放」时放开。"""
+        visible = self.viewer is not None and self.viewer.isVisible()
+        self.thumbs.set_video_headroom(not visible and not self._playback_active)
 
     def _on_panel_sort_requested(self, key: str, desc: bool) -> None:
         """The panel's sort combo changed; mirror it into the toolbar and re-sort."""
