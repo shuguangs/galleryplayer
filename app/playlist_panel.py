@@ -244,16 +244,36 @@ class MediaListWidget(QListWidget):
     IMMEDIATE_MAX = 4000       # 立即窗口上限（约 80ms）
     CHUNK_ROWS = 1000          # 后台块起始行数（超时会自适应减半）
     CHUNK_MIN_ROWS = 250       # 自适应下限
+    CHUNK_SLOW_ROWS = 250      # 播放中每块上限（GUI 线程要先喂 mpv 画面）
     CHUNK_SLOW_MS = 150        # 单块超过这个时长 → 下块行数减半
     CHUNK_INTERVAL_MS = 40
+    CHUNK_INTERVAL_SLOW_MS = 250   # 播放中的块间隔
 
     @property
     def _chunk_rows(self) -> int:
-        return max(self.CHUNK_MIN_ROWS, self._chunk_rows_v)
+        v = max(self.CHUNK_MIN_ROWS, self._chunk_rows_v)
+        return min(v, self.CHUNK_SLOW_ROWS) if self._slow_pacing else v
 
     @_chunk_rows.setter
     def _chunk_rows(self, v: int) -> None:
         self._chunk_rows_v = max(self.CHUNK_MIN_ROWS, v)
+
+    def _chunk_interval(self) -> int:
+        return (self.CHUNK_INTERVAL_SLOW_MS if self._slow_pacing
+                else self.CHUNK_INTERVAL_MS)
+
+    def set_slow_pacing(self, slow: bool) -> None:
+        """播放中放慢分块填充：每块更少行、块间隔更长。
+
+        mpv 画面在 GUI 线程渲染（QOpenGLWidget.paintGL），填充块与出帧
+        争的是同一个线程——十万级列表全速填充实测让播放持续掉帧。放慢
+        后填充仍在推进，只是把 GUI 时间优先让给画面。
+        """
+        if slow == self._slow_pacing:
+            return
+        self._slow_pacing = slow
+        if self._fill_timer.isActive():
+            self._fill_timer.start(self._chunk_interval())
 
     def set_thumbs_paused(self, paused: bool) -> None:
         """Low-priority mode: stop requesting new thumbnails (playback first)."""
@@ -287,6 +307,7 @@ class MediaListWidget(QListWidget):
         self._had_filter = False
         self._scroll_pending_row = -1
         self._chunk_rows_v = self.CHUNK_ROWS
+        self._slow_pacing = False   # 播放中放慢分块填充（见 set_slow_pacing）
         self._fill_timer = QTimer(self)
         self._fill_timer.setSingleShot(True)
         self._fill_timer.setInterval(self.CHUNK_INTERVAL_MS)
@@ -296,11 +317,37 @@ class MediaListWidget(QListWidget):
         self._replace_phase = False
         self._replace_source: list[MediaItem] = []
         self._replace_playing = -1
+        # 推迟填充（面板隐藏时）：列表内容作废，只记播放行
+        self._deferred = False
 
     @property
     def is_filling(self) -> bool:
-        """后台填充进行中：items() 回读不完整，重排/删除必须被拦下。"""
-        return self._fill_timer.isActive()
+        """后台填充进行中：items() 回读不完整，重排/删除必须被拦下。
+
+        推迟填充（面板隐藏）期间同样为真：此时列表里还是上一份内容，
+        回读它会把播放列表写坏。
+        """
+        return self._fill_timer.isActive() or self._deferred
+
+    def mark_deferred(self, playing: int) -> None:
+        """面板隐藏：本次填充整份推迟到显示时（见 PlaylistPanel.showEvent）。
+
+        列表里的旧行原样留着（清掉三十万行本身就是要避开的开销），只记住
+        播放行；is_filling 为真挡住一切回读，显示时再按最新内容填。
+        """
+        self._fill_timer.stop()
+        self._replace_phase = False
+        self._replace_source = []
+        self._fill_source = []
+        self._fill_pos = 0
+        self._scroll_pending_row = -1
+        self._deferred = True
+        self.playing_row = playing
+
+    def take_deferred_playing(self) -> int:
+        """交出推迟期间记下的播放行，并解除推迟状态。"""
+        self._deferred = False
+        return self.playing_row
 
     def setDelegateInstance(self, thumbs: ThumbnailCache) -> None:
         self._delegate = MediaRowDelegate(thumbs, self)
@@ -353,7 +400,7 @@ class MediaListWidget(QListWidget):
             if elapsed_ms > self.CHUNK_SLOW_MS and self._chunk_rows > self.CHUNK_MIN_ROWS:
                 self._chunk_rows = self._chunk_rows // 2
             if self.count():
-                self._fill_timer.start(self.CHUNK_INTERVAL_MS)
+                self._fill_timer.start(self._chunk_interval())
                 return
             # 清空完成 → 接常规大列表填充（立即窗口先填播放行附近）
             self._replace_phase = False
@@ -381,7 +428,7 @@ class MediaListWidget(QListWidget):
             else:
                 self._scroll_pending_row = playing
             self.viewport().update()
-            self._fill_timer.start(self.CHUNK_INTERVAL_MS)
+            self._fill_timer.start(self._chunk_interval())
             return
         if self._fill_pos >= len(self._fill_source):
             self._finish_fill()
@@ -404,7 +451,7 @@ class MediaListWidget(QListWidget):
         if self._fill_pos >= len(self._fill_source):
             self._finish_fill()
             return
-        self._fill_timer.start(self.CHUNK_INTERVAL_MS)
+        self._fill_timer.start(self._chunk_interval())
 
     def _finish_fill(self) -> None:
         self._fill_source = []
@@ -539,7 +586,7 @@ class MediaListWidget(QListWidget):
             self._fill_pos = 0
             self._scroll_pending_row = -1
             self.setDragDropMode(QAbstractItemView.NoDragDrop)
-            self._fill_timer.start(self.CHUNK_INTERVAL_MS)
+            self._fill_timer.start(self._chunk_interval())
             return
         import time as _time
 
@@ -584,13 +631,15 @@ class MediaListWidget(QListWidget):
             # 播放行还没填到：先记下，_fill_chunk 够到时再滚
             self._scroll_pending_row = playing
         self.setDragDropMode(QAbstractItemView.NoDragDrop)
-        self._fill_timer.start(self.CHUNK_INTERVAL_MS)
+        self._fill_timer.start(self._chunk_interval())
 
     def items(self) -> list[MediaItem]:
         return [self.item(i).data(ITEM_ROLE) for i in range(self.count())]
 
     def set_playing(self, row: int, scroll: bool = True) -> None:
         self.playing_row = row
+        if self._deferred:
+            return  # 填充推迟中：只记播放行，显示时按它定位
         if scroll and 0 <= row < self.count():
             self.scrollToItem(self.item(row), QAbstractItemView.EnsureVisible)
         elif scroll and row >= self.count() and self.is_filling:
@@ -1371,24 +1420,52 @@ class PlaylistPanel(QWidget):
         # 顺序脱钩——双击第 N 行播的是另一个文件，"正在播放"高亮也落错行
         self._all_items = list(items)
         cur = current if 0 <= current < len(self._all_items) else -1
+        # 面板隐藏（用户没开列表）＋大列表：整份填充推迟到面板显示时。
+        # 三十万行的分块替换全落在 GUI 线程上，而 mpv 画面同样在 GUI 线程
+        # 渲染（QOpenGLWidget.paintGL）——起播瞬间做这活儿直接掉帧，而
+        # 列表此刻根本不可见。
+        if not self.isVisible() and len(self._all_items) > self.list.SYNC_MAX:
+            self.list.mark_deferred(cur)
+            from . import startup_log
+
+            startup_log.stage(
+                "panel-fill",
+                f"面板隐藏：{len(self._all_items)} 行填充推迟到显示时")
+            return
         self.list.set_items(self._all_items, cur)
         self._apply_filter(self.search.text())
         self.list.set_playing(cur)
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        # 隐藏期间推迟掉的填充在这里补做（播放列表面板刚被打开）
+        if self.list.is_filling and self.list._deferred and self._all_items:
+            cur = self.list.take_deferred_playing()
+            self.list.set_items(self._all_items, cur)
+            self._apply_filter(self.search.text())
+            self.list.set_playing(cur)
+
     def set_current(self, index: int) -> None:
         target = self._all_items[index].path if 0 <= index < len(self._all_items) else None
+        if target is None:
+            self.list.set_playing(-1)
+            return
+        if self.list.is_filling:
+            # 填充中/推迟中：行号==播放序号（顺序追加保持不变式），直接用
+            # index——去扫尚不完整/已作废的旧内容既没意义又是 O(n)
+            self.list.set_playing(index)
+            return
+        # 快路径：没被用户拖动重排时行号==序号，O(1) 命中。逐行 data() 扫描
+        # 在三十万行上是 GUI 线程的百毫秒级开销，而每次换片都要付一次。
+        if 0 <= index < self.list.count() \
+                and self.list.item(index).data(ITEM_ROLE).path == target:
+            self.list.set_playing(index)
+            return
         row = -1
-        search_upto = self.list.count()
-        for i in range(search_upto):
+        for i in range(self.list.count()):
             if self.list.item(i).data(ITEM_ROLE).path == target:
                 row = i
                 break
-        else:
-            # 大列表后台填充中：行还没填到。行号==播放序号的不变式保证
-            # 直接用 index 即可（填充够到时会自动滚动过去）
-            if self.list.is_filling and 0 <= index < len(self._all_items) \
-                    and target is not None:
-                row = index
         self.list.set_playing(row)
 
     def _restore(self) -> None:

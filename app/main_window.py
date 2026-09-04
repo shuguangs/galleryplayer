@@ -253,8 +253,7 @@ class MainWindow(QMainWindow):
         # meta 回填引发的自动重排：锚定项保持可见（keep="visible"，最小
         # 滚动）。对齐视口顶（anchor）会每批跳一次；像素偏移（offset）在
         # 时长排序下会让视口内容大换血（新获时长的项搬家）。
-        self._resort_timer.timeout.connect(
-            lambda: self._apply_view(keep="visible"))
+        self._resort_timer.timeout.connect(self._on_resort_debounced)
         self.thumbs.meta_ready.connect(self._on_meta_ready)
 
         # 定时归位：元数据排序（时长/大小/时间）下，新探到数据的项
@@ -281,6 +280,7 @@ class MainWindow(QMainWindow):
         # EOF 等"播放结束"的边缘没有统一信号，漏一次就会把视频缩略图
         # 永久挂起；500ms 读两个 mpv 属性（duration/paused）开销可忽略。
         self._playback_active = False
+        self._bg_resume = (False, False)   # 播放让路前的 (预热, 定时归位) 状态
         self._thumb_gate_timer = QTimer(self)
         self._thumb_gate_timer.setInterval(500)
         self._thumb_gate_timer.timeout.connect(self._update_thumb_gates)
@@ -1796,8 +1796,24 @@ class MainWindow(QMainWindow):
     def _on_meta_ready(self, *_args) -> None:
         # duration/aspect just changed; re-sort or re-flow shortly
         self._meta_dirty = True
+        # 播放中不重排：mpv 画面在 GUI 线程渲染，三十万项重排一次全阻塞
+        # ~350ms＝掉帧。标记留着，播放结束后统一补一次。
+        if self._playback_active:
+            return
         if self.sort_combo.currentData() == "duration":
             self._resort_timer.start()
+
+    def _on_resort_debounced(self) -> None:
+        """meta 潮的 700ms 防抖重排（播放中跳过，见 _on_meta_ready）。"""
+        if self._playback_active:
+            return
+        self._apply_view(keep="visible")
+
+    # 定时归位的自适应间隔：按上次实测耗时把 GUI 占用压到 ~3% 以下。
+    # 三十万项一次归位约 350ms 全阻塞，固定 5s 一次＝7% 占用，浏览
+    # 与播放都能明显感到发顿（实测 gui-stall 连片）。
+    RESORT_MIN_MS = 5000
+    RESORT_MAX_MS = 60000
 
     def _periodic_resort(self) -> None:
         """元数据排序下的定时归位：新探到时长/大小的项回到排序位置。
@@ -1805,7 +1821,12 @@ class MainWindow(QMainWindow):
         只锚定视口首项（用户看着的内容）——绝不用"选中项"做锚：正常
         使用中选中一个项继续下滑浏览，归位若锚定选中项会把视口弹回
         它的位置（实测体验差）。选中态本身按路径保留，不受重排影响。
+
+        播放中直接返回：浏览器被播放器窗口挡着，重排看不见，但它阻塞
+        GUI 线程会让 mpv 掉帧。_meta_dirty 保留，播完补一次。
         """
+        if self._playback_active:
+            return
         if not self._meta_dirty:
             return
         sort_key = self.sort_combo.currentData() or "name"
@@ -1815,8 +1836,19 @@ class MainWindow(QMainWindow):
         if self.tiles is None or not self.model.items:
             return
         self._meta_dirty = False
+        t0 = time.perf_counter()
         # keep="anchor" 的锚取视口首项（set_items_keep_scroll 语义）
         self._apply_view(keep="anchor")
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        interval = int(min(self.RESORT_MAX_MS,
+                           max(self.RESORT_MIN_MS, elapsed_ms * 40)))
+        if interval != self._resort_interval_timer.interval():
+            self._resort_interval_timer.setInterval(interval)
+            from . import startup_log
+
+            startup_log.stage(
+                "resort",
+                f"定时归位耗时 {elapsed_ms:.0f}ms → 间隔调整为 {interval // 1000}s")
 
     # ------------------------------------------------------- context menus
 
@@ -2450,6 +2482,11 @@ class MainWindow(QMainWindow):
         if not items:
             self._warmup_timer.stop()
             return
+        # 播放中不提交预热：解码结果回到 GUI 线程要发信号+重绘+置脏，
+        # 而 mpv 画面同在 GUI 线程渲染（见 _set_browser_background_paused）。
+        # 定时器本身已被停掉，这里兜住"扫描 done 的延迟启动"撞上播放的情况。
+        if self._playback_active:
+            return
         n = len(items)
         cursor = self._warmup_cursor
         # 轮询模式下从 0 重扫（失败重试/新增项）
@@ -2550,6 +2587,7 @@ class MainWindow(QMainWindow):
         self._playback_active = playing
         self.thumbs.set_playback_active(playing)
         self._apply_video_headroom()
+        self._set_browser_background_paused(playing)
         from . import startup_log
 
         startup_log.stage(
@@ -2559,6 +2597,41 @@ class MainWindow(QMainWindow):
             # 播放结束：立即重绘一次，视口里的视频项重新发请求
             # （播放期间 request 拒收了它们，paint 是唯一的请求方）
             self.tiles.viewport().update()
+
+    def _set_browser_background_paused(self, paused: bool) -> None:
+        """播放中冻结浏览器的后台活动：预热提交 + 定时归位 + 防抖重排。
+
+        mpv 的画面渲染在 GUI 线程（QOpenGLWidget.paintGL），任何 GUI
+        阻塞都直接掉帧。三十万项文件夹里定时归位单次约 350ms、每 5s
+        一次，加上预热持续制造 ready/meta 信号，实测播放期间每 1-2s
+        就有一条 1s 级 gui-stall——而浏览器此刻被播放器窗口挡着，这些
+        活儿没人看也没人等。播放结束后恢复，并把攒下的 meta 补一次归位。
+        """
+        if paused:
+            self._bg_resume = (self._warmup_timer.isActive(),
+                               self._resort_interval_timer.isActive())
+            self._warmup_timer.stop()
+            self._resort_timer.stop()
+            self._resort_interval_timer.stop()
+            self._set_panel_pacing(True)
+            return
+        warmup, resort = self._bg_resume
+        self._bg_resume = (False, False)
+        self._set_panel_pacing(False)
+        if warmup:
+            self._warmup_timer.start()
+        if resort:
+            self._resort_interval_timer.start()
+        if self._meta_dirty:
+            # 播放期间攒下的 meta 统一补一次（而不是每 5s 一次）
+            QTimer.singleShot(300, self._periodic_resort)
+
+    def _set_panel_pacing(self, slow: bool) -> None:
+        """播放中放慢播放列表面板的分块填充（面板开着时才有活要放慢）。"""
+        panel = getattr(self.viewer, "panel", None) if self.viewer else None
+        lst = getattr(panel, "list", None)
+        if lst is not None:
+            lst.set_slow_pacing(slow)
 
     def _apply_video_headroom(self) -> None:
         """额外的第 3 路视频解码线程只在「播放器隐藏且没在播放」时放开。"""
