@@ -368,10 +368,34 @@ class MediaListWidget(QListWidget):
 
     def set_items(self, items: list[MediaItem], playing: int = -1) -> None:
         self._fill_timer.stop()
+        total = len(items)
+        # 快路径：面板里已经是同一份列表（长度一致、首行与播放行是同一批
+        # MediaItem 对象、无过滤词）——只更新播放行，绝不清空重填。同一
+        # 文件夹连续点开视频时，旧路径 clear() 三十万行会冻结 GUI 十几秒
+        # （实测 21.6s 未响应）。对象身份在两次打开之间保持：浏览器重扫
+        # 才会新建 MediaItem，那才是真正需要重填的时刻。
+        if (total and not self._filter_needle
+                and self.count() == total
+                and self.item(0).data(ITEM_ROLE) is items[0]
+                and 0 <= playing < total
+                and self.item(playing).data(ITEM_ROLE) is items[playing]):
+            self._fill_source = []
+            self._fill_pos = 0
+            self._scroll_pending_row = -1
+            self._chunk_rows = self.CHUNK_ROWS
+            self.playing_row = playing
+            self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)
+            self.viewport().update()
+            return
+        import time as _time
+
+        t0 = _time.perf_counter()
         self.setUpdatesEnabled(False)
         try:
             self.blockSignals(True)
+            old_count = self.count()
             self.clear()
+            clear_ms = (_time.perf_counter() - t0) * 1000
             self._fill_source = list(items)
             self._fill_pos = 0
             self._filter_needle = ""
@@ -379,7 +403,6 @@ class MediaListWidget(QListWidget):
             self._scroll_pending_row = -1
             self._chunk_rows = self.CHUNK_ROWS
             self.playing_row = playing
-            total = len(self._fill_source)
             if total <= self.SYNC_MAX:
                 # 小列表：与旧版完全一致的同步路径
                 if total:
@@ -394,6 +417,12 @@ class MediaListWidget(QListWidget):
             self.blockSignals(False)
         finally:
             self.setUpdatesEnabled(True)
+        if clear_ms > 100:
+            from . import startup_log
+
+            startup_log.stage(
+                "panel-fill",
+                f"clear() {old_count} 行耗时 {clear_ms:.0f}ms（重填 {total} 行）")
         self.viewport().update()
         if 0 <= playing < self.count():
             self.scrollToItem(self.item(playing), QAbstractItemView.EnsureVisible)

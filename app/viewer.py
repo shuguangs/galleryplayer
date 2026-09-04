@@ -422,7 +422,12 @@ class Viewer(QWidget):
         _slog.stage("viewer-open", f"items={len(self.items)} index={index}")
         self._relayout()
         self.show_index(index)
+        import time as _time
+
+        _t0 = _time.perf_counter()
         self.panel.set_playlist(self.items, index)
+        _slog.stage("viewer-open",
+                    f"面板 set_playlist {(_time.perf_counter() - _t0) * 1000:.0f}ms")
         self._show_bars()
         _slog.stage("viewer-open", "起播+面板立即窗口完成")
         self._save_playlist_state(clean=False)
