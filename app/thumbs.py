@@ -624,7 +624,7 @@ class ThumbnailCache(QObject):
 
         每路抓帧是一个 mpv 实例（硬解 + 解码线程），播放期间多路并发
         与播放的解码抢 GPU/CPU——实测播放卡顿的主因。置 True 后：
-        - worker 不再取视频单（在途的一张照常收尾并缓存，不浪费）；
+        - worker 不再取视频单，出队后、开解码前再查一次（可中断第二张）；
         - request() 拒收新的视频单（见其注释，防队列水位被占死）；
         - 图片缩略图（Pillow，线程已降 BELOW_NORMAL）照常出。
         暂停/停止/关闭后置 False，排队的视频单自动恢复消化。
@@ -746,6 +746,15 @@ class ThumbnailCache(QObject):
             # noticed the result was for a folder the user had already left, which on a
             # video-heavy folder meant minutes of libmpv work for nothing.
             if gen != self._generation:
+                self._pending.discard(key)
+                self._key_prio.pop(key, None)
+                return
+            # 播放让路的第二道闸：出队到真正开始解码之间隔着前一张的
+            # 1-3s，播放开始后才轮到的任务在这里放弃——不再对大文件启动
+            # 深度 seek/硬解码与起播抢 I/O（实测长视频打开卡顿数秒的来源；
+            # 在途那张无法中断，做完即止）。播放结束后的视口重绘和预热
+            # 轮询会把它重新排队，不丢。
+            if item.is_video and self._playback_active:
                 self._pending.discard(key)
                 self._key_prio.pop(key, None)
                 return
