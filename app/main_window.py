@@ -1941,6 +1941,11 @@ class MainWindow(QMainWindow):
             menu.addAction(t("main_window.reveal_in_explorer")).triggered.connect(
                 lambda _=False, p=item.path: fileops.reveal(p)
             )
+            # 递归扫描下文件可能在子文件夹：打开的是文件实际的所在目录，
+            # 不是当前浏览的根目录
+            menu.addAction(t("main_window.open_containing_folder")).triggered.connect(
+                lambda _=False, p=item.path: fileops.open_folder(p.parent)
+            )
             menu.addAction(t("main_window.copy_path")).triggered.connect(
                 lambda _=False, p=item.path: fileops.copy_to_clipboard(str(p))
             )
@@ -1983,9 +1988,6 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
 
         if self.folder is not None:
-            menu.addAction(t("main_window.open_containing_folder")).triggered.connect(
-                lambda _=False, f=self.folder: fileops.open_folder(f)
-            )
             menu.addAction(t("main_window.rescan")).triggered.connect(
                 lambda: self.set_folder(self.folder, force=True)
             )
