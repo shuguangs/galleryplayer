@@ -1,85 +1,160 @@
 @echo off
-chcp 65001 >nul
+rem ±¾ÎÄ¼þÊÇ GBK ±àÂë + CRLF ÐÐÎ²£¨cmd µÄÅú´¦Àí½âÎöÆ÷ÔÚ 65001
+rem ÂëÒ³ÏÂ¶Á¶à×Ö½ÚÐÐ»á´íÎ»£¬ÐÐÎ²Ò²±ØÐëÊÇ CRLF£©£¬¸ÄÂëÒ³Ç°±ð¸Ä±àÂë
+chcp 936 >nul
 rem =====================================================================
-rem  åª’ä½“æ’­æ”¾å™¨ - è¿è¡ŒçŽ¯å¢ƒä¸€é”®å®‰è£…
-rem  åœ¨å…¨æ–°ç”µè„‘ä¸ŠåŒå‡»è¿è¡Œå³å¯ã€‚
-rem  è¯´æ˜Žï¼šè§†é¢‘ / éŸ³é¢‘è§£ç å™¨å·²å†…ç½®åœ¨ vendor\libmpv-2.dll ä¸­ï¼ˆé™æ€ç¼–è¯‘ï¼Œ
-rem  å« H.264 / HEVC / AV1 / VP9 ç­‰ï¼‰ï¼Œæ— éœ€å†è£…ä»»ä½•è§£ç åŒ…ï¼›æœ¬è„šæœ¬åªè´Ÿè´£
-rem  æ£€æŸ¥å¹¶å®‰è£…ç¨‹åºè¿è¡Œæ‰€å¿…éœ€çš„ Microsoft Visual C++ è¿è¡Œåº“ã€‚
+rem  Ã½Ìå²¥·ÅÆ÷ - ÔËÐÐ»·¾³Ò»¼ü°²×°
+rem  ÔÚÈ«ÐÂµçÄÔÉÏË«»÷ÔËÐÐ¼´¿É¡£
+rem  ËµÃ÷£ºÊÓÆµ / ÒôÆµ½âÂëÆ÷ÒÑÄÚÖÃÔÚ vendor\libmpv-2.dll ÖÐ£¨¾²Ì¬±àÒë£¬
+rem  º¬ H.264 / HEVC / AV1 / VP9 µÈ£©£¬ÎÞÐèÔÙ×°ÈÎºÎ½âÂë°ü£»±¾½Å±¾¸ºÔð
+rem  ¼ì²é²¢°²×°Á½Ñù³ÌÐòÔËÐÐËùÐèµÄ»·¾³£º
+rem    1. Microsoft Visual C++ ÔËÐÐ¿â£¨²¥·ÅÆ÷±¾ÌåÐèÒª£©
+rem    2. Python 3.12£¨ÊµÊ±×ÖÄ»ÒýÇæÓë"ÏÂÔØÄ£ÐÍ"¹¦ÄÜÐèÒª£»
+rem       ÒÑÓÐ Python ÈÎÒâ¿ÉÓÃ°æ±¾Ê±×Ô¶¯Ìø¹ý£©
 rem =====================================================================
-title åª’ä½“æ’­æ”¾å™¨ - è¿è¡ŒçŽ¯å¢ƒå®‰è£…
+title Ã½Ìå²¥·ÅÆ÷ - ÔËÐÐ»·¾³°²×°
 setlocal
 
 echo ==============================================
-echo    åª’ä½“æ’­æ”¾å™¨  è¿è¡ŒçŽ¯å¢ƒä¸€é”®å®‰è£…
+echo    Ã½Ìå²¥·ÅÆ÷  ÔËÐÐ»·¾³Ò»¼ü°²×°
 echo ==============================================
 echo.
 
-rem ---- å®‰è£…ç³»ç»Ÿè¿è¡Œåº“éœ€è¦ç®¡ç†å‘˜æƒé™ï¼Œä¸è¶³åˆ™è‡ªåŠ¨è¯·æ±‚æå‡
+rem ---- °²×°ÏµÍ³ÔËÐÐ¿âÐèÒª¹ÜÀíÔ±È¨ÏÞ£¬²»×ãÔò×Ô¶¯ÇëÇóÌáÉý
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-    echo æ­£åœ¨è¯·æ±‚ç®¡ç†å‘˜æƒé™ï¼Œè¯·åœ¨å¼¹çª—ä¸­ç‚¹å‡»â€œæ˜¯â€...
+    echo ÕýÔÚÇëÇó¹ÜÀíÔ±È¨ÏÞ£¬ÇëÔÚµ¯´°ÖÐµã»÷¡°ÊÇ¡±...
     powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
     exit /b
 )
 
 cd /d "%~dp0"
 
-rem ---- [1/3] æ£€æŸ¥å†…ç½®æ’­æ”¾å†…æ ¸ï¼ˆè§£ç å™¨éƒ½åœ¨è¿™ä¸ª DLL é‡Œï¼‰
-echo [1/3] æ£€æŸ¥å†…ç½®è§£ç å†…æ ¸ ...
+rem ---- [1/4] ¼ì²éÄÚÖÃ²¥·ÅÄÚºË£¨½âÂëÆ÷¶¼ÔÚÕâ¸ö DLL Àï£©
+echo [1/4] ¼ì²éÄÚÖÃ½âÂëÄÚºË ...
 if exist "vendor\libmpv-2.dll" (
-    echo        vendor\libmpv-2.dll å·²å°±ä½ï¼Œè§£ç å™¨æ— éœ€é¢å¤–å®‰è£…ã€‚
+    echo        vendor\libmpv-2.dll ÒÑ¾ÍÎ»£¬½âÂëÆ÷ÎÞÐè¶îÍâ°²×°¡£
 ) else (
-    echo        [è­¦å‘Š] ç¼ºå°‘ vendor\libmpv-2.dll ï¼
-    echo        è¯·é‡æ–°è§£åŽ‹å®Œæ•´çš„ç¨‹åºåŒ…ï¼Œå¦åˆ™è§†é¢‘å°†æ— æ³•æ’­æ”¾ã€‚
+    echo        [¾¯¸æ] È±ÉÙ vendor\libmpv-2.dll £¡
+    echo        ÇëÖØÐÂ½âÑ¹ÍêÕûµÄ³ÌÐò°ü£¬·ñÔòÊÓÆµ½«ÎÞ·¨²¥·Å¡£
 )
 echo.
 
-rem ---- [2/3] æ£€æŸ¥ / å®‰è£… Microsoft Visual C++ 2015-2022 è¿è¡Œåº“ (x64)
-echo [2/3] æ£€æŸ¥ Visual C++ è¿è¡Œåº“ ...
+rem ---- [2/4] ¼ì²é / °²×° Microsoft Visual C++ 2015-2022 ÔËÐÐ¿â (x64)
+echo [2/4] ¼ì²é Visual C++ ÔËÐÐ¿â ...
 reg query "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" /v Installed 2>nul | find "0x1" >nul
 if %errorlevel% equ 0 (
-    echo        å·²å®‰è£…ï¼Œè·³è¿‡ã€‚
-    goto :done
+    echo        ÒÑ°²×°£¬Ìø¹ý¡£
+    goto :py
 )
 
-echo        æœªæ£€æµ‹åˆ°ï¼Œå¼€å§‹å®‰è£… ...
+echo        Î´¼ì²âµ½£¬¿ªÊ¼°²×° ...
 
-rem ä¼˜å…ˆä½¿ç”¨ wingetï¼ˆWin10 21H2 / Win11 è‡ªå¸¦ï¼‰ï¼Œé™é»˜å®‰è£…
+rem ÓÅÏÈÊ¹ÓÃ winget£¨Win10 21H2 / Win11 ×Ô´ø£©£¬¾²Ä¬°²×°
 where winget >nul 2>&1
 if %errorlevel% equ 0 (
     winget install --id Microsoft.VCRedist.2015+.x64 --silent --accept-source-agreements --accept-package-agreements
     if not errorlevel 1 goto :verify
-    echo        winget å®‰è£…æœªæˆåŠŸï¼Œæ”¹ä¸ºç›´æŽ¥ä»Žå¾®è½¯å®˜ç½‘ä¸‹è½½ ...
+    echo        winget °²×°Î´³É¹¦£¬¸ÄÎªÖ±½Ó´ÓÎ¢Èí¹ÙÍøÏÂÔØ ...
 )
 
-rem æ²¡æœ‰ winget æˆ–å®‰è£…å¤±è´¥ï¼šä»Žå¾®è½¯å®˜æ–¹å›ºå®šåœ°å€ä¸‹è½½åŽé™é»˜å®‰è£…
+rem Ã»ÓÐ winget »ò°²×°Ê§°Ü£º´ÓÎ¢Èí¹Ù·½¹Ì¶¨µØÖ·ÏÂÔØºó¾²Ä¬°²×°
 set "REDIST=%TEMP%\vc_redist.x64.exe"
-echo        æ­£åœ¨ä¸‹è½½ vc_redist.x64.exe ...
+echo        ÕýÔÚÏÂÔØ vc_redist.x64.exe ...
 curl -L -o "%REDIST%" https://aka.ms/vs/17/release/vc_redist.x64.exe 2>nul
 if not exist "%REDIST%" (
     powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile '%REDIST%'"
 )
 if not exist "%REDIST%" (
-    echo        [é”™è¯¯] ä¸‹è½½å¤±è´¥ï¼Œè¯·æ£€æŸ¥ç½‘ç»œåŽé‡è¯•ï¼›
-    echo        ä¹Ÿå¯æ‰‹åŠ¨æ‰“å¼€ https://aka.ms/vs/17/release/vc_redist.x64.exe ä¸‹è½½å®‰è£…ã€‚
+    echo        [´íÎó] ÏÂÔØÊ§°Ü£¬Çë¼ì²éÍøÂçºóÖØÊÔ£»
+    echo        Ò²¿ÉÊÖ¶¯´ò¿ª https://aka.ms/vs/17/release/vc_redist.x64.exe ÏÂÔØ°²×°¡£
     goto :end
 )
-echo        æ­£åœ¨é™é»˜å®‰è£…ï¼ˆçº¦éœ€åå‡ ç§’ï¼‰...
+echo        ÕýÔÚ¾²Ä¬°²×°£¨Ô¼ÐèÊ®¼¸Ãë£©...
 "%REDIST%" /install /quiet /norestart
 del /q "%REDIST%" >nul 2>&1
 
 :verify
 reg query "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" /v Installed 2>nul | find "0x1" >nul
 if %errorlevel% equ 0 (
-    echo        å®‰è£…å®Œæˆã€‚
+    echo        °²×°Íê³É¡£
 ) else (
-    echo        [æç¤º] æœªèƒ½ç¡®è®¤å®‰è£…ç»“æžœï¼›è‹¥â€œåª’ä½“æ’­æ”¾å™¨.exeâ€èƒ½æ­£å¸¸å¯åŠ¨å¯å¿½ç•¥ã€‚
+    echo        [ÌáÊ¾] Î´ÄÜÈ·ÈÏ°²×°½á¹û£»Èô¡°Ã½Ìå²¥·ÅÆ÷.exe¡±ÄÜÕý³£Æô¶¯¿ÉºöÂÔ¡£
 )
+
+rem ---- [3/4] ¼ì²é / °²×° Python 3.12£¨ÊµÊ±×ÖÄ»ÒýÇæÓë¡°ÏÂÔØÄ£ÐÍ¡±ÐèÒª£©
+:py
+echo.
+echo [3/4] ¼ì²é Python£¨×ÖÄ»ÒýÇæÓë¡°ÏÂÔØÄ£ÐÍ¡±ÐèÒª£©...
+rem ÅÐ¾ÝÊÇÕæ½âÊÍÆ÷£ºWindowsApps µÄÉÌµê¼Ù python.exe ÅÜ -c »áÊ§°Ü£¬
+rem Óë²¥·ÅÆ÷ÉèÖÃÒ³µÄÌ½²âÂß¼­Ò»ÖÂ
+set "PY_OK="
+python -c "import sys" >nul 2>nul && set "PY_OK=1"
+if defined PY_OK goto :pyskip
+py -3 -c "import sys" >nul 2>nul && set "PY_OK=1"
+:pyskip
+if defined PY_OK (
+    echo        ÒÑ°²×°£¬Ìø¹ý¡£
+    goto :done
+)
+
+echo        Î´¼ì²âµ½£¬¿ªÊ¼°²×° Python 3.12 ...
+
+rem ÓÅÏÈ winget£º--override Ö¸¶¨È«»úÆ÷°²×°²¢Ð´Èë PATH£¨bat ÒÑÊÇ¹ÜÀíÔ±
+rem È¨ÏÞ£»per-user °²×°»á×°½øÌáÈ¨ÕË»§µÄ¸öÈËÄ¿Â¼£¬ÕæÕýµÄÓÃ»§·´¶øÓÃ²»µ½£©
+where winget >nul 2>&1
+if %errorlevel% equ 0 (
+    winget install -e --id Python.Python.3.12 --override "/quiet InstallAllUsers=1 PrependPath=1 Include_test=0" --accept-source-agreements --accept-package-agreements
+    if not errorlevel 1 goto :pyverify
+    echo        winget °²×°Î´³É¹¦£¬¸ÄÎªÖ±½Ó´Ó Python ¹ÙÍøÏÂÔØ ...
+)
+
+rem Ã»ÓÐ winget »ò°²×°Ê§°Ü£º´Ó Python ¹Ù·½¹Ì¶¨µØÖ·ÏÂÔØºó¾²Ä¬°²×°
+set "PYINST=%TEMP%\python-3.12.10-amd64.exe"
+echo        ÕýÔÚÏÂÔØ python-3.12.10-amd64.exe£¨Ô¼ 26 MB£©...
+curl -L -o "%PYINST%" https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe 2>nul
+if not exist "%PYINST%" (
+    powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe' -OutFile '%PYINST%'"
+)
+if not exist "%PYINST%" (
+    echo        [´íÎó] ÏÂÔØÊ§°Ü£¬Çë¼ì²éÍøÂçºóÖØÊÔ£»
+    echo        Ò²¿ÉÊÖ¶¯´ò¿ª https://www.python.org/downloads/ ÏÂÔØ
+    echo        Python 3.12 °²×°£¬°²×°Ê±Îñ±Ø¹´Ñ¡ ¡°Add python.exe to PATH¡±¡£
+    goto :pynote
+)
+echo        ÕýÔÚ¾²Ä¬°²×°£¨Ô¼ÐèÒ»Á½·ÖÖÓ£©...
+"%PYINST%" /quiet InstallAllUsers=1 PrependPath=1 Include_test=0 /norestart
+del /q "%PYINST%" >nul 2>&1
+
+:pyverify
+rem ±¾ cmd »á»°µÄ PATH ²»Ëæ°²×°Ë¢ÐÂ£¬ÑéÖ¤Ö»ÄÜ¿´ÂäÎ»ÎÄ¼þ
+if exist "%ProgramFiles%\Python312\python.exe" (
+    echo        °²×°Íê³É¡£
+    goto :pynote
+)
+if exist "%LocalAppData%\Programs\Python\Python312\python.exe" (
+    echo        °²×°Íê³É¡£
+    goto :pynote
+)
+python -c "import sys" >nul 2>nul && (
+    echo        °²×°Íê³É¡£
+    goto :pynote
+)
+echo        [ÌáÊ¾] Î´ÄÜÈ·ÈÏ°²×°½á¹û¡£ÇëÊÖ¶¯´ò¿ª
+echo        https://www.python.org/downloads/ °²×° Python 3.12£¬
+echo        °²×°Ê±Îñ±Ø¹´Ñ¡ ¡°Add python.exe to PATH¡±¡£
+
+:pynote
+echo        ¡ï ×¢Òâ£ºPython ×°ºÃºó£¬ÕýÔÚÔËÐÐµÄ³ÌÐò¿´²»µ½ÐÂ»·¾³¡£
+echo          ÇëÍêÈ«ÍË³ö²¢ÖØÐÂ´ò¿ª Ã½Ìå²¥·ÅÆ÷£¬ÔÙµ½ ÉèÖÃ->ÊµÊ±×ÖÄ»
+echo          Àïµã¡°ÏÂÔØÄ£ÐÍ¡±£»ÈôÈÔÌáÊ¾ÕÒ²»µ½ Python£¬Çë×¢Ïú²¢ÖØÐÂ
+echo          µÇÂ¼Ò»´Î Windows¡£
 
 :done
 echo.
-echo [3/3] çŽ¯å¢ƒå‡†å¤‡å®Œæ¯•ï¼åŒå‡» åª’ä½“æ’­æ”¾å™¨.exe å³å¯ä½¿ç”¨ã€‚
+echo [4/4] »·¾³×¼±¸Íê±Ï£¡Ë«»÷ Ã½Ìå²¥·ÅÆ÷.exe ¼´¿ÉÊ¹ÓÃ¡£
+echo        ¿´ÊÓÆµÎÞÐèÈÎºÎ¶îÍâ»·¾³£»¡°ÏÂÔØÄ£ÐÍ¡±£¨ÊµÊ±×ÖÄ»£©¹¦ÄÜ
+echo        ÒÀÀµµÚ 3 ²½µÄ Python¡£
 
 :end
 echo.
