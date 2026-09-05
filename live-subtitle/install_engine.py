@@ -24,6 +24,22 @@ import time
 import urllib.request
 from pathlib import Path
 
+# 播放器经 QProcess 管道捕获本脚本的输出：管道下 Python 默认用系统码页
+# （中文 Windows = GBK）编码 stdout/stderr，而失败分支都打印 "✗" 等
+# GBK 编不出的字符——直接 UnicodeEncodeError 崩溃，把真正的失败原因
+# 盖住（用户实测：一键安装/SRT 安装结尾全是 illegal multibyte sequence）。
+# 统一改用 UTF-8（播放器按 utf-8 解码，逐字对得上），错误字符 replace 兜底。
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass  # 输出流不可重配时静默——安装照跑，只是日志可能乱码
+# 子进程（venv/pip/modelscope/ollama）继承同一约定：它们的输出汇进同
+# 一条管道，也必须以 UTF-8 编码
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+os.environ.setdefault("PYTHONUTF8", "1")
+
 MODEL_CACHE_HINT = "（首次下载；已缓存则秒过）"
 
 TORCH_ENGINES = ("qwen", "sensevoice")
@@ -64,6 +80,68 @@ SPECS = {
 
 def log(msg: str) -> None:
     print(f"[install] {msg}", flush=True)
+
+
+def _normalize_proxy(enable, server) -> str:
+    """(ProxyEnable, ProxyServer) → "http://host:port"；未启用/空返回 ""。"""
+    if not enable or not server:
+        return ""
+    if "=" in server:
+        # "http=127.0.0.1:7890;https=127.0.0.1:7890" 按协议分开写的形式
+        parts = dict(p.split("=", 1) for p in server.split(";") if "=" in p)
+        server = parts.get("https") or parts.get("http") or ""
+    if server and not server.startswith("http"):
+        server = "http://" + server
+    return server
+
+
+def system_proxy() -> str:
+    """Windows 系统代理（IE/WinINET 设置，注册表读取）；未启用返回 ""。
+
+    用户网络环境各异：GitHub / HuggingFace 直连大多不通，但系统里通常
+    已经挂着代理软件（Clash/v2rayN 等都会写 IE 代理设置）。curl/pip
+    不会自己读 Windows 的这套设置，下载失败时由这里显式抓出来当兜底。
+    """
+    if sys.platform != "win32":
+        return ""
+    try:
+        import winreg
+
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        try:
+            enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+        finally:
+            key.Close()
+    except Exception:
+        return ""
+    return _normalize_proxy(enable, server)
+
+
+def proxy_env(proxy: str) -> dict:
+    """给子进程（pip/modelscope/HF）注入代理约定的大小写全套变量。"""
+    return {"HTTP_PROXY": proxy, "HTTPS_PROXY": proxy, "ALL_PROXY": proxy,
+            "http_proxy": proxy, "https_proxy": proxy, "all_proxy": proxy}
+
+
+def run_proxy(cmd: list[str], env: dict | None = None, **kw) -> int:
+    """直连失败且系统配置了代理时，自动带系统代理重试一次。
+
+    用于长耗时下载步骤（pip / 模型）：直接失败后不立刻判死，抓系统
+    代理再试一轮——用户报错的场景里"两个直连都下不动"多半就差这一步。
+    """
+    if run(cmd, env=env, **kw) == 0:
+        return 0
+    proxy = system_proxy()
+    if not proxy:
+        return 1
+    log(f"直连失败，检测到系统代理 {proxy}，改走代理重试 ...")
+    penv = proxy_env(proxy)
+    if env:
+        penv.update(env)   # HF_ENDPOINT 等业务变量优先于代理变量
+    return run(cmd, env=penv, **kw)
 
 
 def run(cmd: list[str], env: dict | None = None, **kw) -> int:
@@ -118,11 +196,11 @@ def ms_download(venv_py: Path, repo: str, target: Path, label: str) -> bool:
         "from modelscope import snapshot_download as d\n"
         f"d({repo!r}, local_dir={str(target)!r})\n"
     )
-    return run([str(venv_py), "-c", code]) == 0
+    return run_proxy([str(venv_py), "-c", code]) == 0
 
 
 def _curl(url: str, out: Path, min_bytes: int = 1_000_000) -> bool:
-    """curl 下载（gh-proxy 加速失败自动回落直连）。
+    """curl 下载：gh-proxy 加速 → 直连 → 系统代理重试（自动回落直连）。
 
     幂等只认"下完的最终文件"：先下到 .part，curl 正常退出且体积达标才改名。
     原实现按"文件够大"（阈值是期望大小的 95%）跳过下载——11.6GB 的模型下到
@@ -134,17 +212,27 @@ def _curl(url: str, out: Path, min_bytes: int = 1_000_000) -> bool:
         return True
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
-    for base in (GGH, ""):
+    attempts = [(GGH, None), ("", None)]          # 镜像 → 直连
+    proxy = system_proxy()
+    if proxy:
+        attempts += [(GGH, proxy), ("", proxy)]   # 两个直连都下不动 → 走系统代理
+    for base, px in attempts:
         url2 = base + url if base else url
-        log(f"下载 {out.name}（{url2[:80]}...）")
+        via = f"（代理 {px}）" if px else ""
+        log(f"下载 {out.name}（{url2[:80]}...）{via}")
         cmd = ["curl.exe", "-L", "--fail", "-o", str(part), url2]
         if part.is_file() and part.stat().st_size > 0:
             cmd = ["curl.exe", "-L", "--fail", "-C", "-", "-o", str(part), url2]
+        if px:
+            cmd += ["-x", px]
         code = run(cmd)
         if code in (22, 33, 36) and part.is_file():
             # 续传被拒（服务器不支持 Range，或 .part 已完整触发 416）：整份重下
             part.unlink(missing_ok=True)
-            code = run(["curl.exe", "-L", "--fail", "-o", str(part), url2])
+            cmd = ["curl.exe", "-L", "--fail", "-o", str(part), url2]
+            if px:
+                cmd += ["-x", px]
+            code = run(cmd)
         if code == 0 and part.is_file() and part.stat().st_size >= min_bytes:
             part.replace(out)
             return True
@@ -268,7 +356,7 @@ def main() -> None:
         # ctranslate2(whisper) 需要 cu12 版 nvidia 运行库（与 torch 的 CUDA 隔离使用）
         base_pkgs += ["nvidia-cublas-cu12", "nvidia-cudnn-cu12"]
     log("安装基础依赖 ...")
-    if run(pip + base_pkgs) != 0:
+    if run_proxy(pip + base_pkgs) != 0:
         log("✗ 基础依赖安装失败（检查网络）")
         sys.exit(1)
 
@@ -278,7 +366,7 @@ def main() -> None:
         torch_cmd = pip + ["torch", "torchaudio"]
         if index:
             torch_cmd += ["--index-url", index]
-        if run(torch_cmd) != 0:
+        if run_proxy(torch_cmd) != 0:
             log("✗ PyTorch 安装失败（换网络或稍后重试）")
             sys.exit(1)
         # 校验 CUDA 可用（CPU 版 torch 装进来会在运行时才报错，这里提前发现）
@@ -288,7 +376,7 @@ def main() -> None:
         engine_pkgs = ["funasr", "modelscope"]
         if args.model == "qwen":
             engine_pkgs.append("qwen-asr")
-        if run(pip + engine_pkgs) != 0:
+        if run_proxy(pip + engine_pkgs) != 0:
             log("✗ 引擎依赖安装失败")
             sys.exit(1)
     log("依赖安装完成")
@@ -328,7 +416,7 @@ def main() -> None:
             "from faster_whisper import WhisperModel; "
             f"WhisperModel({args.model!r}, device='cpu', compute_type='int8')"
         )
-        if run([str(venv_py), "-c", probe], env=env) != 0:
+        if run_proxy([str(venv_py), "-c", probe], env=env) != 0:
             log("✗ 模型下载/加载失败（网络或磁盘？可重试或换镜像）")
             sys.exit(1)
     log(f"识别模型 {label} 就绪")

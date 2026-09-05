@@ -260,7 +260,10 @@ class AppliedMirrorTests(unittest.TestCase):
         shuffled = list(reversed(items))
         t0 = time.perf_counter()
         w.set_items(shuffled, playing=0)
-        self.assertLess((time.perf_counter() - t0) * 1000, 250)
+        # 必须走分块替换分支（绝不同步补齐/同步 clear）。时序断言只做宽松
+        # 护栏：满套件跑下来 gen2 GC 偶发秒级暂停会误伤精确时序
+        self.assertTrue(w._replace_phase, "途中重排未走分块替换分支")
+        self.assertLess((time.perf_counter() - t0) * 1000, 1500)
         self._wait_fill(w, BIG)
         self._assert_order(w, shuffled)
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt
+from PySide6.QtCore import QProcessEnvironment, QPoint, QRect, QSize, Qt
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -1712,6 +1712,13 @@ class SettingsDialog(QDialog):
 
         proc = QProcess(self)
         self._install_proc = proc
+        # 安装脚本与其子进程（pip/modelscope/ollama）统一按 UTF-8 输出：
+        # 管道下 Python 默认用系统码页（中文 Windows=GBK），失败分支的
+        # "✗" 等字符编不出来会把真正的失败原因炸成 UnicodeEncodeError
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUTF8", "1")
+        proc.setProcessEnvironment(env)
         self.install_log.clear()
         self.btn_install.setEnabled(False)
         self.install_status.setText(t("settings.install_running"))
@@ -1776,6 +1783,11 @@ class SettingsDialog(QDialog):
             return
         proc = QProcess(self)
         self._install_proc = proc
+        # 同 _start_install：子进程链统一 UTF-8 输出，防 GBK 编码崩溃
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONIOENCODING", "utf-8")
+        env.insert("PYTHONUTF8", "1")
+        proc.setProcessEnvironment(env)
         self.install_log.clear()
         self.btn_install.setEnabled(False)
         self.btn_install_llama.setEnabled(False)
