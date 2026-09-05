@@ -122,6 +122,19 @@ def main() -> int:
         print("正在安装 PyInstaller …")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pyinstaller"])
 
+    # PyInstaller 打的是"运行本脚本的解释器"的环境：用错解释器（比如装
+    # 依赖不全的另一个 Python）也能打包成功，但产物启动即
+    # ModuleNotFoundError: PySide6——这里提前拦下
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        print("错误：当前解释器缺 PySide6，打出的包无法启动。"
+              f"当前：{sys.executable}",
+              file=sys.stderr)
+        print("请用装有完整依赖的解释器重跑（如 Python313）。",
+              file=sys.stderr)
+        return 2
+
     # The app is portable: everything the user accumulates -- thumbnail cache, album
     # definitions, resume positions, window prefs -- lives in userdata/ next to the
     # exe. Wiping dist/ for a rebuild would throw all of it away, so it is parked
