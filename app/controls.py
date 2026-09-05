@@ -251,6 +251,7 @@ class ControlBar(QWidget):
         self._speed = 1.0
         self._hwdec_mode = str(settings["hwdec"])
         self._is_video = True
+        self._time_dur = 0.0    # 当前视频时长：时间戳定宽的依据（set_duration）
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 4, 14, 12)
@@ -571,11 +572,26 @@ class ControlBar(QWidget):
 
     # -------------------------------------------- responsive overflow
 
+    # 折叠收敛目标额外留出的呼吸宽度。若目标是"行宽=可用宽"，弹性空隙
+    # 恰好被压到 0：速度/硬解等按钮紧贴着时间戳排布，视觉上叠进时间文本
+    # （用户实测"1× 浮在时间后面"）。留出这段间隙=折叠点比理论边界提前
+    # 一两个按钮，任何宽度下按钮组与时间戳之间都保得住空隙。
+    FOLD_SLACK = 36
+
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
         self._update_flex()
 
     def _row_width(self) -> int:
+        """行宽 = 各可见控件的显式定宽之和（stretch 不占宽）。
+
+        这里必须用定宽而不是 sizeHint：QSS polish 前后同一个按钮的
+        hint 会差 10-12px（刚 show 出来的按钮尤其明显），折叠循环里的
+        测量和最终渲染各量各的，点位随之漂移——实测循环内 980、settle
+        后 1030，早停的 50px 正好让速度按钮压到时间戳上。这一行的
+        控件全部 setFixedWidth 定宽（按钮/音量条/时间戳），定宽就是
+        布局真正会分配的宽度，且从不随 polish 时序变化。
+        """
         total = 0
         n = 0
         for i in range(self._row.count()):
@@ -585,7 +601,8 @@ class ControlBar(QWidget):
             # parent chain is not mapped (offscreen tests, hidden overlay), which
             # would make every button invisible and the row "empty".
             if w is not None and not w.isHidden():
-                total += w.sizeHint().width()
+                total += (w.minimumWidth() if w.minimumWidth() > 0
+                          else w.sizeHint().width())
                 n += 1
         return total + self._row.spacing() * max(0, n - 1)
 
@@ -604,11 +621,19 @@ class ControlBar(QWidget):
         # start fully expanded
         for w, _ in pool:
             w.show()
-        self._more_btn.hide()
+        # 重定时间戳宽度基准：字体 polish 前后的度量不一致（见
+        # _pin_time_label），第一次进这里时用的可能还是未 polish 的值
+        self._pin_time_label()
+        # "更多"必须先显示再测量：折叠之后它一定可见，循环若不含它，
+        # 每次都会少算 40px 又早停一档（实测恰好差一个按钮的宽度）
+        self._more_btn.setVisible(True)
         # reserve room for the more button itself (icon ~30px) + margins
-        avail = self.width() - 28 - 34
+        # + 呼吸间隙（见 FOLD_SLACK）
+        avail = self.width() - 28 - 34 - self.FOLD_SLACK
         if self._row_width() <= avail:
             self._more_btn.setVisible(False)
+            self._sync_time_width()
+            self.layout().activate()
             return
         for w, _ in pool:
             if self._row_width() <= avail:
@@ -616,6 +641,23 @@ class ControlBar(QWidget):
             w.hide()
         hidden = [w for w, _ in pool if w.isHidden()]
         self._more_btn.setVisible(bool(hidden))
+        self._sync_time_width()
+        # 立即激活布局：show/hide/setFixedWidth 只是把重排排进队列，
+        # 不激活的话同一事件循环内读到的子控件几何是上一轮的（Qt 绘制
+        # 前才会自己激活——同步读几何的代码/测试需要这里显式激活）
+        self.layout().activate()
+
+    def _sync_time_width(self) -> None:
+        """极端窄窗兜底：池子折光仍放不下时压时间戳定宽（裁字），宁可
+        窄也不与音量条重叠；宽度回来后恢复按本片时长定死的宽度
+        （见 set_duration）。"""
+        pin = getattr(self, "_time_pin_w", 120)
+        over = self._row_width() - (self.width() - 28)
+        w_now = self.time_label.minimumWidth()
+        if over > 0 and w_now > 120:
+            self.time_label.setFixedWidth(max(120, w_now - over))
+        elif over <= 0 and w_now < pin:
+            self.time_label.setFixedWidth(pin)
 
     def _rebuild_more_menu(self) -> None:
         self._more_menu.clear()
@@ -657,6 +699,26 @@ class ControlBar(QWidget):
 
     def set_duration(self, dur: float) -> None:
         self.seek.set_duration(dur)
+        # 时长是 mpv 异步回报的：宽度基准变了必须重算折叠，否则起播时的
+        # 折叠状态是按旧基准算的，按钮会凭空挤到时间戳上
+        self._time_dur = float(dur) if dur and dur > 0 else 0.0
+        self._update_flex()
+
+    def _pin_time_label(self) -> None:
+        """把时间戳宽度按本片最长文本一次定死。文本宽度随播放变化曾让
+        _row_width 的折叠基准跟着漂移——折叠循环因此早停一两个按钮，
+        行宽贴边时速度按钮直接挤到时间戳上（用户实测"1× 浮在时间后面"）。
+        宽度按"两侧都占满时位"取（位置一侧最宽与时长相等，如
+        "1:23:45 / 2:01:01"），封顶 190 防超长视频把行宽基座抬得过大
+        （极端窄窗由 _sync_time_width 兜底收缩）。每次 _update_flex 重算：
+        字体 polish 前后 metrics 不一致（实测同文本 170 vs 190），定死
+        在未 polish 的度量上会裁字。"""
+        text = (format_duration(self._time_dur) if self._time_dur > 0
+                else "00:00")
+        fm = self.time_label.fontMetrics()
+        pin = fm.horizontalAdvance(f"{text} / {text}") + 14
+        self._time_pin_w = max(120, min(pin, 190))
+        self.time_label.setFixedWidth(self._time_pin_w)
 
     def set_cache_end(self, t: float) -> None:
         self.seek.set_cache_end(t)
