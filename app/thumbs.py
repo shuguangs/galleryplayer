@@ -43,12 +43,16 @@ IMAGE_WORKERS = 2
 #     滚动视口才醒；
 #   - 1 个 gated 通用线程：播放器可见时挂起，隐藏后由
 #     set_video_headroom(True) 放开——此时滚动视口最多三路解码，
-#     纯预热两路；正在播放时保持通用单路，不抢播放的 CPU。
+#     纯预热两路；正在播放时通用两路全部空挂，只剩视口专用单路
+#     慢速消化可见行（见 PLAYBACK_PACE_S）。
 # 空闲线程只是停在一个 Event.wait 上，且首次取到活之前不会创建
 # mpv 实例，几乎零成本。每个并发视频 grab 持有一个 libmpv 实例
 # （~55 MB），文件夹安定后由 15s sweep 释放。远程路径另由
 # _REMOTE_GATE 串行，与此数无关。
 VIDEO_WORKERS = 1
+# 播放让路车道在两次视频抓帧之间的喘息间隔（秒）。车道本身已是单路
+# 串行，这个间隔保证抓帧永远不会背靠背连轴转——mpv 播放的解码优先。
+PLAYBACK_PACE_S = 0.2
 # Hard ceiling on decoded thumbnails held in RAM. At ~420x420x3 bytes each this
 # caps the cache near 100 MB; past that, re-reading the small disk JPEG is cheap,
 # so an unbounded cache would only trade a browsable folder size for memory.
@@ -368,7 +372,8 @@ def _yield_thread_priority(t: threading.Thread) -> None:
 
     Pillow 的图片解码跑在本线程内，降级后调度上让路给播放/UI 线程——
     播放期间浏览器图片缩略图照常出但不再抢 CPU。抓帧用的 libmpv 内部
-    线程不受此影响，那部分由 set_playback_active 在播放期间整体让路。
+    线程不受此影响，那部分由 set_playback_active 在播放期间降为视口
+    单路慢速车道。
     非 Windows / 权限不足时静默跳过。"""
     if sys.platform != "win32":
         return
@@ -441,9 +446,10 @@ class ThumbnailCache(QObject):
         # 播放器不可见时置 True（set_video_headroom）：放开 gated 的第 2 路
         # 通用视频线程；正在播放时保持 False，缩略图解码不与播放抢 CPU
         self._vid_extra_enabled = False
-        # 视频正在播放时置 True（set_playback_active）：所有视频抓帧 worker
-        # 停止取件、request 拒收视频单——抓帧（mpv open+seek+解码）是播放
-        # 期间最重的负载，实测多路并发直接造成播放卡顿
+        # 视频正在播放时置 True（set_playback_active）：视频抓帧降为
+        # 视口专用单路慢速车道——通用两路空挂、request 只收视口单
+        # （prio < WARMUP_PRIO），预热/批量单拒收。抓帧（mpv open+seek+
+        # 解码）是播放期间最重的负载，实测多路并发直接造成播放卡顿
         self._playback_active = False
 
         # worker 线程必须最后起：它们立刻访问 _lock/_prio_heap 等属性
@@ -535,10 +541,11 @@ class ThumbnailCache(QObject):
         with self._lock:
             if self._failed.get(key, 0) >= MAX_ATTEMPTS:
                 return None
-            if self._playback_active and item.is_video:
-                # 播放让路：视频单不入队——入了也没 worker 取，只会占满
-                # 队列水位，把图片预热/视口请求饿死。paint 是请求方，
-                # 播放结束后的下一帧（或预热的下一轮）会重新请求。
+            if self._playback_active and item.is_video and prio >= WARMUP_PRIO:
+                # 播放让路：批量/预热单不入队——入了也没 worker 取，只会
+                # 占满队列水位，把图片预热/视口请求饿死。视口单（行号
+                # 优先级，来自正在显示的面板/网格）照收：播放中用户要看
+                # 的就是播放列表可见行，它们由视口专用单路慢速消化。
                 return None
             if key in self._pending:
                 # 已排队：优先级更高时升级（堆内追加新条目，旧条目出堆时
@@ -620,14 +627,17 @@ class ThumbnailCache(QObject):
             self._prio_wake.set()
 
     def set_playback_active(self, active: bool) -> None:
-        """视频正在播放 → 后台视频抓帧整体让路。
+        """视频正在播放 → 后台视频抓帧让路，但保留一条视口慢速车道。
 
         每路抓帧是一个 mpv 实例（硬解 + 解码线程），播放期间多路并发
         与播放的解码抢 GPU/CPU——实测播放卡顿的主因。置 True 后：
-        - worker 不再取视频单，出队后、开解码前再查一次（可中断第二张）；
-        - request() 拒收新的视频单（见其注释，防队列水位被占死）；
+        - 通用两路视频 worker 空挂，只剩视口专用单路（thumb-vid-vp）
+          继续取件：播放列表/网格当前可见行（prio < WARMUP_PRIO）仍会
+          出缩略图，两次抓帧之间再喘 PLAYBACK_PACE_S——单路 + 限速，
+          解码能力始终优先给播放；
+        - request() 拒收批量/预热视频单（防队列水位被占死），视口单照收；
         - 图片缩略图（Pillow，线程已降 BELOW_NORMAL）照常出。
-        暂停/停止/关闭后置 False，排队的视频单自动恢复消化。
+        暂停/停止/关闭后置 False，通用线程恢复，排队的单自动消化。
         """
         with self._lock:
             if self._playback_active == active:
@@ -688,7 +698,8 @@ class ThumbnailCache(QObject):
         图片线程跳过视频项。viewport_only 线程再跳过预热单
         （prio >= WARMUP_PRIO）——没有视口请求就一直空挂。
         gated 线程受 _vid_extra_enabled 门控：关闭时只空挂等待开关。
-        _playback_active 时视频线程全体空挂（播放让路，见 set_playback_active）。
+        _playback_active 时通用视频线程空挂，只剩视口专用单路慢速消化
+        可见行（播放让路车道，见 set_playback_active）。
         """
         while not self._closed and not _STOPPING.is_set():
             job = None
@@ -696,8 +707,8 @@ class ThumbnailCache(QObject):
                 heap = self._prio_heap
                 while heap and job is None and not (
                         gated and not self._vid_extra_enabled):
-                    if want_video and self._playback_active:
-                        break  # 播放中：视频单整体让路（图片单照常）
+                    if want_video and self._playback_active and not viewport_only:
+                        break  # 播放中：通用视频线程空挂（图片单照常）
                     # 找堆里类型匹配且 (priority, -seq) 最小的项。
                     best_i = -1
                     best_key = None
@@ -724,19 +735,23 @@ class ThumbnailCache(QObject):
                     if key not in self._pending or \
                             self._key_prio.get(key) != entry[0]:
                         continue
-                    job = (key, item, gen)
+                    job = (key, item, gen, entry[0])
                 if job is None:
                     self._prio_wake.clear()
             if job is None:
                 self._prio_wake.wait(timeout=0.5)
                 continue
-            key, item, gen = job
-            self._work(item, gen)
+            key, item, gen, prio = job
+            self._work(item, gen, prio)
+            if item.is_video and self._playback_active:
+                # 播放让路车道：单路串行之外再加一口气间隔，
+                # 抓帧永远不与播放背靠背抢解码
+                time.sleep(PLAYBACK_PACE_S)
 
     def _disk_path(self, key: str) -> Path:
         return THUMB_DIR / key[:2] / f"{key}.jpg"
 
-    def _work(self, item: MediaItem, gen: int) -> None:
+    def _work(self, item: MediaItem, gen: int, prio: float = 1e18) -> None:
         key = item.cache_key
         if _STOPPING.is_set():
             return
@@ -750,11 +765,12 @@ class ThumbnailCache(QObject):
                 self._key_prio.pop(key, None)
                 return
             # 播放让路的第二道闸：出队到真正开始解码之间隔着前一张的
-            # 1-3s，播放开始后才轮到的任务在这里放弃——不再对大文件启动
-            # 深度 seek/硬解码与起播抢 I/O（实测长视频打开卡顿数秒的来源；
-            # 在途那张无法中断，做完即止）。播放结束后的视口重绘和预热
-            # 轮询会把它重新排队，不丢。
-            if item.is_video and self._playback_active:
+            # 1-3s，播放开始后才轮到的批量/预热单在这里放弃——不再对大
+            # 文件启动深度 seek/硬解码与起播抢 I/O（实测长视频打开卡顿
+            # 数秒的来源）。视口单（prio < WARMUP_PRIO）豁免：它们正是
+            # 播放让路车道要服务的可见行。播放结束后的视口重绘和预热
+            # 轮询会把放弃的单重新排队，不丢。
+            if item.is_video and self._playback_active and prio >= WARMUP_PRIO:
                 self._pending.discard(key)
                 self._key_prio.pop(key, None)
                 return

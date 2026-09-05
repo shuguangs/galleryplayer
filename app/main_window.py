@@ -2617,7 +2617,8 @@ class MainWindow(QMainWindow):
 
         startup_log.stage(
             "thumb-gate",
-            "播放开始：视频抓帧整体让路" if playing else "播放结束：视频抓帧恢复")
+            "播放开始：视频缩略图降为视口单路慢速" if playing
+            else "播放结束：视频抓帧恢复")
         if not playing and self.tiles is not None:
             # 播放结束：立即重绘一次，视口里的视频项重新发请求
             # （播放期间 request 拒收了它们，paint 是唯一的请求方）

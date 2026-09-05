@@ -173,7 +173,10 @@ class MediaRowDelegate(QStyledItemDelegate):
             p.setPen(QColor(theme.TEXT_FAINT))
             p.drawText(img_rect, Qt.AlignCenter, item.suffix.lstrip(".").upper())
             if not missing and not self.owner.thumbs_paused:
-                self.thumbs.request(item)
+                # priority=行号（对齐 TileView）：视口内自上而下的阅读顺序；
+                # 也是播放让路车道的准入票——prio < WARMUP_PRIO 的可见行
+                # 在播放中仍会出图（单路慢速），批量单照旧拒收
+                self.thumbs.request(item, priority=index.row())
         p.restore()
 
         left = img_rect.right() + 8
@@ -442,6 +445,34 @@ class MediaListWidget(QListWidget):
 
     def _on_thumb_ready(self, *_args) -> None:
         self.viewport().update()
+
+    def paintEvent(self, e) -> None:
+        super().paintEvent(e)
+        if self.thumb_mode and self.isVisible() and not self.thumbs_paused:
+            self._focus_visible()
+
+    def _focus_visible(self) -> None:
+        """绘制后把可见行的键交给缓存做"清废单"（对齐 TileView 的做法）。
+
+        播放让路车道只有一条单路：可见行按行号优先消化，滚出视口的
+        排队请求由 focus 请出去，不把车道耗在屏外；被请出的项下次进入
+        视口时由 paint 重新请求。
+        """
+        vp = self.viewport().rect()
+        first = self.indexAt(vp.topLeft()).row()
+        last = self.indexAt(vp.bottomLeft()).row()
+        if last < 0:
+            last = self.count() - 1
+        keys: set[str] = set()
+        for r in range(max(0, first), min(last, self.count() - 1) + 1):
+            entry = self.item(r)
+            if entry is None:
+                continue
+            data = entry.data(ITEM_ROLE)
+            if data is not None:
+                keys.add(data.cache_key)
+        if keys:
+            self._delegate.thumbs.focus(keys)
 
     def _make_entry(self, it: MediaItem) -> QListWidgetItem:
         h = ROW_H_THUMB if self.thumb_mode else ROW_H_COMPACT
