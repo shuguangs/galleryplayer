@@ -1398,8 +1398,11 @@ class SettingsDialog(QDialog):
         import shutil as _shutil
 
         from .config import find_subtitle_pipeline_dir
+        from .config import find_subtitle_source_dir
 
-        target = find_subtitle_pipeline_dir() or APP_DIR
+        # 没装过引擎时查安装目标所在盘（exe 旁/手动指定），不是程序目录
+        target = (find_subtitle_pipeline_dir()
+                  or find_subtitle_source_dir() or APP_DIR)
         try:
             return _shutil.disk_usage(str(target)).free / (1024 ** 3)
         except Exception:
@@ -1690,15 +1693,18 @@ class SettingsDialog(QDialog):
         from PySide6.QtCore import QProcess
 
         from . import live_engine
-        from .config import find_subtitle_pipeline_dir
+        from .config import find_subtitle_pipeline_dir, find_subtitle_source_dir
 
         if getattr(self, "_install_proc", None) is not None \
                 and self._install_proc.state() != QProcess.NotRunning:
             return
-        # engine dir: existing engine (if any) else default next to the player
-        pipe = find_subtitle_pipeline_dir()
+        # engine dir: existing engine (if any) else live-subtitle 源目录
+        # （exe 旁/手动指定，不要求 venv——安装恰恰发生在 venv 之前；
+        # 旧代码的 __file__ 相对回退在打包版指向 _internal/，永远找不到）
+        pipe = find_subtitle_pipeline_dir() or find_subtitle_source_dir()
         if pipe is None:
-            pipe = Path(__file__).resolve().parent.parent / "live-subtitle"
+            self.install_status.setText(t("settings.install_no_script"))
+            return
         script = pipe / "install_engine.py"
         if not script.is_file():
             self.install_status.setText(t("settings.install_no_script"))
@@ -1755,13 +1761,15 @@ class SettingsDialog(QDialog):
         """一键安装 HY-MT2-30B SRT 翻译（llama.cpp + 11.6GB 模型，幂等）。"""
         from PySide6.QtCore import QProcess
 
-        from .config import find_subtitle_pipeline_dir
+        from .config import (find_subtitle_pipeline_dir,
+                             find_subtitle_source_dir)
 
         if getattr(self, "_install_proc", None) is not None                 and self._install_proc.state() != QProcess.NotRunning:
             return
-        pipe = find_subtitle_pipeline_dir()
+        pipe = find_subtitle_pipeline_dir() or find_subtitle_source_dir()
         if pipe is None:
-            pipe = Path(__file__).resolve().parent.parent / "live-subtitle"
+            self.install_status.setText(t("settings.install_no_script"))
+            return
         script = pipe / "install_engine.py"
         if not script.is_file():
             self.install_status.setText(t("settings.install_no_script"))

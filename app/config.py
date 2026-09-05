@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -246,8 +247,9 @@ def flush() -> None:
 def find_subtitle_pipeline_dir() -> Path | None:
     """Locate the live-subtitle engine dir (venv with faster-whisper).
 
-    Search order: user-configured path → project folder (source build or
-    portable install, resolved relative to this file) → %LIVE_SUBTITLE_DIR%.
+    Search order: user-configured path → portable exe-adjacent folder
+    (frozen build) → project folder (source build, resolved relative to
+    this file) → %LIVE_SUBTITLE_DIR%.
     No machine-specific absolute path is ever hardcoded, so the project runs
     from any drive/folder after cloning or moving.
     Returns None when not found.
@@ -256,6 +258,10 @@ def find_subtitle_pipeline_dir() -> Path | None:
     custom = str(settings["subtitle_pipeline_dir"] or "").strip()
     if custom:
         candidates.append(Path(custom).expanduser())
+    if getattr(sys, "frozen", False):
+        # 便携版：live-subtitle 在 exe 根目录（build.py 的布局）。走
+        # __file__ 相对路径在 onedir 下会指到 _internal/ 里，永远找不到。
+        candidates.append(Path(sys.executable).resolve().parent / "live-subtitle")
     # source tree / portable layout: <project>/live-subtitle next to <project>/app/
     candidates.append(Path(__file__).resolve().parent.parent / "live-subtitle")
     env_dir = os.environ.get("LIVE_SUBTITLE_DIR")
@@ -263,5 +269,31 @@ def find_subtitle_pipeline_dir() -> Path | None:
         candidates.append(Path(env_dir).expanduser())
     for c in candidates:
         if c.is_dir() and (c / ".venv" / "Scripts" / "python.exe").is_file():
+            return c
+    return None
+
+
+def find_subtitle_source_dir() -> Path | None:
+    """Locate the live-subtitle SOURCE dir (the one with install_engine.py).
+
+    安装器（建 venv / 下载模型）用。与 find_subtitle_pipeline_dir 分开：
+    那个要求 .venv 已就绪，而安装恰恰发生在 venv 存在之前——全新便携版
+    上拿运行时探测找安装脚本必然扑空（用户实测报"未找到 install_engine.py，
+    手动指定引擎目录也找不到"：手动路径同样被 venv 校验拒掉）。
+    顺序：用户设置（不要求 venv——手动指定的目的就是告诉安装器去哪装）
+    → 打包版 exe 旁 → 源码树相对 → %LIVE_SUBTITLE_DIR%。
+    """
+    candidates: list[Path] = []
+    custom = str(settings["subtitle_pipeline_dir"] or "").strip()
+    if custom:
+        candidates.append(Path(custom).expanduser())
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "live-subtitle")
+    candidates.append(Path(__file__).resolve().parent.parent / "live-subtitle")
+    env_dir = os.environ.get("LIVE_SUBTITLE_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    for c in candidates:
+        if (c / "install_engine.py").is_file():
             return c
     return None
