@@ -281,6 +281,51 @@ class MpvWidget(QOpenGLWidget):
         self.mpv.speed = max(0.1, min(8.0, value))
         settings["speed"] = float(self.mpv.speed)
 
+    # ------------------------------------------------------- aspect ratio
+
+    # 菜单规范键 → mpv video-aspect-override 的浮点读回值（mpv 会把
+    # "no"/"4:3" 之类的字符串规范化成浮点：no=-2、-1=拉伸、其余=宽高比）
+    _ASPECT_FLOATS = {
+        "no": -2.0,
+        "-1": -1.0,
+        "4:3": 4 / 3,
+        "16:9": 16 / 9,
+        "16:10": 16 / 10,
+        "21:9": 21 / 9,
+        "1:1": 1.0,
+        "2.35": 2.35,
+    }
+
+    def set_aspect_mode(self, mode: str) -> None:
+        """画面比例：no=跟随源 / -1=拉伸铺满 / "w:h"=指定比例 / cropfill=裁切铺满。
+
+        属性跨换片持续生效（mpv 实例级），菜单的勾选态由
+        current_aspect_mode 从 mpv 读回，不另存状态。
+        """
+        try:
+            if mode == "cropfill":
+                self.mpv["video-aspect-override"] = "no"
+                self.mpv["panscan"] = 1.0
+            else:
+                self.mpv["panscan"] = 0.0
+                self.mpv["video-aspect-override"] = mode
+        except Exception:
+            pass  # 属性设置失败不拖垮播放
+
+    def current_aspect_mode(self) -> str:
+        """读回当前模式（规范键）。mpv 以浮点回报比例，按容差映射回键。"""
+        try:
+            aspect = float(self.mpv["video-aspect-override"])
+            panscan = float(self.mpv["panscan"] or 0.0)
+        except Exception:
+            return "no"
+        if panscan >= 0.99:
+            return "cropfill"
+        for key, value in self._ASPECT_FLOATS.items():
+            if abs(aspect - value) < 0.01:
+                return key
+        return ""   # 非预设值（外部改过）：菜单里不勾任何项
+
     @property
     def speed(self) -> float:
         return float(self.mpv.speed or 1.0)

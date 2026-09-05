@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPoint, QProcess, QProcessEnvironment, QTimer, Qt, Signal
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QAction, QActionGroup, QCursor
 from PySide6.QtWidgets import QLabel, QMenu, QStackedLayout, QWidget
 
 from . import fileops, icons, theme
@@ -1243,23 +1243,46 @@ class Viewer(QWidget):
         super().leaveEvent(e)
 
     def contextMenuEvent(self, e) -> None:
-        """Right-click on the playing media: subtitle controls + copy actions."""
+        """Right-click on the playing media: aspect + subtitle + copy actions."""
         if not self.items or not (0 <= self.index < len(self.items)):
             return
+        menu = self._build_media_menu()
+        if self.isFullScreen():
+            # 全屏窗口会压住普通弹出层：不置顶的话菜单弹出即被盖住，
+            # 表现为"全屏下无法右键"（窗口化不受影响）
+            menu.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        menu.exec(e.globalPos())
+
+    def _menu_action(self, menu: QMenu, text: str) -> QAction:
+        """创建归属菜单的 QAction（右键菜单全部条目必须走这里）。
+
+        PySide6 的 menu.addAction(text) 生成的 QAction 没有 C++ 父对象，
+        所有权挂在创建瞬间的 Python 包装上——构建代码里 `a = xxx.addAction`
+        每行覆盖局部变量，包装被 gc 回收时 C++ action 一起蒸发（实测
+        gc.collect 后字幕项全灭；旧代码构建完立刻同步 exec 才没炸过）。
+        显式 parent=菜单，所有权归 C++ 菜单树，菜单活着条目就活着。
+        """
+        act = QAction(text, menu)
+        menu.addAction(act)
+        return act
+
+    def _build_media_menu(self) -> QMenu:
         item = self.items[self.index]
         menu = QMenu(self)
 
         if item.is_video:
+            menu.addMenu(self._build_aspect_menu())
+            menu.addSeparator()
             sub = menu.addMenu(t("viewer.sub_menu"))
-            a = sub.addAction(t("viewer.sub_font_bigger"))
+            a = self._menu_action(sub, t("viewer.sub_font_bigger"))
             a.triggered.connect(lambda _=False: self._step_sub_font(2))
-            a = sub.addAction(t("viewer.sub_font_smaller"))
+            a = self._menu_action(sub, t("viewer.sub_font_smaller"))
             a.triggered.connect(lambda _=False: self._step_sub_font(-2))
-            a = sub.addAction(t("viewer.sub_font_reset"))
+            a = self._menu_action(sub, t("viewer.sub_font_reset"))
             a.triggered.connect(lambda _=False: self._reset_sub_font())
             sub.addSeparator()
             # 颜色：一键反色（白↔黑）+ 预设 + 自选，实时生效
-            a = sub.addAction(t("viewer.sub_invert_color"))
+            a = self._menu_action(sub, t("viewer.sub_invert_color"))
             a.triggered.connect(lambda _=False: self._invert_sub_colors())
             presets = sub.addMenu(t("viewer.sub_pick_color"))
             for c, name in (("#ffffff", "⚪"),
@@ -1268,54 +1291,86 @@ class Viewer(QWidget):
                             ("#00e5ff", "🔵"),
                             ("#ff5252", "🔴"),
                             ("#69f0ae", "🟢")):
-                pa = presets.addAction(f"{name} {c}")
+                pa = self._menu_action(presets, f"{name} {c}")
                 pa.triggered.connect(
                     lambda _=False, cc=c: self._set_sub_colors(cc))
-            a = presets.addAction(t("viewer.sub_custom_color"))
+            a = self._menu_action(presets, t("viewer.sub_custom_color"))
             a.triggered.connect(lambda _=False: self._pick_sub_color_dialog())
             # 描边
-            a = sub.addAction(
-                t("viewer.sub_outline_cycle").format(
+            a = self._menu_action(
+                sub, t("viewer.sub_outline_cycle").format(
                     n=int(settings["sub_outline"])))
             a.triggered.connect(lambda _=False: self._cycle_sub_outline())
             sub.addSeparator()
-            a = sub.addAction(
-                t("viewer.sub_hide") if self.video_view.sub_visible else t("viewer.sub_show")
-            )
+            a = self._menu_action(
+                sub, t("viewer.sub_hide") if self.video_view.sub_visible
+                else t("viewer.sub_show"))
             a.triggered.connect(lambda _=False: self._toggle_sub_visible())
             sub.addSeparator()
-            a = sub.addAction(t("viewer.sub_load_file"))
+            a = self._menu_action(sub, t("viewer.sub_load_file"))
             a.triggered.connect(lambda _=False: self._pick_subtitle_file())
             sub.addSeparator()
-            a = sub.addAction(
-                t("viewer.live_caption_off") if self._live_on else t("viewer.live_caption_on")
-            )
+            a = self._menu_action(
+                sub, t("viewer.live_caption_off") if self._live_on
+                else t("viewer.live_caption_on"))
             a.triggered.connect(lambda _=False: self._toggle_live_caption())
             display = sub.addMenu(t("viewer.live_caption_display_menu"))
-            a = display.addAction(t("viewer.live_caption_font_bigger"))
+            a = self._menu_action(display, t("viewer.live_caption_font_bigger"))
             a.triggered.connect(lambda _=False: self._step_live_caption_display("font", 2))
-            a = display.addAction(t("viewer.live_caption_font_smaller"))
+            a = self._menu_action(display, t("viewer.live_caption_font_smaller"))
             a.triggered.connect(lambda _=False: self._step_live_caption_display("font", -2))
             display.addSeparator()
-            a = display.addAction(t("viewer.live_caption_width_wider"))
+            a = self._menu_action(display, t("viewer.live_caption_width_wider"))
             a.triggered.connect(lambda _=False: self._step_live_caption_display("width", 4))
-            a = display.addAction(t("viewer.live_caption_width_narrower"))
+            a = self._menu_action(display, t("viewer.live_caption_width_narrower"))
             a.triggered.connect(lambda _=False: self._step_live_caption_display("width", -4))
-            a = display.addAction(t("viewer.live_caption_height_taller"))
+            a = self._menu_action(display, t("viewer.live_caption_height_taller"))
             a.triggered.connect(lambda _=False: self._step_live_caption_display("height", 2))
-            a = display.addAction(t("viewer.live_caption_height_shorter"))
+            a = self._menu_action(display, t("viewer.live_caption_height_shorter"))
             a.triggered.connect(lambda _=False: self._step_live_caption_display("height", -2))
             display.addSeparator()
-            a = display.addAction(t("viewer.live_caption_display_reset"))
+            a = self._menu_action(display, t("viewer.live_caption_display_reset"))
             a.triggered.connect(lambda _=False: self._reset_live_caption_display())
             menu.addSeparator()
 
         if not item.is_video:
-            act = menu.addAction(t("menu.copy_image"))
+            act = self._menu_action(menu, t("menu.copy_image"))
             act.triggered.connect(lambda _=False, it=item: self._copy_current_image(it))
-        act = menu.addAction(t("menu.copy_file"))
+        act = self._menu_action(menu, t("menu.copy_file"))
         act.triggered.connect(lambda _=False, it=item: self._copy_current_file(it))
-        menu.exec(e.globalPos())
+        return menu
+
+    # ---- 画面比例（右键菜单）：mpv 的 video-aspect-override + panscan
+    ASPECT_CHOICES = (
+        ("4:3", "4:3"),
+        ("16:9", "16:9"),
+        ("16:10", "16:10"),
+        ("21:9", "21:9"),
+        ("1:1", "1:1"),
+        ("2.35", "2.35:1（宽银幕）"),
+    )
+
+    def _build_aspect_menu(self) -> QMenu:
+        menu = QMenu(t("viewer.aspect_menu"), self)
+        mode = self.video_view.current_aspect_mode()
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+
+        def add(value: str, label: str) -> None:
+            a = self._menu_action(menu, label)
+            a.setCheckable(True)
+            a.setChecked(mode == value)
+            a.triggered.connect(
+                lambda _=False, v=value: self.video_view.set_aspect_mode(v))
+            group.addAction(a)
+
+        add("no", t("viewer.aspect_default"))
+        for value, label in self.ASPECT_CHOICES:
+            add(value, label)
+        menu.addSeparator()
+        add("-1", t("viewer.aspect_stretch"))
+        add("cropfill", t("viewer.aspect_cropfill"))
+        return menu
 
     def _reset_sub_font(self) -> None:
         self.video_view.set_sub_font_size(int(settings["sub_font_size"]))
