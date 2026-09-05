@@ -90,23 +90,15 @@ rem 判据一：是真解释器（WindowsApps 的商店假 python.exe 跑 -c 会失败）
 rem 判据二：版本落在 3.10-3.12——引擎的 funasr 依赖 numpy<2，而 numpy 1.x
 rem 只出到 cp312 轮子，Python 3.13 上 pip 只能现编译 numpy 且必然失败。
 rem 所以已装 3.13 的机器同样要补一个 3.12，否则默认识别引擎装不上。
-rem 检查走 :pychk 子程序：把版本号打到临时文件再比字符串——判定表达式
-rem 里的括号和 <= 直接写进 cmd 会被当成代码块/重定向，解析即崩。
+rem 逐个候选线性 call，:pychk 命中后自己早退——不用 goto，也就不会出现
+rem 标签重名导致的回跳死循环。判定表达式不能内联：括号和 <= 会被 cmd
+rem 当成代码块/重定向，解析即崩，所以版本号先打到临时文件再比字符串。
 set "PY_OK="
 call :pychk python
-if defined PY_OK goto :pyskip
 call :pychk py -3.12
-if defined PY_OK goto :pyskip
 call :pychk py -3.11
-if defined PY_OK goto :pyskip
 call :pychk py -3.10
-:pyskip
-for %%v in (3.12 3.11 3.10) do (
-    if not defined PY_OK (
-        py -%%v -c "%VERCHK%" >nul 2>nul && set "PY_OK=1"
-    )
-)
-:pyskip
+
 if defined PY_OK (
     echo        已安装，跳过。
     goto :done
@@ -176,7 +168,9 @@ pause
 exit /b 0
 
 rem ---- 子程序：%* 是候选解释器命令，落在 3.10-3.12 就置 PY_OK
+rem ---- 子程序：%* 是候选解释器命令，版本落在 3.10-3.12 就置 PY_OK
 :pychk
+if defined PY_OK goto :eof
 set "_PYV="
 %* -c "import sys;print(sys.version_info.major*100+sys.version_info.minor)" > "%TEMP%\gp_pyver.txt" 2>nul
 if errorlevel 1 goto :eof
@@ -186,3 +180,4 @@ if "%_PYV%"=="310" set "PY_OK=1"
 if "%_PYV%"=="311" set "PY_OK=1"
 if "%_PYV%"=="312" set "PY_OK=1"
 goto :eof
+

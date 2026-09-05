@@ -139,16 +139,35 @@ def log(msg: str) -> None:
 
 
 def _normalize_proxy(enable, server) -> str:
-    """(ProxyEnable, ProxyServer) → "http://host:port"；未启用/空返回 ""。"""
+    """(ProxyEnable, ProxyServer) → 可直接喂给 curl/pip 的代理 URL。
+
+    ProxyServer 有两种写法：单值 "host:port"，或按协议分开
+    "http=127.0.0.1:7890;https=127.0.0.1:7890;socks=127.0.0.1:1080"。
+    端口/地址一律取自注册表，代码里不写死任何端口。
+    只挂 SOCKS 的（v2rayN/Clash 常见）→ 输出 socks5h:// 让 curl 也能用。
+    未启用/取不到返回 ""。
+    """
     if not enable or not server:
         return ""
+    server = str(server).strip()
+    scheme = ""
     if "=" in server:
-        # "http=127.0.0.1:7890;https=127.0.0.1:7890" 按协议分开写的形式
-        parts = dict(p.split("=", 1) for p in server.split(";") if "=" in p)
-        server = parts.get("https") or parts.get("http") or ""
-    if server and not server.startswith("http"):
-        server = "http://" + server
-    return server
+        parts = {}
+        for piece in server.split(";"):
+            if "=" in piece:
+                key, _, value = piece.partition("=")
+                parts[key.strip().lower()] = value.strip()
+        pick = parts.get("https") or parts.get("http")
+        if not pick:
+            pick = parts.get("socks") or parts.get("socks5")
+            if pick:
+                scheme = "socks5h://"
+        server = pick or ""
+    if not server:
+        return ""
+    if "://" in server:
+        return server           # 已带协议（少见，用户手写过）：原样交给 curl
+    return (scheme or "http://") + server
 
 
 def system_proxy() -> str:
@@ -157,6 +176,7 @@ def system_proxy() -> str:
     用户网络环境各异：GitHub / HuggingFace 直连大多不通，但系统里通常
     已经挂着代理软件（Clash/v2rayN 等都会写 IE 代理设置）。curl/pip
     不会自己读 Windows 的这套设置，下载失败时由这里显式抓出来当兜底。
+    端口按机器实际配置读取——不同用户端口各不相同，绝不写死。
     """
     if sys.platform != "win32":
         return ""
@@ -167,13 +187,29 @@ def system_proxy() -> str:
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
         try:
-            enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
-            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            try:
+                enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            except OSError:
+                enable = 0
+            try:
+                server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except OSError:
+                server = ""
+            try:
+                pac, _ = winreg.QueryValueEx(key, "AutoConfigURL")
+            except OSError:
+                pac = ""
         finally:
             key.Close()
     except Exception:
         return ""
-    return _normalize_proxy(enable, server)
+    proxy = _normalize_proxy(enable, server)
+    if not proxy and pac:
+        # PAC（自动配置脚本）没法在这里求值：说清楚出路，别让用户以为
+        # "系统明明挂着代理"却毫无动静
+        log(f"检测到 PAC 自动代理脚本（{str(pac)[:60]}），本安装器无法解析它——"
+            f"若直连下不动，请先设好环境变量 HTTPS_PROXY 再重跑安装")
+    return proxy
 
 
 def proxy_env(proxy: str) -> dict:
@@ -188,11 +224,14 @@ def run_proxy(cmd: list[str], env: dict | None = None, **kw) -> int:
     用于长耗时下载步骤（pip / 模型）：直接失败后不立刻判死，抓系统
     代理再试一轮——用户报错的场景里"两个直连都下不动"多半就差这一步。
     """
-    if run(cmd, env=env, **kw) == 0:
+    code = run(cmd, env=env, **kw)
+    if code == 0:
         return 0
+    if code == MISSING_EXE:
+        return code          # 命令本身不存在，换代理也没意义
     proxy = system_proxy()
     if not proxy:
-        return 1
+        return code          # 保留原始返回码，便于上层判断失败类型
     log(f"直连失败，检测到系统代理 {proxy}，改走代理重试 ...")
     penv = proxy_env(proxy)
     if env:
@@ -252,6 +291,27 @@ def ollama_ready(exe: Path, timeout: float = 20.0) -> bool:
         return done.returncode == 0
     except Exception:
         return False
+
+
+def ollama_has_model(exe: Path, name: str) -> bool:
+    """`ollama list` 里是否已有该模型（按第一列精确匹配）。
+
+    原来用子串判断（`name in stdout`）：装了 qwen3:8b-instruct 却要
+    qwen3:8b 时会误判成"已装"，跳过拉取，之后翻译整功能报模型不存在。
+    """
+    try:
+        out = subprocess.run([str(exe), "list"], capture_output=True,
+                             text=True, timeout=30, errors="replace").stdout
+    except Exception:
+        return False
+    want = name.strip()
+    for line in out.splitlines()[1:]:          # 首行是表头
+        first = line.split()[0] if line.split() else ""
+        if first == want or first == f"{want}:latest":
+            return True
+        if ":" not in want and first.split(":")[0] == want:
+            return True                        # 用户没写 tag，认同名模型
+    return False
 
 
 def ensure_ollama_daemon(exe: Path, wait: float = 40.0) -> bool:
@@ -319,10 +379,19 @@ def torch_index(cuda_version: float) -> str | None:
     return "https://download.pytorch.org/whl/cu126"
 
 
+MS_DONE = ".ms-download-complete"   # ModelScope 下载完成的哨兵文件
+
+
 def ms_download(venv_py: Path, repo: str, target: Path, label: str) -> bool:
-    """ModelScope 下载到固定目录（幂等：目录已有内容则跳过）。"""
-    if target.is_dir() and any(target.rglob("*.pt")) or \
-            (target.is_dir() and any(target.rglob("*.safetensors"))):
+    """ModelScope 下载到固定目录（幂等靠哨兵文件，不靠"目录里有权重"）。
+
+    原来按"目录里有 .pt/.safetensors"判完成：下载在权重落地之后、分词器
+    /配置落地之前断掉，下次就被永久当成"已下载"跳过，模型加载永远报
+    NOT_FOUND（重装也修不好，因为幂等把它跳过了）。snapshot_download 本身
+    支持续传且已完整时很快，所以只认自己写的哨兵。
+    """
+    sentinel = target / MS_DONE
+    if sentinel.is_file():
         log(f"{label} 已存在，跳过下载")
         return True
     log(f"下载 {label} {MODEL_CACHE_HINT}")
@@ -330,7 +399,17 @@ def ms_download(venv_py: Path, repo: str, target: Path, label: str) -> bool:
         "from modelscope import snapshot_download as d\n"
         f"d({repo!r}, local_dir={str(target)!r})\n"
     )
-    return run_proxy([str(venv_py), "-c", code]) == 0
+    if run_proxy([str(venv_py), "-c", code]) != 0:
+        return False
+    if not (any(target.rglob("*.pt")) or any(target.rglob("*.safetensors"))
+            or any(target.rglob("*.onnx"))):
+        log(f"✗ {label} 下载后没看到权重文件（网络中断？磁盘满？）")
+        return False
+    try:
+        sentinel.write_text("ok", encoding="utf-8")
+    except OSError:
+        pass   # 哨兵写不进去只影响下次的跳过判断，不影响本次可用
+    return True
 
 
 def _curl(url: str, out: Path, min_bytes: int = 1_000_000) -> bool:
@@ -344,7 +423,8 @@ def _curl(url: str, out: Path, min_bytes: int = 1_000_000) -> bool:
     if out.is_file() and out.stat().st_size >= min_bytes:
         log(f"已存在，跳过下载: {out.name}")
         return True
-    if not (shutil.which("curl.exe") or shutil.which("curl")):
+    curl = shutil.which("curl.exe") or shutil.which("curl")
+    if not curl:
         # Win10 1803+ 自带 curl.exe；缺它的多是精简/极老系统。提前给出
         # 明确结论，免得四轮尝试各抛一次"找不到可执行文件"
         log("✗ 系统缺少 curl.exe（Windows 10 1803 起自带）——"
@@ -363,16 +443,16 @@ def _curl(url: str, out: Path, min_bytes: int = 1_000_000) -> bool:
         url2 = base + url if base else url
         via = f"（代理 {px}）" if px else ""
         log(f"下载 {out.name}（{url2[:80]}...）{via}")
-        cmd = ["curl.exe", "-L", "--fail", "-o", str(part), url2]
+        cmd = [curl, "-L", "--fail", "-o", str(part), url2]
         if part.is_file() and part.stat().st_size > 0:
-            cmd = ["curl.exe", "-L", "--fail", "-C", "-", "-o", str(part), url2]
+            cmd = [curl, "-L", "--fail", "-C", "-", "-o", str(part), url2]
         if px:
             cmd += ["-x", px]
         code = run(cmd)
         if code in (22, 33, 36) and part.is_file():
             # 续传被拒（服务器不支持 Range，或 .part 已完整触发 416）：整份重下
             part.unlink(missing_ok=True)
-            cmd = ["curl.exe", "-L", "--fail", "-o", str(part), url2]
+            cmd = [curl, "-L", "--fail", "-o", str(part), url2]
             if px:
                 cmd += ["-x", px]
             code = run(cmd)
@@ -416,7 +496,9 @@ def install_llamacpp(root: Path, mirror: str) -> None:
             with zipfile.ZipFile(z) as zf:
                 zf.extractall(llamacpp)
             z.unlink()
-        tmp.rmdir()
+        # rmtree 而不是 rmdir：临时目录里可能还留着上次失败的 .part，
+        # rmdir 会抛 OSError 把整场安装变成一段 traceback
+        shutil.rmtree(tmp, ignore_errors=True)
         if not server.is_file() or not any(llamacpp.glob("cudart*.dll")):
             log("✗ 解压后缺少 llama-server.exe 或 CUDA 运行库")
             sys.exit(1)
@@ -633,13 +715,7 @@ def main() -> None:
 
         # ------------------------- 4b. 翻译模型：优先 ollama pull（官方库）
         # GGUF 手工下载+import 只作为拉取失败时的回退（qwen2.5 系列有镜像映射）
-        installed = ""
-        try:
-            installed = subprocess.run([str(ollama_exe), "list"], capture_output=True,
-                                       text=True, timeout=30, errors="replace").stdout
-        except Exception:
-            pass
-        if args.translate.split(":")[0] in installed and args.translate in installed:
+        if ollama_has_model(ollama_exe, args.translate):
             log(f"翻译模型 {args.translate} 已安装，跳过")
         else:
             log(f"拉取翻译模型 {args.translate}（{TRANSLATE_SIZES.get(args.translate, '')}）"
@@ -667,7 +743,9 @@ def main() -> None:
                         log("✗ 翻译模型下载失败——可换镜像源或稍后重试；--translate none 可跳过")
                         sys.exit(1)
                 mf = root / f"Modelfile{args.translate.replace(':', '-')}"
-                mf.write_text(f"FROM {g}\n", encoding="utf-8")
+                # 路径加引号：引擎装在带空格的目录（C:\Program Files\…、
+                # "我的 播放器"）时，裸路径会被 ollama 拆成多个参数
+                mf.write_text(f'FROM "{g}"\n', encoding="utf-8")
                 log(f"导入 Ollama 模型 {args.translate} ...")
                 if run([str(ollama_exe), "create", args.translate, "-f", str(mf)]) != 0:
                     log("✗ 模型导入失败")

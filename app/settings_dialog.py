@@ -1689,19 +1689,54 @@ class SettingsDialog(QDialog):
                 return cand, prefix
         return None, []
 
+    def _resolve_install_dir(self):
+        """决定装到哪，并把引擎脚本准备到那里。返回目录或 None。
+
+        用户在设置里手动指定引擎目录，本意就是"装到这里"（常见诉求：C 盘
+        不够，改装到 D 盘）。原先只把它当"找现成引擎"的线索，指到空目录时
+        会被静静忽略、装到程序自带的 live-subtitle 去——用户选的位置白填。
+        这里：目标目录 = 手动指定 > 已有引擎 > 程序自带；目标目录缺脚本就
+        从程序自带的那份补齐（脚本很小，且随程序更新覆盖旧副本）。
+        """
+        import shutil as _shutil
+
+        from .config import (find_subtitle_pipeline_dir,
+                             find_subtitle_source_dir, settings)
+        from .engine_files import ENGINE_SCRIPTS
+
+        source = find_subtitle_source_dir()
+        custom = str(settings["subtitle_pipeline_dir"] or "").strip()
+        target = (Path(custom).expanduser() if custom
+                  else (find_subtitle_pipeline_dir() or source))
+        if target is None:
+            return None
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        if source is not None and target.resolve() != source.resolve():
+            for name in ENGINE_SCRIPTS:
+                src = source / name
+                if not src.is_file():
+                    continue
+                dst = target / name
+                try:
+                    if not dst.is_file() or \
+                            src.stat().st_mtime > dst.stat().st_mtime:
+                        _shutil.copy2(src, dst)
+                except OSError:
+                    pass    # 拷不动就让下面的 is_file 判定去报错
+        return target if (target / "install_engine.py").is_file() else None
+
     def _start_install(self) -> None:
         from PySide6.QtCore import QProcess
 
         from . import live_engine
-        from .config import find_subtitle_pipeline_dir, find_subtitle_source_dir
 
         if getattr(self, "_install_proc", None) is not None \
                 and self._install_proc.state() != QProcess.NotRunning:
             return
-        # engine dir: existing engine (if any) else live-subtitle 源目录
-        # （exe 旁/手动指定，不要求 venv——安装恰恰发生在 venv 之前；
-        # 旧代码的 __file__ 相对回退在打包版指向 _internal/，永远找不到）
-        pipe = find_subtitle_pipeline_dir() or find_subtitle_source_dir()
+        pipe = self._resolve_install_dir()
         if pipe is None:
             self.install_status.setText(t("settings.install_no_script"))
             return
@@ -1768,12 +1803,9 @@ class SettingsDialog(QDialog):
         """一键安装 HY-MT2-30B SRT 翻译（llama.cpp + 11.6GB 模型，幂等）。"""
         from PySide6.QtCore import QProcess
 
-        from .config import (find_subtitle_pipeline_dir,
-                             find_subtitle_source_dir)
-
         if getattr(self, "_install_proc", None) is not None                 and self._install_proc.state() != QProcess.NotRunning:
             return
-        pipe = find_subtitle_pipeline_dir() or find_subtitle_source_dir()
+        pipe = self._resolve_install_dir()
         if pipe is None:
             self.install_status.setText(t("settings.install_no_script"))
             return

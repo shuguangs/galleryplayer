@@ -92,21 +92,14 @@ def _copy_public_scenarios(target: Path) -> None:
     print(f"已复制 {len(files)} 个公共场景 JSON")
 
 
-# 便携包里必须带的字幕引擎脚本。
-# 前两个是"装引擎"用的；后五个是"跑引擎"用的运行时闭包——播放器启动的是
-# live_transcribe.py / live_capture.py，它们又 import asr_engines /
-# translate_service / ollama_service。少带任何一个，用户把模型下载安装完
-# 也拉不起字幕，而且 install_engine 最后那步"验证模型可加载"本身就 import
-# asr_engines：默认引擎（qwen/sensevoice）会在下完 4.7GB 模型后失败收场。
-ENGINE_FILES = (
-    "install_engine.py",
-    "ollama_modelfile.py",
-    "live_transcribe.py",
-    "live_capture.py",
-    "asr_engines.py",
-    "translate_service.py",
-    "ollama_service.py",
-)
+# 便携包里必须带的字幕引擎脚本。清单在 app/engine_files.py（打包与"安装到
+# 用户指定目录"共用一份事实）：前两个是"装引擎"用的，其余是"跑引擎"用的
+# 运行时闭包——播放器启动的是 live_transcribe.py / live_capture.py，它们又
+# import asr_engines / translate_service / ollama_service。少带任何一个，
+# 用户把模型下载安装完也拉不起字幕，而且 install_engine 最后那步"验证模型
+# 可加载"本身就 import asr_engines：默认引擎会在下完 4.7GB 后失败收场。
+sys.path.insert(0, str(ROOT))
+from app.engine_files import ENGINE_SCRIPTS as ENGINE_FILES  # noqa: E402
 
 
 def _copy_engine_runtime(target: Path) -> None:
