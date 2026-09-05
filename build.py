@@ -92,23 +92,44 @@ def _copy_public_scenarios(target: Path) -> None:
     print(f"已复制 {len(files)} 个公共场景 JSON")
 
 
-def _copy_engine_installer(target: Path) -> None:
-    """把安装脚本带进便携包：设置页“下载模型”要在用户机器上跑它。
+# 便携包里必须带的字幕引擎脚本。
+# 前两个是"装引擎"用的；后五个是"跑引擎"用的运行时闭包——播放器启动的是
+# live_transcribe.py / live_capture.py，它们又 import asr_engines /
+# translate_service / ollama_service。少带任何一个，用户把模型下载安装完
+# 也拉不起字幕，而且 install_engine 最后那步"验证模型可加载"本身就 import
+# asr_engines：默认引擎（qwen/sensevoice）会在下完 4.7GB 模型后失败收场。
+ENGINE_FILES = (
+    "install_engine.py",
+    "ollama_modelfile.py",
+    "live_transcribe.py",
+    "live_capture.py",
+    "asr_engines.py",
+    "translate_service.py",
+    "ollama_service.py",
+)
 
-    只带脚本本身和它的本地依赖（ollama_modelfile.py，纯数据映射）；
-    config.yaml / Modelfile* 是安装时在目标目录自生成的，带开发机的
-    副本反而会把开发者配置压到用户头上。venv/checkpoints 更不能带。
+
+def _copy_engine_runtime(target: Path) -> None:
+    """把字幕引擎的脚本带进便携包（见 ENGINE_FILES 的清单说明）。
+
+    只带脚本：config.yaml / Modelfile* 由安装时在目标目录自生成，带开发机
+    的副本会把开发者配置压到用户头上；venv / models / checkpoints 更不能带。
     """
     out = target / "live-subtitle"
     out.mkdir(parents=True, exist_ok=True)
-    for name in ("install_engine.py", "ollama_modelfile.py"):
+    missing = []
+    for name in ENGINE_FILES:
         source = ROOT / "live-subtitle" / name
         if source.is_file():
             shutil.copy2(source, out / name)
         else:
-            print(f"警告：缺少 {source}，便携版将无法在设置页下载模型",
-                  file=sys.stderr)
-    print("已复制引擎安装脚本（install_engine.py / ollama_modelfile.py）")
+            missing.append(name)
+    if missing:
+        print(f"警告：缺少引擎脚本 {missing}，便携版的实时字幕/SRT 会跑不起来",
+              file=sys.stderr)
+    print(f"已复制 {len(ENGINE_FILES) - len(missing)} 个引擎脚本"
+          f"（安装器 + 运行时闭包）")
+
 
 def main() -> int:
     dll = ROOT / "vendor" / "libmpv-2.dll"
@@ -193,7 +214,7 @@ def main() -> int:
     shutil.copy2(ROOT / "安装运行环境.bat", target / "安装运行环境.bat")
     shutil.copy2(ROOT / "清除后台字幕模型.bat", target / "清除后台字幕模型.bat")
     _copy_public_scenarios(target)
-    _copy_engine_installer(target)
+    _copy_engine_runtime(target)
 
     total = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
     print(f"\n完成：{target}")

@@ -42,8 +42,64 @@ os.environ.setdefault("PYTHONUTF8", "1")
 
 MODEL_CACHE_HINT = "（首次下载；已缓存则秒过）"
 
+# run() 在"可执行文件根本不存在"时的返回码（区别于命令自身失败）
+MISSING_EXE = 127
+
 TORCH_ENGINES = ("qwen", "sensevoice")
 WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v3")
+
+# funasr（qwen/sensevoice 的运行依赖）钉着 numpy<2，而 numpy 1.x 最后一版
+# 1.26.4 只出到 cp312 轮子——在 Python 3.13 上 pip 只能现编译 numpy，必然
+# 以 meson 报错收场。所以 torch 系引擎的 venv 必须用 3.10-3.12 建。
+# whisper 档位不依赖 funasr，3.13 上完全正常。
+FUNASR_PY_MIN = (3, 10)
+FUNASR_PY_MAX = (3, 12)
+
+
+def _probe_python(cmd: list[str]) -> tuple[int, int] | None:
+    """跑一下候选解释器问版本；不可用返回 None（顺带滤掉商店 stub）。"""
+    try:
+        done = subprocess.run(
+            [*cmd, "-c", "import sys;print(sys.version_info[0], sys.version_info[1])"],
+            capture_output=True, text=True, timeout=20, errors="replace")
+    except Exception:
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        major, minor = (int(x) for x in done.stdout.split()[:2])
+    except Exception:
+        return None
+    return (major, minor)
+
+
+def pick_venv_python(need_funasr: bool) -> tuple[list[str], tuple[int, int]] | None:
+    """挑一个用来建 venv 的解释器。
+
+    need_funasr（qwen/sensevoice）时必须落在 3.10-3.12：当前解释器合规就
+    用它，否则按 3.12→3.11→3.10 找。找不到返回 None，由调用方给出人话
+    提示——这一步必须在下载 3GB torch **之前**判掉。
+    """
+    cur = _probe_python([sys.executable])
+    if cur and (not need_funasr or FUNASR_PY_MIN <= cur <= FUNASR_PY_MAX):
+        return [sys.executable], cur
+    if not need_funasr:
+        return ([sys.executable], cur) if cur else None
+    for minor in range(FUNASR_PY_MAX[1], FUNASR_PY_MIN[1] - 1, -1):
+        for cmd in ([f"py", f"-3.{minor}"], [f"python3.{minor}"]):
+            if cmd[0] == "python3." + str(minor) and not shutil.which(cmd[0]):
+                continue
+            if cmd[0] == "py" and not shutil.which("py"):
+                continue
+            ver = _probe_python(cmd)
+            if ver and FUNASR_PY_MIN <= ver <= FUNASR_PY_MAX:
+                return cmd, ver
+    return None
+
+
+def venv_python_version(venv_py: Path) -> tuple[int, int] | None:
+    return _probe_python([str(venv_py)])
+
 
 # ModelScope 仓库 ID（qwen/sensevoice/VAD 都走 modelscope，国内直连快）
 MS_REPOS = {
@@ -147,7 +203,85 @@ def run_proxy(cmd: list[str], env: dict | None = None, **kw) -> int:
 def run(cmd: list[str], env: dict | None = None, **kw) -> int:
     log(f"> {' '.join(str(c) for c in cmd)}")
     env = {**os.environ, **(env or {})}
-    return subprocess.call(cmd, env=env, **kw)
+    try:
+        return subprocess.call(cmd, env=env, **kw)
+    except FileNotFoundError:
+        # 全新电脑上很常见：没有 winget（LTSC/精简版/App Installer 缺失）、
+        # 老 Win10 没有 curl.exe、winget 把 Ollama 装到了别的位置。
+        # subprocess 直接抛 FileNotFoundError，不接住的话整场安装以一段
+        # Python traceback 收尾，用户只看到"安装失败"却不知道缺什么。
+        log(f"✗ 找不到可执行文件: {cmd[0]}（未安装，或不在 PATH 上）")
+        return MISSING_EXE
+    except OSError as exc:
+        log(f"✗ 无法启动 {cmd[0]}: {exc}")
+        return MISSING_EXE
+
+
+def find_ollama() -> Path | None:
+    """定位 ollama.exe：用户级安装 → PATH → 机器级安装。
+
+    winget 装到哪取决于包的 scope（用户级 LOCALAPPDATA / 机器级
+    Program Files），装完还不会刷新当前进程的 PATH——所以固定只看一个
+    位置会在"其实已经装好"的机器上判成没装。
+    """
+    cands: list[Path] = []
+    local = os.environ.get("LOCALAPPDATA", "")
+    if local:
+        cands.append(Path(local) / "Programs" / "Ollama" / "ollama.exe")
+    found = shutil.which("ollama")
+    if found:
+        cands.append(Path(found))
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        base = os.environ.get(var, "")
+        if base:
+            cands.append(Path(base) / "Ollama" / "ollama.exe")
+    for c in cands:
+        try:
+            if c.is_file():
+                return c
+        except OSError:
+            continue
+    return None
+
+
+def ollama_ready(exe: Path, timeout: float = 20.0) -> bool:
+    """Ollama 服务是否可用（list 能连上就算）。"""
+    try:
+        done = subprocess.run([str(exe), "list"], capture_output=True,
+                              text=True, timeout=timeout, errors="replace")
+        return done.returncode == 0
+    except Exception:
+        return False
+
+
+def ensure_ollama_daemon(exe: Path, wait: float = 40.0) -> bool:
+    """确保 Ollama 服务在跑：没跑就后台拉起 `ollama serve` 并等就绪。
+
+    winget 静默装完的 Ollama 在当前会话里不会自动起服务（托盘 App 要
+    重新登录才自启），而 `ollama pull` 必须连服务——不拉起的话新机器上
+    翻译模型永远拉不下来，还会被误判成"拉取失败"去走 GGUF 镜像回退
+    （默认的 qwen3:8b 没有镜像映射，直接判死）。
+    """
+    if ollama_ready(exe):
+        return True
+    log("Ollama 服务未运行，正在后台启动 ollama serve ...")
+    flags = 0
+    if sys.platform == "win32":
+        flags = (getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                 | getattr(subprocess, "DETACHED_PROCESS", 0))
+    try:
+        subprocess.Popen([str(exe), "serve"], creationflags=flags,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        log(f"✗ 无法启动 Ollama 服务: {exc}")
+        return False
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if ollama_ready(exe, timeout=5.0):
+            log("Ollama 服务已就绪")
+            return True
+        time.sleep(1.0)
+    return False
 
 
 def gpu_info() -> tuple[str, float, float]:
@@ -210,12 +344,21 @@ def _curl(url: str, out: Path, min_bytes: int = 1_000_000) -> bool:
     if out.is_file() and out.stat().st_size >= min_bytes:
         log(f"已存在，跳过下载: {out.name}")
         return True
+    if not (shutil.which("curl.exe") or shutil.which("curl")):
+        # Win10 1803+ 自带 curl.exe；缺它的多是精简/极老系统。提前给出
+        # 明确结论，免得四轮尝试各抛一次"找不到可执行文件"
+        log("✗ 系统缺少 curl.exe（Windows 10 1803 起自带）——"
+            "请升级系统，或手动下载所需文件后放进引擎目录")
+        return False
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_name(out.name + ".part")
-    attempts = [(GGH, None), ("", None)]          # 镜像 → 直连
+    # gh-proxy 只代理 GitHub：给 HuggingFace 之类的 URL 套上去只会白试
+    # 一轮 404（翻译模型的 GGUF 镜像回退就走 HF）
+    bases = [GGH, ""] if "github.com" in url else [""]
+    attempts = [(b, None) for b in bases]
     proxy = system_proxy()
     if proxy:
-        attempts += [(GGH, proxy), ("", proxy)]   # 两个直连都下不动 → 走系统代理
+        attempts += [(b, proxy) for b in bases]   # 直连下不动 → 走系统代理
     for base, px in attempts:
         url2 = base + url if base else url
         via = f"（代理 {px}）" if px else ""
@@ -339,14 +482,53 @@ def main() -> None:
         log("设置里把「SRT 翻译模型」选为 HY-MT2-30B 即可；仅生成 SRT 时运行。")
         return
 
+    # ------------------------------------------------ 0c. 引擎脚本自检
+    # 便携包曾经只带 install_engine.py：用户把 4.7GB 模型下完，才在最后
+    # 一步 `import asr_engines` 上失败（那条 ✗ 还会被 GBK 编码崩溃盖住，
+    # 只剩 illegal multibyte sequence）。这里先查、先说、先退。
+    runtime_scripts = ("live_transcribe.py", "live_capture.py",
+                       "asr_engines.py", "translate_service.py",
+                       "ollama_service.py")
+    missing_scripts = [n for n in runtime_scripts if not (root / n).is_file()]
+    if missing_scripts:
+        log(f"⚠ 引擎目录缺少运行脚本: {', '.join(missing_scripts)}")
+        if args.model in TORCH_ENGINES:
+            log(f"✗ 缺少 asr_engines.py 等脚本，{label} 装完也加载不了——"
+                f"请更新到新版程序包（旧包漏打了引擎脚本）；"
+                f"或先改用 whisper 档位（不需要这些脚本即可识别）")
+            sys.exit(1)
+        log("  （whisper 档位仍可安装，但实时字幕要等脚本补齐才能启动）")
+
     # ---------------------------------------------------------- 1. venv
+    need_funasr = args.model in TORCH_ENGINES
+    if venv_py.is_file():
+        have = venv_python_version(venv_py)
+        if need_funasr and have and not (FUNASR_PY_MIN <= have <= FUNASR_PY_MAX):
+            # 上一轮用不合规的解释器（如 3.13）建过 venv：不重建的话
+            # funasr 永远装不上，而"venv 已存在就跳过"会让用户永远卡在
+            # 同一个错误上。venv 里全是可重装的依赖，删了没有用户数据损失。
+            log(f"已有 .venv 是 Python {have[0]}.{have[1]} 建的，"
+                f"{args.model} 需要 3.{FUNASR_PY_MIN[1]}-3.{FUNASR_PY_MAX[1]}"
+                f"（funasr 依赖 numpy<2，无 3.13 轮子）——重建虚拟环境")
+            shutil.rmtree(root / ".venv", ignore_errors=True)
+        else:
+            log(f"venv 已存在，跳过"
+                + (f"（Python {have[0]}.{have[1]}）" if have else ""))
     if not venv_py.is_file():
-        log("创建虚拟环境 .venv ...")
-        if run([sys.executable, "-m", "venv", str(root / ".venv")]) != 0:
+        picked = pick_venv_python(need_funasr)
+        if picked is None:
+            log(f"✗ {label} 需要 Python 3.{FUNASR_PY_MIN[1]}-3.{FUNASR_PY_MAX[1]}"
+                f"（funasr 依赖 numpy<2，Python 3.13 没有预编译轮子，"
+                f"pip 只能现编译 numpy 并失败），本机没找到可用版本。"
+                f"两条出路：装一个 Python 3.12 后重跑安装；"
+                f"或把识别引擎换成 whisper 档位"
+                f"（large-v3/medium/small…，不依赖 funasr，3.13 也能装）")
+            sys.exit(1)
+        base_cmd, ver = picked
+        log(f"创建虚拟环境 .venv（Python {ver[0]}.{ver[1]}）...")
+        if run([*base_cmd, "-m", "venv", str(root / ".venv")]) != 0:
             log("✗ venv 创建失败")
             sys.exit(1)
-    else:
-        log("venv 已存在，跳过")
     pip = [str(venv_py), "-m", "pip", "install", "--disable-pip-version-check", "--quiet"]
 
     # --------------------------------------------------- 2. pip 依赖
@@ -424,21 +606,30 @@ def main() -> None:
     # ------------------------------------------------------ 4. Ollama
     ollama_exe = None
     if not args.skip_ollama and args.translate != "none":
-        cand = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
-        if cand.is_file():
-            ollama_exe = cand
-        else:
-            found = shutil.which("ollama")
-            ollama_exe = Path(found) if found else None
+        ollama_exe = find_ollama()
         if ollama_exe is None:
+            if not shutil.which("winget"):
+                # LTSC / 精简系统 / App Installer 缺失：没有 winget 就没法
+                # 自动装。给出可执行的出路，而不是让 subprocess 抛异常
+                log("✗ 未找到 Ollama，且本机没有 winget 无法自动安装——"
+                    "请手动装 https://ollama.com/download 后重跑；"
+                    "或把翻译模型选「不翻译」跳过（识别照常可用）")
+                sys.exit(1)
             log("未找到 Ollama，尝试用 winget 安装（约 1.5GB，需要几分钟）...")
             rc = run(["winget", "install", "-e", "--id", "Ollama.Ollama", "--accept-source-agreements",
                       "--accept-package-agreements", "--silent"])
             if rc != 0:
                 log("✗ Ollama 自动安装失败——请手动安装 https://ollama.com/download 后重试")
                 sys.exit(1)
-            ollama_exe = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "ollama.exe"
+            # 装到用户级还是机器级由 winget 决定，且当前进程 PATH 不刷新
+            ollama_exe = find_ollama()
+            if ollama_exe is None:
+                log("✗ Ollama 装好了但找不到 ollama.exe——重启电脑刷新 PATH 后重跑安装")
+                sys.exit(1)
         log(f"Ollama: {ollama_exe}")
+        if not ensure_ollama_daemon(ollama_exe):
+            log("✗ Ollama 服务起不来——手动打开一次 Ollama 应用，再重跑安装")
+            sys.exit(1)
 
         # ------------------------- 4b. 翻译模型：优先 ollama pull（官方库）
         # GGUF 手工下载+import 只作为拉取失败时的回退（qwen2.5 系列有镜像映射）
@@ -470,8 +661,9 @@ def main() -> None:
                             else "https://huggingface.co")
                     url = f"{base}/{repo}/resolve/main/{fname}"
                     log(f"下载翻译模型 {fname}（{size}）...")
-                    if run(["curl.exe", "-L", "-o", str(g), url]) != 0 \
-                            or not g.is_file() or g.stat().st_size < 1_000_000:
+                    # 走 _curl：断点续传 + 系统代理兜底 + curl 缺失预检
+                    # （此前是裸 curl 一次性下载，网络不好就永远装不上）
+                    if not _curl(url, g, min_bytes=1_000_000):
                         log("✗ 翻译模型下载失败——可换镜像源或稍后重试；--translate none 可跳过")
                         sys.exit(1)
                 mf = root / f"Modelfile{args.translate.replace(':', '-')}"

@@ -16,6 +16,7 @@ live_translate.py（批处理）共用。whisper 走 faster-whisper 原路径，
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -115,30 +116,66 @@ def stub_nagisa() -> None:
     sys.modules["nagisa"] = stub
 
 
+def _junction_ok(link: Path, target: Path) -> bool:
+    """link 是否为指向 target 的可用目录（junction 悬空/指错都算不可用）。"""
+    try:
+        return link.is_dir() and \
+            os.path.realpath(link) == os.path.realpath(target)
+    except OSError:
+        return False
+
+
+def _remove_link(link: Path) -> None:
+    """删掉可能悬空的 junction。
+
+    悬空 junction（盘符变了 / 目标被删）上 Path.exists() 与 os.path.islink()
+    **都返回 False**，只有 os.lstat 认得出它还占着这个名字——旧代码用
+    exists()/islink() 判断，于是跳过删除、紧接着 mklink 报"已存在"，换过
+    盘符的机器上 SenseVoice 从此永久加载失败。
+    """
+    try:
+        os.lstat(link)
+    except OSError:
+        return
+    try:
+        link.rmdir()
+        return
+    except OSError:
+        pass
+    try:
+        subprocess.run(["cmd", "/c", "rmdir", str(link)], capture_output=True,
+                       timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception:
+        pass
+
+
 def _ascii_junction(path: Path) -> Path:
-    """中文路径下 funasr/sentencepiece 加载失败 → 建 NTFS junction 到 ASCII 路径。"""
+    """中文路径下 funasr/sentencepiece 加载失败 → 建 NTFS junction 到 ASCII 路径。
+
+    链接名带源路径哈希：同名模型目录在多份安装之间不会抢同一个链接。
+    每次都校验真实指向，悬空或指错就重建（见 _remove_link）。
+    """
     try:
         str(path).encode("ascii")
         return path  # 本来就是 ASCII 路径，无需处理
     except UnicodeEncodeError:
         pass
-    link = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "MediaPlayerASR" / path.name
-    probe = next(path.iterdir(), None) if path.is_dir() else None
-    link_probe = next(link.iterdir(), None) if link.is_dir() else None
-    if probe is not None and link_probe is None:
-        try:
-            link.parent.mkdir(parents=True, exist_ok=True)
-            # exists() 对悬空 junction（盘符变化后指向不存在目标）返回 False，
-            # 必须按链接本身判断存在（os.path.islink 认 junction），否则旧的
-            # 删不掉、mklink 又报已存在，回退中文路径后 SenseVoice 永久加载失败
-            if link.exists() or os.path.islink(link):
-                link.rmdir()
-            subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(path)],
-                           capture_output=True, timeout=15,
-                           creationflags=subprocess.CREATE_NO_WINDOW)
-        except Exception:
-            pass
-    return link if (link_probe is not None or link.is_dir()) else path
+    if not path.is_dir():
+        return path
+    tag = hashlib.sha1(str(path).encode("utf-8")).hexdigest()[:8]
+    root = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "MediaPlayerASR"
+    link = root / f"{path.name}-{tag}"
+    if _junction_ok(link, path):
+        return link
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        _remove_link(link)
+        subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(path)],
+                       capture_output=True, timeout=15,
+                       creationflags=subprocess.CREATE_NO_WINDOW)
+    except Exception:
+        pass
+    return link if _junction_ok(link, path) else path
 
 
 # ------------------------------------------------------------------ qwen

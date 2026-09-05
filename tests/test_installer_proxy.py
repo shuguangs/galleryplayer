@@ -110,28 +110,49 @@ class CurlProxyAttemptsTests(unittest.TestCase):
             if name in self.ie.__dict__:
                 delattr(self.ie, name)
 
-    def test_both_direct_fail_then_proxy_attempts(self):
-        """镜像/直连都失败 → 抓系统代理再各试一轮（curl -x）。"""
+    def test_github_url_tries_mirror_direct_then_proxy(self):
+        """GitHub 链接：镜像 → 直连 → 带系统代理再各试一轮（共 4 次）。"""
         cmds = []
 
         def fake_run(cmd, env=None, **kw):
             cmds.append(cmd)
-            return 1                       # 永远失败：逼出全部四轮尝试
+            return 1                       # 永远失败：逼出全部尝试
 
         self.ie.run = fake_run
         self.ie.system_proxy = lambda: "http://p:7890"
-        ok = self.ie._curl("https://example.org/big.bin",
-                           self.tmp / "big.bin", min_bytes=10)
+        ok = self.ie._curl("https://github.com/o/r/releases/download/x/big.zip",
+                           self.tmp / "big.zip", min_bytes=10)
         self.assertFalse(ok)
-        self.assertEqual(4, len(cmds), f"应有 4 轮尝试（镜像/直连 × 无代理/代理）")
+        self.assertEqual(4, len(cmds), "GitHub 应有 4 轮（镜像/直连 × 无代理/代理）")
         self.assertNotIn("-x", cmds[0])
         self.assertNotIn("-x", cmds[1])
         self.assertIn("-x", cmds[2])
         self.assertEqual("http://p:7890", cmds[2][cmds[2].index("-x") + 1])
         self.assertIn("-x", cmds[3])
-        # 前两轮不带镜像域名外的前缀、后两轮同样覆盖镜像与直连
-        self.assertTrue(any("gh-proxy.com" in " ".join(c) for c in cmds))
-        self.assertTrue(all("example.org" in " ".join(c) for c in cmds))
+        self.assertTrue(any("gh-proxy.com" in " ".join(c) for c in cmds),
+                        "GitHub 链接要试 gh-proxy 镜像")
+
+    def test_non_github_url_skips_mirror(self):
+        """非 GitHub（如 HuggingFace）不套 gh-proxy：直连 → 代理，两轮。"""
+        cmds = []
+        self.ie.run = lambda cmd, env=None, **kw: (cmds.append(cmd), 1)[1]
+        self.ie.system_proxy = lambda: "http://p:7890"
+        self.ie._curl("https://hf-mirror.com/repo/resolve/main/m.gguf",
+                      self.tmp / "m.gguf", min_bytes=10)
+        self.assertEqual(2, len(cmds), "HF 链接不该白试 gh-proxy 一轮")
+        self.assertFalse(any("gh-proxy.com" in " ".join(c) for c in cmds))
+        self.assertIn("-x", cmds[1])
+
+    def test_missing_curl_reports_clearly(self):
+        """系统没有 curl.exe：一条明确结论，不做 N 轮无效尝试。"""
+        cmds = []
+        self.ie.run = lambda cmd, env=None, **kw: (cmds.append(cmd), 1)[1]
+        self.ie.system_proxy = lambda: ""
+        with mock.patch.object(self.ie.shutil, "which", return_value=None):
+            ok = self.ie._curl("https://github.com/x/y.zip",
+                               self.tmp / "y.zip", min_bytes=10)
+        self.assertFalse(ok)
+        self.assertEqual([], cmds, "缺 curl 时不应真的去执行下载")
 
     def test_success_on_first_attempt_skips_proxy(self):
         cmds = []
