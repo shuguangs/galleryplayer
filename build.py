@@ -91,6 +91,25 @@ def _copy_public_scenarios(target: Path) -> None:
         shutil.copy2(source, out / source.name)
     print(f"已复制 {len(files)} 个公共场景 JSON")
 
+
+def _copy_engine_installer(target: Path) -> None:
+    """把安装脚本带进便携包：设置页“下载模型”要在用户机器上跑它。
+
+    只带脚本本身和它的本地依赖（ollama_modelfile.py，纯数据映射）；
+    config.yaml / Modelfile* 是安装时在目标目录自生成的，带开发机的
+    副本反而会把开发者配置压到用户头上。venv/checkpoints 更不能带。
+    """
+    out = target / "live-subtitle"
+    out.mkdir(parents=True, exist_ok=True)
+    for name in ("install_engine.py", "ollama_modelfile.py"):
+        source = ROOT / "live-subtitle" / name
+        if source.is_file():
+            shutil.copy2(source, out / name)
+        else:
+            print(f"警告：缺少 {source}，便携版将无法在设置页下载模型",
+                  file=sys.stderr)
+    print("已复制引擎安装脚本（install_engine.py / ollama_modelfile.py）")
+
 def main() -> int:
     dll = ROOT / "vendor" / "libmpv-2.dll"
     if not dll.exists():
@@ -161,6 +180,7 @@ def main() -> int:
     shutil.copy2(ROOT / "安装运行环境.bat", target / "安装运行环境.bat")
     shutil.copy2(ROOT / "清除后台字幕模型.bat", target / "清除后台字幕模型.bat")
     _copy_public_scenarios(target)
+    _copy_engine_installer(target)
 
     total = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
     print(f"\n完成：{target}")
