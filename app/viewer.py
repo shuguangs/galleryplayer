@@ -53,6 +53,8 @@ class Viewer(QWidget):
     folder_requested = Signal(object)     # Path, from the panel's browser tab
     playlist_changed = Signal(list)       # reordered / trimmed MediaItem list
     sort_requested = Signal(str, bool)    # (sort_key, desc) from the panel
+    files_moved = Signal(list)            # [(old_path, new_path)]，浏览器据此同步
+    files_recycled = Signal(list)         # 已进回收站的路径，浏览器据此剔除
     _capture_saved = Signal(str)          # toast text, emitted from a worker thread
     _gif_done = Signal()                  # GIF 采样够数，worker 通知 UI 收尾
     _drop_resolved = Signal(object)       # 拖放解析结论 (folder?, items)，worker → UI
@@ -96,6 +98,8 @@ class Viewer(QWidget):
         self._gif_thread = None
         self._drop_resolved.connect(self._on_drop_resolved)
         self._capture_saved.connect(self._show_toast)
+        # 文件操作（移动到/删除）释放播放的标记：被停播的文件路径
+        self._fileop_released = None
         # ---- A-B loop state (mpv loops between these two marks when both are set)
         self._ab_a: float | None = None
         self._ab_b: float | None = None
@@ -1338,6 +1342,27 @@ class Viewer(QWidget):
             act.triggered.connect(lambda _=False, it=item: self._copy_current_image(it))
         act = self._menu_action(menu, t("menu.copy_file"))
         act.triggered.connect(lambda _=False, it=item: self._copy_current_file(it))
+        # 文件操作（与浏览器/播放列表面板同步）：路径/文件名/资源管理器/
+        # 移动到/删除——图片查看时以前只有"复制"，删除与移动必须切回浏览器
+        # 才能做（用户实测痛点）。
+        menu.addSeparator()
+        act = self._menu_action(menu, t("main_window.copy_path"))
+        act.triggered.connect(
+            lambda _=False, it=item: fileops.copy_to_clipboard(str(it.path)))
+        act = self._menu_action(menu, t("main_window.copy_name"))
+        act.triggered.connect(
+            lambda _=False, it=item: fileops.copy_to_clipboard(it.path.name))
+        act = self._menu_action(menu, t("main_window.reveal_in_explorer"))
+        act.triggered.connect(lambda _=False, it=item: fileops.reveal(it.path))
+        act = self._menu_action(menu, t("main_window.open_containing_folder"))
+        act.triggered.connect(
+            lambda _=False, it=item: fileops.open_folder(it.path.parent))
+        menu.addSeparator()
+        act = self._menu_action(menu, t("main_window.move_to"))
+        act.triggered.connect(
+            lambda _=False: self.move_files([self.items[self.index].path]))
+        act = self._menu_action(menu, t("main_window.recycle"))
+        act.triggered.connect(lambda _=False: self._recycle_current_media())
         return menu
 
     # ---- 画面比例（右键菜单）：mpv 的 video-aspect-override + panscan
@@ -2420,6 +2445,114 @@ class Viewer(QWidget):
     def _copy_current_file(self, item: MediaItem) -> None:
         fileops.copy_files_to_clipboard([item.path])
         self._show_toast(t("menu.copy_done"))
+
+    # ---- 文件操作（右键菜单 / 面板共用）：移动到 + 删除到回收站
+
+    def move_files(self, paths: list) -> None:
+        """移动文件并同步自身/面板/浏览器（播放器右键与面板菜单的统一入口）。
+
+        Windows 上 mpv 打开的视频没有 FILE_SHARE_DELETE——正在播放的文件
+        不先 stop()，shutil.move 会直接 PermissionError。断点先记在旧路径
+        下，同文件夹移动（=改名语义）时再转移到新路径并原位续播。
+        """
+        paths = [Path(p) for p in paths]
+        self._fileop_released = None
+        if 0 <= self.index < len(self.items):
+            cur = self.items[self.index]
+            if cur.path in paths and cur.is_video and self._current_is_video():
+                pos = float(self.video_view.position or 0.0)
+                dur = float(self.video_view.duration or 0.0)
+                if pos > 1:
+                    resume.remember(cur.path, pos, dur or None)
+                self._fileop_released = cur.path
+                self.video_view.stop()
+        moved, msg, moves = fileops.move_to(self, paths)
+        self.handle_files_moved(moves)
+        if msg:
+            self._show_toast(msg)
+        if moved:
+            self.files_moved.emit(moves)
+
+    def handle_files_moved(self, moves: list) -> None:
+        """移动完成后的自身同步：续播/改名原地保留/跨文件夹移出列表。
+
+        moves 为空且此前释放过播放（用户取消了选择器）→ 原位恢复播放。
+        """
+        released = getattr(self, "_fileop_released", None)
+        self._fileop_released = None
+        moved_map = {old: new for old, new in moves}
+
+        # 同文件夹 = 改名语义：对象原地 retarget（与浏览器共享同一批对象，
+        # path 一改双方同时生效）
+        for it in self.items:
+            new = moved_map.get(it.path)
+            if new is not None and new.parent == it.path.parent:
+                it.retarget(new)
+
+        if released is not None:
+            new = moved_map.get(released)
+            if new is None:
+                # 用户取消：恢复播放
+                self.show_index(min(self.index, len(self.items) - 1))
+                return
+            if new.parent == released.parent:
+                # 断点随文件转移，原位续播（show_index 会按新路径 resume）
+                pos = resume.lookup(released)
+                if pos:
+                    resume.remember(new, pos, None)
+                    resume.forget(released)
+                idx = next((i for i, it in enumerate(self.items)
+                            if it.path == new), self.index)
+                self.show_index(idx)
+                self.panel.set_playlist(self.items, idx)
+                return
+            # 跨文件夹：当前项被移走 → 走下面的移除分支换下一部
+
+        gone = {old for old, new in moves if new.parent != old.parent}
+        if gone:
+            self._remove_items_by_paths(gone)
+        elif moved_map:
+            # 只剩改名式移动：面板行刷新（路径/名字变了）
+            idx = self.index if 0 <= self.index < len(self.items) else 0
+            self.panel.set_playlist(self.items, idx)
+
+    def _remove_items_by_paths(self, gone: set) -> None:
+        """从播放列表移除给定路径（删除/跨文件夹移动后），当前项被移走则续播下一项。"""
+        if not gone:
+            return
+        current = (self.items[self.index].path
+                   if 0 <= self.index < len(self.items) else None)
+        self.items = [it for it in self.items if it.path not in gone]
+        if not self.items:
+            self.close()
+            return
+        found = next((i for i, it in enumerate(self.items) if it.path == current),
+                     None)
+        idx = found if found is not None else min(self.index, len(self.items) - 1)
+        self.show_index(idx)
+        self.panel.set_playlist(self.items, idx)
+        self._save_playlist_state(clean=False)
+
+    def _recycle_current_media(self) -> None:
+        if not (0 <= self.index < len(self.items)):
+            return
+        item = self.items[self.index]
+        if not fileops.confirm_recycle(self, [item.path]):
+            return
+        was_playing = item.is_video and self._current_is_video()
+        if was_playing:
+            # 句柄不放开，回收站（SHFileOperation）拿不走文件
+            self.video_view.stop()
+        done, err = fileops.recycle([item.path])
+        if not done:
+            if was_playing:
+                self.show_index(self.index)  # 没删成：接着播
+            if err:
+                self._show_toast(t("viewer.recycle_fail_toast").format(err=err))
+            return
+        self.files_recycled.emit([item.path])
+        self._remove_items_by_paths({item.path})
+        self._show_toast(t("viewer.recycled_toast"))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self._current_is_video():

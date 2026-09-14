@@ -97,6 +97,7 @@ DEFAULTS: dict[str, Any] = {
     "filter_show_image": True,         # 筛选复选框：显示图片
     "filter_show_video": True,         # 筛选复选框：显示视频
     "filter_show_archive": True,       # 筛选复选框：显示压缩包
+    "move_to_last_dir": "",            # 「移动到…」记住的上次目标文件夹
 }
 
 # Videos shorter than this are never resumed; nor are ones watched to the end.

@@ -220,3 +220,94 @@ def confirm_recycle(parent, paths: list[Path]) -> bool:
     box.setDefaultButton(yes)
     box.exec()
     return box.clickedButton() is yes
+
+
+# --- moving ----------------------------------------------------------------------
+
+def move_to(parent, paths: list[Path]) -> tuple[int, str, list[tuple[Path, Path]]]:
+    """Move files into a user-chosen folder.
+
+    Returns (moved count, status message, [(old, new)]). The move list lets
+    callers retarget their models (same-folder move == rename semantics);
+    dircache for both ends is forgotten here so the next scan is correct.
+
+    Collisions ask once for the whole batch: overwrite sends the existing
+    target to the Recycle Bin first (staying undoable), skip leaves it be.
+    Cancelling the folder picker returns (0, "", []).
+    """
+    import shutil
+
+    from PySide6.QtWidgets import QFileDialog
+
+    from .config import settings
+
+    live = [p for p in paths if p.is_file()]
+    if not live:
+        return 0, t("fileops.gone"), []
+    start = str(settings.get("move_to_last_dir") or "") or str(live[0].parent)
+    dest = QFileDialog.getExistingDirectory(parent, t("fileops.move_to_title"), start)
+    if not dest:
+        return 0, "", []
+    dest = Path(dest)
+    todo = [p for p in live if p.parent != dest]
+    if not todo:
+        return 0, t("fileops.move_same_dir"), []
+
+    collisions = [p for p in todo if (dest / p.name).exists()]
+    mode = "skip"
+    if collisions:
+        box = QMessageBox(parent)
+        box.setWindowTitle(t("fileops.move_to_title"))
+        box.setIcon(QMessageBox.Question)
+        box.setText(t("fileops.move_collision_text").format(n=len(collisions)))
+        btn_over = box.addButton(t("fileops.move_overwrite"), QMessageBox.AcceptRole)
+        btn_skip = box.addButton(t("fileops.move_skip"), QMessageBox.DestructiveRole)
+        btn_cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(btn_skip)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is None or clicked is btn_cancel:
+            return 0, "", []
+        mode = "over" if clicked is btn_over else "skip"
+
+    moved = 0
+    moves: list[tuple[Path, Path]] = []
+    errors: list[str] = []
+    for p in todo:
+        target = dest / p.name
+        try:
+            if target.exists():
+                if mode == "skip":
+                    continue
+                # 覆盖：旧文件先进回收站（可撤销），再落新文件
+                done, _err = recycle([target])
+                if not done or target.exists():
+                    errors.append(p.name)
+                    continue
+            shutil.move(str(p), str(target))
+            moves.append((p, target))
+            moved += 1
+        except OSError as exc:
+            errors.append(f"{p.name}: {exc.strerror or exc}")
+
+    try:
+        from .dircache import cache as _dir_cache
+
+        for old, _new in moves:
+            _dir_cache.forget(old.parent)
+        if moves:
+            _dir_cache.forget(dest)
+    except Exception:  # noqa: BLE001 - 缓存失效失败不阻断移动结果
+        pass
+    settings["move_to_last_dir"] = str(dest)
+
+    if moved and not errors:
+        msg = t("fileops.move_done").format(n=moved, folder=dest.name or str(dest))
+    elif moved:
+        msg = t("fileops.move_partial").format(
+            done=moved, total=len(todo), err="; ".join(errors[:3])[:120])
+    elif errors:
+        msg = t("fileops.move_fail").format(err="; ".join(errors[:3])[:160])
+    else:
+        msg = ""  # 全部被跳过
+    return moved, msg, moves

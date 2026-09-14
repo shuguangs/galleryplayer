@@ -971,10 +971,20 @@ class PlaylistPanel(QWidget):
         act_rm.triggered.connect(self._remove_selected)
         menu.addAction(act_rm)
         if paths:
+            menu.addAction(t("panel.move_ellipsis")).triggered.connect(
+                lambda _=False, ps=tuple(paths): self._move(list(ps))
+            )
             menu.addAction(t("panel.recycle_ellipsis")).triggered.connect(
                 lambda _=False, ps=tuple(paths): self._recycle(list(ps))
             )
         menu.exec(self.list.viewport().mapToGlobal(pos))
+
+    def _move(self, paths: list[Path]) -> None:
+        """移动到…：统一走播放器入口（正在播放的文件要先停、移动后续播）。"""
+        viewer = self.parentWidget()
+        move_files = getattr(viewer, "move_files", None)
+        if callable(move_files):
+            move_files(paths)
 
     def _paths_for(self, rows) -> list[Path]:
         out = []

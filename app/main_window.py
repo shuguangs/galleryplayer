@@ -1946,6 +1946,9 @@ class MainWindow(QMainWindow):
                     self._open_thumbgrid_dialog([Path(p) for p in ps]))
         menu.addSeparator()
         menu.addAction(
+            t("main_window.multi_move").format(n=n)).triggered.connect(
+            lambda _=False, ps=tuple(paths): self._move_media(list(ps)))
+        menu.addAction(
             t("main_window.multi_recycle").format(n=n)).triggered.connect(
             lambda _=False, ps=tuple(paths): self._recycle_media(list(ps)))
         return menu
@@ -2014,6 +2017,9 @@ class MainWindow(QMainWindow):
             menu.addAction(t("main_window.rename")).triggered.connect(
                 lambda _=False, p=item.path: self._rename_media(p)
             )
+            menu.addAction(t("main_window.move_to")).triggered.connect(
+                lambda _=False, p=item.path: self._move_media([p])
+            )
             menu.addAction(t("main_window.recycle")).triggered.connect(
                 lambda _=False, p=item.path: self._recycle_media([p])
             )
@@ -2058,6 +2064,44 @@ class MainWindow(QMainWindow):
         if gone:
             self.all_items = [it for it in self.all_items if it.path not in gone]
             self._apply_view()
+
+    def _move_media(self, paths: list[Path]) -> None:
+        """移动到…：播放器开着就交给它（要先停正在播放的文件并续播），
+        否则直接移动 + 就地同步浏览列表。"""
+        if self.viewer is not None and self.viewer.isVisible():
+            self.viewer.move_files(paths)
+            return
+        moved, msg, moves = fileops.move_to(self, paths)
+        if msg:
+            self.status_count.setText(msg)
+        if not moved:
+            return
+        self._apply_file_moves(moves)
+
+    def _apply_file_moves(self, moves: list[tuple[Path, Path]]) -> None:
+        """把移动结果同步进浏览列表：同文件夹=改名原地保留，跨文件夹=移出。"""
+        moved_map = {old: new for old, new in moves}
+        for it in self.all_items:
+            new = moved_map.get(it.path)
+            if new is not None and new.parent == it.path.parent:
+                it.retarget(new)
+        gone = {old for old, new in moves if new.parent != old.parent}
+        if gone:
+            self.all_items = [it for it in self.all_items if it.path not in gone]
+        if moved_map:
+            self._apply_view()
+
+    def _on_viewer_files_moved(self, moves: list) -> None:
+        """播放器右键/面板触发的移动：同步浏览列表（dircache 已在 fileops 失效）。"""
+        self._apply_file_moves([(Path(o), Path(n)) for o, n in moves])
+
+    def _on_viewer_files_recycled(self, paths: list) -> None:
+        """播放器右键删除：浏览列表剔除（dircache 同步失效）。"""
+        for p in paths:
+            dircache.cache.forget(Path(p).parent)
+        gone = {Path(p) for p in paths}
+        self.all_items = [it for it in self.all_items if it.path not in gone]
+        self._apply_view()
 
     def _tree_menu(self, pos) -> None:
         if self.tree is None:
@@ -2540,6 +2584,9 @@ class MainWindow(QMainWindow):
             self.viewer.folder_requested.connect(self._on_panel_folder_requested)
             self.viewer.playlist_changed.connect(self._on_playlist_changed)
             self.viewer.sort_requested.connect(self._on_panel_sort_requested)
+            # 播放器里做的文件操作（移动/删除）回灌浏览列表
+            self.viewer.files_moved.connect(self._on_viewer_files_moved)
+            self.viewer.files_recycled.connect(self._on_viewer_files_recycled)
             # 起播即刻让路：信号在 loadfile 之前同步发出，让路措施在第一帧
             # 之前生效，而不是等 500ms 轮询看见 duration>0（实测晚 0.8-6.5s，
             # 面板填充/预热/归位正好在那段窗口里全速抢 GUI 线程）。

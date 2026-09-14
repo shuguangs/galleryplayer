@@ -105,9 +105,12 @@ class PortableEngineDirTests(unittest.TestCase):
 
         pipe = _config.find_subtitle_source_dir()
         real_python = self._old[1]                 # setUp 捕获的真解释器
+        # encoding 必须显式给：--help 含中文（UTF-8），text=True 默认走
+        # 控制台 GBK 解码，读线程直接 UnicodeDecodeError、stdout=None
         done = subprocess.run(
             [real_python, str(pipe / "install_engine.py"), "--help"],
             capture_output=True, timeout=30, text=True,
+            encoding="utf-8", errors="replace",
         )
         self.assertEqual(0, done.returncode, done.stderr)
         self.assertIn("--dir", done.stdout)
