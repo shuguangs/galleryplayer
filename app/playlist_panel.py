@@ -778,6 +778,17 @@ class MediaListWidget(QListWidget):
         self.invalidate_applied()   # 行序被用户改了：留档不再代表控件
         self.reordered.emit()
 
+    def wheelEvent(self, e):
+        """列表自己的滚轮：滚到边界也不上抛给父窗口。
+
+        QAbstractScrollArea 默认行为是"滚不动就 ignore"，事件随即冒泡到
+        父窗口——播放器里父窗口正是 Viewer，它的滚轮语义是「上一部 / 下一
+        部」：用户把文件列表拉到底再滚一下就跳片（实测 bug）。这里无条件
+        accept，滚不动就是滚不动。
+        """
+        super().wheelEvent(e)
+        e.accept()
+
     def keyPressEvent(self, e):
         if e.key() in (Qt.Key_Return, Qt.Key_Enter):
             idx = self.currentRow()
@@ -1617,6 +1628,36 @@ class PlaylistPanel(QWidget):
             fn(text)
 
     # ------------------------------------------------- left-edge resizing
+
+    def _page_scroll_widget(self):
+        """当前标签页里可滚动的控件（滚轮转发的目标）。"""
+        idx = self.stack.currentIndex()
+        if idx == 1:
+            return self.album_list
+        if idx == 2:
+            return getattr(self, "tree", None)   # 目录树懒建，可能还没建
+        return self.list
+
+    def wheelEvent(self, e):
+        """面板里漏下来的滚轮一律面板消化——绝不上抛给播放器。
+
+        列表/目录树滚到边界后 Qt 会把 wheelEvent ignore 掉，事件冒泡到父
+        窗口 Viewer，而它的滚轮语义是「上一部 / 下一部」（用户实测：文件列表
+        拉到底再滚一下就跳片）。这里把漏下来的滚轮转给当前页的滚动区，
+        并 accept 掉，顺带让"鼠标停在搜索框/标签栏上滚动"也能滚列表。
+        """
+        dy = e.angleDelta().y() or e.angleDelta().x()
+        target = self._page_scroll_widget()
+        if target is not None and dy:
+            try:
+                bar = target.verticalScrollBar()
+                per_pixel = (target.verticalScrollMode()
+                             == QAbstractItemView.ScrollPerPixel)
+                step = 60 if per_pixel else 3      # 逐像素=像素数，逐项=行数
+                bar.setValue(bar.value() + (-step if dy > 0 else step))
+            except Exception:  # noqa: BLE001 - 转发失败也必须吃掉事件
+                pass
+        e.accept()
 
     def mouseMoveEvent(self, e):
         if self._resizing:
