@@ -533,9 +533,12 @@ class Viewer(QWidget):
             self.video_view.clear_ab_loop()
             self._sync_ab_range()
             start = resume.lookup(item.path) if settings["resume_enabled"] else None
+            # 速度写 loadfile 之前：mpv 属性写是同步阻塞的，落在换片窗口里
+            # 要等核心处理完（实测 200ms~1.5s）；speed 是实例级属性，换片
+            # 不会重置，先写同样生效。set_speed 自身幂等，多半直接跳过。
+            self.video_view.set_speed(float(settings["speed"]))
             self.video_view.load(item.path, start)
             _slog.stage("viewer-play", "video_view.load 完成")
-            self.video_view.set_speed(float(settings["speed"]))
             if start:
                 self._show_toast(t("viewer.resume_playback").format(pos=format_duration(start)))
             if restart_live:

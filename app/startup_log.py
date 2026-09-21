@@ -129,19 +129,34 @@ def _install_stall_detector(app) -> None:
 
     白屏+未响应 = 事件循环不转：这条记录直接给出阻塞时长和发生时刻，
     与启动阶段打点对照即可定位卡在哪个阶段。
+
+    口径：**第一次心跳只建立基准，不报卡顿**。计时器在 QApplication 建好
+    时起动，而事件循环要等主窗口构造 + show 之后才跑——中间那段（模块
+    导入、界面构建）本来就不是"未响应"，算进去会把 3 秒的正常启动报成
+    5-7 秒卡顿（实测误导，用户看到的日志数字就是这么虚高的）。
     """
     from PySide6.QtCore import QTimer
 
-    last = {"t": time.perf_counter()}
+    last = {"t": None, "cpu": None}
     timer = QTimer(app)
     timer.setInterval(250)
 
     def tick():
         now = time.perf_counter()
+        cpu = time.process_time()
+        if last["t"] is None:
+            last["t"], last["cpu"] = now, cpu   # 首次：事件循环刚起来，建基准
+            return
         gap = now - last["t"]
         if gap > 1.0:
-            stage("gui-stall", f"GUI 线程阻塞 {gap:.1f}s")
-        last["t"] = now
+            # 进程 CPU 时间 vs 墙钟：≈ 说明是别的线程在烧 CPU（解码/扫描抢
+            # GIL，GUI 被饿死）；远小于说明 GUI 线程自己卡在系统调用上
+            # （阻塞 I/O、锁、mpv 同步属性写）。这两种修法完全不同，必须分开。
+            cpu_gap = cpu - last["cpu"]
+            stage("gui-stall",
+                  f"GUI 线程阻塞 {gap:.1f}s（进程 CPU {cpu_gap:.1f}s，"
+                  f"线程 {threading.active_count()}）")
+        last["t"], last["cpu"] = now, cpu
 
     timer.timeout.connect(tick)
     timer.start()

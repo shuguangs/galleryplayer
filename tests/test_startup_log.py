@@ -61,11 +61,43 @@ class StartupLogTests(unittest.TestCase):
             time.sleep(1.4)               # GUI 线程阻塞（QTimer 冻结）
             QTimer.singleShot(0, app.quit)  # 回事件循环让心跳 tick 记录 gap
 
-        QTimer.singleShot(50, block_then_quit)
+        # 先让心跳跑起来（首 tick 只建基准，见下一条测试），再阻塞
+        QTimer.singleShot(700, block_then_quit)
         app.exec()
         logs = list((self.tmp / "logs").glob("startup_*.log"))
         content = logs[0].read_text(encoding="utf-8")
         self.assertIn("gui-stall", content, "卡顿检测必须记录 GUI 线程阻塞")
+        # 卡顿条目必须带上"进程 CPU 时间 / 线程数"：用来区分 GUI 真被阻塞，
+        # 还是被后台线程抢 GIL 饿死（两者修法完全不同）
+        stall_line = next(ln for ln in content.splitlines()
+                          if "gui-stall" in ln)
+        self.assertIn("进程 CPU", stall_line)
+        self.assertIn("线程", stall_line)
+
+    def test_first_tick_only_establishes_baseline(self):
+        """事件循环起来之前那段（模块导入/界面构建）不是"未响应"。
+
+        计时器在 QApplication 建好时就起动，事件循环却要等主窗口构造 +
+        show 之后才跑；把这段算进 gap 会把 3 秒的正常启动报成 5-7 秒
+        卡顿——用户日志里那些虚高的数字就是这么来的。
+        """
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QApplication
+
+        app = QApplication.instance() or QApplication([])
+        self.slog.begin()
+        self.slog.attach(app)
+
+        def straight_to_quit():
+            QTimer.singleShot(0, app.quit)
+
+        # 起动后立刻退出：只有"首次建基准"这一次心跳，不该报卡顿
+        QTimer.singleShot(30, straight_to_quit)
+        app.exec()
+        logs = list((self.tmp / "logs").glob("startup_*.log"))
+        content = logs[0].read_text(encoding="utf-8")
+        self.assertNotIn("gui-stall", content,
+                         "事件循环启动前的耗时不该被报成 GUI 卡顿")
 
     def test_prune_keeps_only_recent(self):
         self.slog.begin()

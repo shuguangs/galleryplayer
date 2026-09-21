@@ -2199,8 +2199,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(t("main_window.title_with_folder").format(folder=folder.name or str(folder)))
         if not quiet:
             self._show_browser()
+        startup_log.stage("set-folder", "界面切换完成")
         self._remember_recent(folder)
         self._sync_tree(folder)
+        # 细分打点：set-folder 到首条扫描批次之间的空档曾是盲区（实测
+        # 0.7s 无日志），这三步是唯一在 GUI 线程同步做的重活
+        startup_log.stage("set-folder", "目录树同步完成")
 
         recursive = self.btn_recursive.isChecked()
         self._scan_token += 1
@@ -2216,6 +2220,7 @@ class MainWindow(QMainWindow):
         self.all_items = []
         self.model.set_items([])
         self.status_count.setText(t("main_window.scanning"))
+        startup_log.stage("set-folder", "已提交扫描任务（后续在后台线程）")
 
         # One task, two phases: rebuild from cache with zero filesystem I/O so a folder
         # opened before is on screen at once, then the authoritative level-order pass in

@@ -65,6 +65,14 @@ class MpvWidget(QOpenGLWidget):
         self._observers: list[tuple[str, object]] = []
         self._event_callbacks: list[object] = []
         self._pending_seek: float | None = None
+        # mpv 属性写是同步阻塞的（空闲 0.02ms，换片窗口内可达 1.5s）：缓存
+        # 已下发的值，值没变就不再写，避免每次都撞进 loadfile 的忙碌窗口
+        self._cache_mode: str | None = None
+        self._pause_intent: bool | None = None
+        self._speed_intent: float | None = None
+        # A-B 标记"我们写过什么"：换片清空时据此跳过无谓的同步属性写
+        self._ab_a_set = False
+        self._ab_b_set = False
         # 有片子在手（loadfile 起播即真，stop() 归假）。判"在播"用它 +
         # paused，而不是 duration>0——duration 要等解复用完成才有值。
         self.media_loaded = False
@@ -127,8 +135,8 @@ class MpvWidget(QOpenGLWidget):
 
         observe("time-pos", lambda v: self.position_changed.emit(float(v)) if v is not None else None)
         observe("duration", lambda v: self.duration_changed.emit(float(v)) if v else None)
-        observe("pause", lambda v: self.pause_changed.emit(bool(v)))
-        observe("speed", lambda v: self.speed_changed.emit(float(v)) if v else None)
+        observe("pause", self._on_pause_observed)
+        observe("speed", self._on_speed_observed)
         observe("volume", lambda v: self.volume_changed.emit(float(v)) if v is not None else None)
         observe("mute", lambda v: self.mute_changed.emit(bool(v)))
         observe("demuxer-cache-time", lambda v: self.cache_changed.emit(float(v)) if v else None)
@@ -169,6 +177,18 @@ class MpvWidget(QOpenGLWidget):
                     pass
 
         self._event_callbacks = [_loaded, _end]
+
+    def _on_pause_observed(self, value) -> None:
+        """mpv 回报的暂停状态：同步 intent，避免 EOF/keep_open 自动暂停后
+        我们以为"已经是 False"而漏写（下次 load 就不会自动播了）。"""
+        self._pause_intent = bool(value)
+        self.pause_changed.emit(bool(value))
+
+    def _on_speed_observed(self, value) -> None:
+        if not value:
+            return
+        self._speed_intent = float(value)
+        self.speed_changed.emit(float(value))
 
     def _on_track_list(self, raw) -> None:
         try:
@@ -227,18 +247,27 @@ class MpvWidget(QOpenGLWidget):
     REMOTE_CACHE = {"demuxer-max-bytes": "192MiB", "cache-secs": "60", "demuxer-readahead-secs": "30"}
 
     def load(self, path: str | Path, start_at: float | None = None) -> None:
-        for key, value in (self.REMOTE_CACHE if netpath.is_remote(path) else self.LOCAL_CACHE).items():
-            try:
-                self.mpv[key] = value
-            except Exception:
-                pass
+        # 缓存档位只在切换时才写：这三项是实例级属性，mpv 换片不会重置。
+        # 每次换片重写会正好落在 loadfile 前后的核心忙碌窗口里——实测
+        # 单次属性写空闲 0.02ms、换片窗口内 200ms~1.5s（切片卡顿主因）。
+        mode = "remote" if netpath.is_remote(path) else "local"
+        if mode != self._cache_mode:
+            for key, value in (self.REMOTE_CACHE if mode == "remote"
+                               else self.LOCAL_CACHE).items():
+                try:
+                    self.mpv[key] = value
+                except Exception:
+                    pass
+            self._cache_mode = mode
         self._pending_seek = float(start_at) if (start_at and start_at > 1) else None
         self.media_loaded = True
         # 先让路、再下发：信号是同步的，接收方（后台加载让路）在 loadfile
         # 之前就已生效，第一帧不用跟三十万行的填充抢 GUI 线程。
         self.playback_starting.emit()
         self.mpv.loadfile(str(path), "replace")
-        self.mpv.pause = False
+        if self._pause_intent is not False:
+            self.mpv.pause = False
+            self._pause_intent = False
 
     def stop(self) -> None:
         self.media_loaded = False
@@ -248,10 +277,17 @@ class MpvWidget(QOpenGLWidget):
             pass
 
     def toggle_pause(self) -> None:
-        self.mpv.pause = not bool(self.mpv.pause)
+        current = (self._pause_intent if self._pause_intent is not None
+                   else bool(self.mpv.pause))
+        self.set_pause(not current)
 
     def set_pause(self, value: bool) -> None:
-        self.mpv.pause = bool(value)
+        value = bool(value)
+        # 幂等：值没变不写（换片窗口内的同步写会阻塞）
+        if self._pause_intent == value:
+            return
+        self.mpv.pause = value
+        self._pause_intent = value
 
     @property
     def paused(self) -> bool:
@@ -278,8 +314,12 @@ class MpvWidget(QOpenGLWidget):
             pass
 
     def set_speed(self, value: float) -> None:
-        self.mpv.speed = max(0.1, min(8.0, value))
-        settings["speed"] = float(self.mpv.speed)
+        value = max(0.1, min(8.0, value))
+        # 幂等 + 不读回：读回也是一次同步属性访问，在同一忙碌窗口里同样阻塞
+        if self._speed_intent != value:
+            self.mpv.speed = value
+            self._speed_intent = value
+        settings["speed"] = value
 
     # ------------------------------------------------------- aspect ratio
 
@@ -533,14 +573,27 @@ class MpvWidget(QOpenGLWidget):
         try:
             self.mpv[prop] = "no" if pos is None else float(pos)
         except Exception:
-            pass
+            return
+        if which == "a":
+            self._ab_a_set = pos is not None
+        else:
+            self._ab_b_set = pos is not None
 
     def clear_ab_loop(self) -> None:
+        """清空 A-B 标记（幂等：没设过就不写）。
+
+        这两个属性写会在每次换片时落在 loadfile 前后的核心忙碌窗口里
+        （实测单次同步属性写可达 200ms+）；绝大多数用户从不设 A-B，
+        这里跳过即可省掉两次无谓阻塞。
+        """
+        if not (self._ab_a_set or self._ab_b_set):
+            return
         for prop in ("ab-loop-a", "ab-loop-b"):
             try:
                 self.mpv[prop] = "no"
             except Exception:
                 pass
+        self._ab_a_set = self._ab_b_set = False
 
     def frame_step(self, back: bool = False) -> None:
         """Advance (or rewind) exactly one frame; mpv pauses as a side effect."""

@@ -247,6 +247,7 @@ class MediaListWidget(QListWidget):
     IMMEDIATE_MAX = 4000       # 立即窗口上限（约 80ms）
     CHUNK_ROWS = 1000          # 后台块起始行数（超时会自适应减半）
     CHUNK_MIN_ROWS = 250       # 自适应下限
+    REPLACE_ROWS = 400         # 替换阶段的初始移除批量（比追加更贵，起步压小）
     CHUNK_SLOW_ROWS = 250      # 播放中每块上限（GUI 线程要先喂 mpv 画面）
     CHUNK_SLOW_MS = 150        # 单块超过这个时长 → 下块行数减半
     CHUNK_INTERVAL_MS = 40
@@ -501,9 +502,15 @@ class MediaListWidget(QListWidget):
             t0 = _time.perf_counter()
             target = max(0, self.count() - self._chunk_rows)
             # 尾部移除是 O(1) 级操作：一批一批把旧行请出去，GUI 每块之间
-            # 照常处理事件，绝无未响应
-            while self.count() > target:
-                self.takeItem(self.count() - 1)
+            # 照常处理事件。**必须关视图更新**：不关的话每次 takeItem 都
+            # 触发一次布局重算，首批 1000 行实测 1.6s 冻结（新口径
+            # gui-stall 抓到的就是这条；追加路径一直有关，移除路径漏了）。
+            self.setUpdatesEnabled(False)
+            try:
+                while self.count() > target:
+                    self.takeItem(self.count() - 1)
+            finally:
+                self.setUpdatesEnabled(True)
             elapsed_ms = (_time.perf_counter() - t0) * 1000
             if elapsed_ms > self.CHUNK_SLOW_MS and self._chunk_rows > self.CHUNK_MIN_ROWS:
                 self._chunk_rows = self._chunk_rows // 2
@@ -708,6 +715,9 @@ class MediaListWidget(QListWidget):
             self._fill_source = []
             self._fill_pos = 0
             self._scroll_pending_row = -1
+            # 移除批比追加批更贵（每行都要重整行高表）：起步就压小，
+            # 超时的自适应减半再兜底
+            self._chunk_rows = min(self._chunk_rows, self.REPLACE_ROWS)
             self.setDragDropMode(QAbstractItemView.NoDragDrop)
             self._fill_timer.start(self._chunk_interval())
             return
