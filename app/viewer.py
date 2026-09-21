@@ -2310,7 +2310,7 @@ class Viewer(QWidget):
                 # task_running 门禁：引擎任务在途（人声降噪 ~45s/15min 片 或
                 # 转写中）时严禁追赶重启——降噪期间无行产出，前沿恒 0，旧逻辑
                 # 8 秒即顶掉在途任务，新任务又从头降噪又被顶，死循环风暴
-                #（实测 Nyles 15 分钟片反复重启 6+ 轮零产出）。
+                #（实测 15 分钟长片反复重启 6+ 轮零产出）。
                 if rows and pos > front + 5.0 \
                         and not self._live_ctl.task_running:
                     if front != getattr(self, "_live_catch_front", None):

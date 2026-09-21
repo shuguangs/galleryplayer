@@ -6,19 +6,15 @@
 
 ## 0. 项目迁移状态（重要）
 
-工程已从 `G:\播放器`（USB 机械盘，顺序读仅 19.5MB/s，所有"卡顿"的根源）整体迁移到
-`J:\播放器`（SSD）。**源码中已无任何写死的盘符路径**——引擎定位是
+工程已从一块 USB 机械盘（顺序读仅 19.5MB/s，所有"卡顿"的根源）整体迁移到
+SSD。**源码中已无任何写死的盘符路径**——引擎定位是
 `app/config.py:find_subtitle_pipeline_dir()`（用户设置 → 工程同级 live-subtitle/ →
 环境变量 LIVE_SUBTITLE_DIR）。
 
-- 两个 git 仓库：主仓库 `J:\播放器` + 引擎仓库 `J:\播放器\live-subtitle`（独立 .git）。
+- 两个 git 仓库：主仓库 + `live-subtitle/`（引擎，独立 .git）。
   改引擎代码要分别在两个仓库提交。
-- 待办：git 提交当时被 Mimosa 插件的项目路径失配拦截（详见 GIT_COMMIT_INFO.md），
-  改动全部在暂存区，提交信息已写好在 `J:\播放器\GIT_COMMIT_INFO.md`。
-- 旧 `G:\播放器` 目录（48GB）确认无误后可删。
-- dist 最新包：`J:\播放器\dist\媒体播放器\媒体播放器.exe`（254MB，
-  `python build.py` 重新生成；打包前必须关掉 dist 里正在运行的播放器，否则锁
-  libmpv-2.dll）。
+- dist 包用 `python build.py` 重新生成；打包前必须关掉 dist 里正在运行的
+  播放器，否则锁 libmpv-2.dll。
 
 ## 1. 总体数据流
 
@@ -80,7 +76,7 @@ live-caption.log 的 JSON 行：{"g": 代次, "t": 起, "end": 止, "text": 原�
    `nvidia-cudnn-cu12`，torch 自带 cu13 cuDNN；混入报
    `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`。三个入口脚本都按引擎条件注入
    （`live_transcribe.py` main 开头 / `live_capture.py` / `app/viewer.py` 启动子进程的 env 构造处）——**加新引擎时记得这个条件**。
-3. **中文路径**：funasr/sentencepiece 读不了含中文的模型路径（J:\播放器 本身含中文）
+3. **中文路径**：funasr/sentencepiece 读不了含中文的模型路径（安装目录含中文就会中招）
    → `asr_engines._ascii_junction` 自动建 NTFS junction 到 LOCALAPPDATA；
    qwen-asr 的对齐依赖 nagisa 同样失败 → `stub_nagisa` 垫桩（识别不受影响）。
 4. **MoE 模型（HY-MT2-30B）在机械盘上完全不可用**（随机读专家权重）；

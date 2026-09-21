@@ -6,7 +6,7 @@
 os.path.islink() 都返回 False——旧代码据此跳过删除，紧接着 mklink 报"已
 存在"，函数回退中文路径，SenseVoice 从此永久加载失败：
 
-    RuntimeError: NOT_FOUND: "J:\\播放器\\...\\chn_jpn_yue_eng_ko_spectok.bpe.model"
+    RuntimeError: NOT_FOUND: "D:\\中文目录\\...\\chn_jpn_yue_eng_ko_spectok.bpe.model"
 
 修法：os.lstat 才认得悬空 junction（_remove_link）；链接名带源路径哈希，
 多份安装不再抢同一个名字；每次都校验 realpath 指向，悬空/指错就重建。
@@ -35,7 +35,7 @@ def _link_for(src: Path) -> Path:
 class AsciiJunctionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="junction-"))
-        # 中文源目录（复刻 J:\播放器\... 的处境）
+        # 中文源目录（复刻"程序装在中文目录下"的处境）
         self.src = self.tmp / "播放器测试" / "iic--SenseVoiceSmall"
         self.src.mkdir(parents=True)
         (self.src / "model.pt").write_bytes(b"x")

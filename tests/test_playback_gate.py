@@ -38,7 +38,7 @@ from app.media import MediaItem
 
 
 def _items(n: int) -> list[MediaItem]:
-    return [MediaItem(path=Path(f"I:/tgdl/x_{i:06d}.mp4"), is_video=True,
+    return [MediaItem(path=Path(f"I:/media/x_{i:06d}.mp4"), is_video=True,
                       size=1, mtime=0.0, is_archive=False)
             for i in range(n)]
 

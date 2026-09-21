@@ -39,12 +39,12 @@ from app.thumbs import WARMUP_PRIO, ThumbnailCache
 
 
 def _vitem(name: str) -> MediaItem:
-    return MediaItem(path=Path(f"I:/tgdl/{name}.mp4"), is_video=True,
+    return MediaItem(path=Path(f"I:/media/{name}.mp4"), is_video=True,
                      size=1, mtime=0.0, is_archive=False)
 
 
 def _iitem(name: str) -> MediaItem:
-    return MediaItem(path=Path(f"I:/tgdl/{name}.jpg"), is_video=False,
+    return MediaItem(path=Path(f"I:/media/{name}.jpg"), is_video=False,
                      size=1, mtime=0.0, is_archive=False)
 
 
