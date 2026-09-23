@@ -194,6 +194,73 @@ class ContainerOffsetDecodeTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_av_available() and _ffmpeg(), "需要 av 与系统 ffmpeg")
+class CoarseSeekContainerTests(unittest.TestCase):
+    """容器 seek 落点远早于目标（ASF/WMV 实测早 5~17 秒）时，seek 解码的
+    缓冲区样本 0 仍必须对应请求的 seek 时刻。
+
+    回归点：旧实现按臆想的 (seek-2s) 起点裁剪，WMV 上多解的几秒全留在缓冲区，
+    拖进度条后所有实时字幕整体推迟 ~8s（用户实测"时间戳错位"）。
+    """
+
+    BEEP_AT = 33.0
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+
+        cls._td = tempfile.TemporaryDirectory()
+        cls.wmv = Path(cls._td.name) / "beep.wmv"
+        subprocess.run([
+            _ffmpeg(), "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc=size=160x120:rate=25:duration=60",
+            "-f", "lavfi", "-i",
+            f"aevalsrc='if(between(t,{cls.BEEP_AT},{cls.BEEP_AT + 0.5}),"
+            f"0.8*sin(2*PI*1000*t),0)':s=44100:d=60",
+            "-c:v", "wmv2", "-g", "250", "-c:a", "wmav2", "-b:a", "64k",
+            str(cls.wmv)], check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._td.cleanup()
+
+    def _beep_media_time(self, seek: float) -> float:
+        import numpy as np
+
+        from live_transcribe import _decode_audio_from
+
+        audio = _decode_audio_from(str(self.wmv), seek,
+                                   max_seconds=float("inf"),
+                                   should_cancel=lambda: False)
+        hop = 160
+        energy = np.array([np.abs(audio[i:i + hop]).mean()
+                           for i in range(0, len(audio) - hop, hop)])
+        self.assertTrue((energy > 0.1).any(), "缓冲区里找不到提示音")
+        return seek + int(np.argmax(energy > 0.1)) * hop / 16000.0
+
+    def test_container_seek_is_actually_coarse(self):
+        """前提自检：这个夹具确实能复现"容器 seek 早落"——否则下面的
+        断言对旧实现也会通过，测试形同虚设。"""
+        import av
+
+        with av.open(str(self.wmv)) as c:
+            a = c.streams.audio[0]
+            c.seek(int(28.0 / float(a.time_base)), stream=a)
+            first = next(fr for fr in c.decode(a) if fr.pts is not None)
+            landed = float(first.pts * a.time_base)
+        self.assertLess(landed, 27.0, "夹具未复现粗粒度 seek，测试失效")
+
+    def test_seek_buffer_aligned_to_media_time(self):
+        for seek in (10.0, 30.0):
+            with self.subTest(seek=seek):
+                self.assertAlmostEqual(self._beep_media_time(seek),
+                                       self.BEEP_AT, delta=0.15)
+
+    def test_seek_zero_unchanged(self):
+        self.assertAlmostEqual(self._beep_media_time(0.0),
+                               self.BEEP_AT, delta=0.15)
+
+
+@unittest.skipUnless(_av_available() and _ffmpeg(), "需要 av 与系统 ffmpeg")
 class ContainerOffsetVadTests(unittest.TestCase):
     """端到端：VAD 时间戳 + 容器偏移 = 媒体时间（本地回归，CI 自动跳过）。
 

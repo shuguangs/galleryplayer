@@ -158,7 +158,19 @@ def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0,
         )
         tb = float(audio_stream.time_base or av.time_base)
         container.seek(int(start_seconds / tb), stream=audio_stream)
-        frames = container.decode(audio_stream)
+        # 容器 seek 只保证落在目标"之前"的某个可解码点，不保证落在目标上：
+        # ASF/WMV 实测早 5~17 秒（MP4/MOV 几十毫秒）。记下真正解出的首帧
+        # 媒体时间，裁剪按它算——按臆想的 start_seconds 算会把多解的那几秒
+        # 留在缓冲区里，seek 后所有字幕整体推迟（WMV 拖进度条后晚 ~8s）。
+        first_pts: list[float] = []
+
+        def _track_first(src):
+            for fr in src:
+                if not first_pts and fr.pts is not None:
+                    first_pts.append(float(fr.pts * audio_stream.time_base))
+                yield fr
+
+        frames = _track_first(container.decode(audio_stream))
         frames = _ignore_invalid_frames(frames)
         frames = _group_frames(frames, 500000)
         frames = _resample_frames(frames, resampler)
@@ -182,10 +194,17 @@ def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0,
     # 裁剪前导：解码实际从 max(start_seconds, first_media) 起（见上 first_media），
     # 而非臆想的 start_seconds——否则首帧晚于 start_seconds 时会多裁掉缓冲区内
     # 的真实音频，且把返回结果错标成"从 seek 起"。
-    actual_start = max(start_seconds, first_media)
+    # 优先用真正解出的首帧时间（容器 seek 落点不精确，见上 _track_first）。
+    actual_start = first_pts[0] if first_pts else max(start_seconds, first_media)
     keep_from = int((seek - actual_start) * 16000)
     if keep_from > 0:
         audio = audio[keep_from:]
+    else:
+        # 落点反而晚于约定起点（调用方按 max(seek, 首帧) 标注缓冲区起点）：
+        # 补静音对齐，保证"缓冲区样本 0 = 约定起点"这条契约恒成立
+        lag = int((actual_start - max(seek, first_media)) * 16000)
+        if lag > 0:
+            audio = np.concatenate([np.zeros(lag, dtype=np.float32), audio])
     return audio
 
 
