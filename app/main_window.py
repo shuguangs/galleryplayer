@@ -2973,7 +2973,8 @@ class MainWindow(QMainWindow):
             box.setWindowTitle(t("viewer.live_caption_quit_title"))
             box.setText(t("viewer.live_caption_quit_text").format(
                 model=live_engine.model_label(),
-                vram=f"{live_engine.vram_footprint_gb(include_translate=False):g}GB",
+                # 关闭会连 Ollama 一起关，翻译模型的显存也算进去
+                vram=f"{live_engine.vram_footprint_gb(include_translate=True):g}GB",
             ))
             box.setIcon(QMessageBox.Question)
             keep_btn = box.addButton(
@@ -2993,6 +2994,8 @@ class MainWindow(QMainWindow):
                 return
             if clicked is stop_btn:
                 live_engine.kill()
+                # 翻译模型在独立的 Ollama 服务里，不关它显存释放不了
+                live_engine.stop_ollama()
 
         self._save_state()
         self._save_scroll_positions()

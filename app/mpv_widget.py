@@ -88,7 +88,8 @@ class MpvWidget(QOpenGLWidget):
             input_vo_keyboard="no",
             load_scripts="no",
             hr_seek="yes",
-            volume=float(settings["volume"]),
+            # 旧版上限 150，设置里可能存着 >130 的值
+            volume=float(max(0, min(130, int(settings["volume"])))),
             mute="yes" if settings["muted"] else "no",
             **{
                 "sub-auto": "fuzzy",
@@ -371,7 +372,9 @@ class MpvWidget(QOpenGLWidget):
         return float(self.mpv.speed or 1.0)
 
     def set_volume(self, value: float) -> None:
-        v = max(0.0, min(150.0, value))
+        from .volume_policy import BOOST_MAX
+
+        v = max(0.0, min(float(BOOST_MAX), value))
         self.mpv.volume = v
         settings["volume"] = int(v)
 

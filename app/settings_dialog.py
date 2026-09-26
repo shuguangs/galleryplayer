@@ -512,9 +512,10 @@ class SettingsDialog(QDialog):
         # ---- 音量 / 字幕
         root.addWidget(_section(t("settings.section_volume")))
         self.sl_volume = QSlider(Qt.Horizontal)
-        self.sl_volume.setRange(0, 130)
+        # 与播放器滑块一致：拖动只到 100%，放大只能在播放时按键盘 ↑
+        self.sl_volume.setRange(0, 100)
         self.sl_volume.setFixedWidth(180)
-        self.sl_volume.setValue(int(settings["volume"]))
+        self.sl_volume.setValue(min(100, int(settings["volume"])))
         self.lab_volume = QLabel(t("settings.volume_pct").format(v=int(settings['volume'])))
         self.sl_volume.valueChanged.connect(self._on_volume)
         vol_box = QWidget()

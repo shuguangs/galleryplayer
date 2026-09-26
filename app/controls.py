@@ -375,11 +375,14 @@ class ControlBar(QWidget):
         row.addWidget(self.btn_mute)
         self.vid_widgets.append(self.btn_mute)
 
+        from .volume_policy import MOUSE_MAX
+
         self.vol = QSlider(Qt.Horizontal)
         self.vol.setObjectName("OverlaySlider")
-        self.vol.setRange(0, 130)
+        # 滑块只管 0~100%；100% 以上的放大只能用键盘 ↑（见 volume_policy）
+        self.vol.setRange(0, MOUSE_MAX)
         self.vol.setFixedWidth(96)
-        self.vol.setToolTip(t("controls.volume_tip"))
+        self._update_volume_tip(int(settings["volume"]))
         self.vol.setFocusPolicy(Qt.NoFocus)
         self.vol.valueChanged.connect(self.volume_selected)
         row.addWidget(self.vol)
@@ -735,10 +738,19 @@ class ControlBar(QWidget):
         for s, act in self._speed_actions.items():
             act.setChecked(abs(s - speed) < 1e-6)
 
+    def _update_volume_tip(self, vol: int) -> None:
+        from .volume_policy import BOOST_MAX, MOUSE_MAX
+
+        key = "controls.volume_tip_boosted" if vol > MOUSE_MAX else "controls.volume_tip"
+        self.vol.setToolTip(t(key).format(v=int(vol), max=BOOST_MAX))
+
     def set_volume(self, vol: int, muted: bool) -> None:
+        # 放大区（>100%）时滑块停在最右端；blockSignals 保证这次同步不会
+        # 回写成 100%（否则一显示就把放大的音量压回去）
         self.vol.blockSignals(True)
-        self.vol.setValue(int(vol))
+        self.vol.setValue(min(int(vol), self.vol.maximum()))
         self.vol.blockSignals(False)
+        self._update_volume_tip(int(vol))
         self.btn_mute.setText(
             icons.MUTE if muted or vol == 0 else (icons.VOLUME_LOW if vol < 55 else icons.VOLUME)
         )

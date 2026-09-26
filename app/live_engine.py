@@ -308,6 +308,72 @@ def kill() -> None:
         pass
 
 
+def _ollama_install_dirs() -> list[Path]:
+    import os
+
+    dirs = [Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama",
+            Path(os.environ.get("ProgramFiles", "")) / "Ollama"]
+    return [d for d in dirs if str(d) not in ("Programs\\Ollama", "Ollama")]
+
+
+def stop_ollama() -> int:
+    """关掉 Ollama（服务 + 模型 runner + 托盘程序），释放翻译模型占的显存。
+
+    翻译走独立的 Ollama 服务，引擎进程树里没有它，kill() 收不到。
+    不用 `ollama stop`/`ollama ps`：服务没起时这些 CLI 会一直挂着不返回，
+    退出流程会被卡死。按进程名 + 安装目录直接收，目录外的同名进程不碰。
+    返回结束的进程数。
+    """
+    try:
+        import psutil
+    except ImportError:
+        return 0
+    roots = [str(d).lower().rstrip("\\") + "\\" for d in _ollama_install_dirs()]
+    targets = []
+    seen: set[int] = set()
+
+    def _add(p) -> None:
+        if p.pid not in seen:
+            seen.add(p.pid)
+            targets.append(p)
+
+    for proc in psutil.process_iter(["pid", "name", "exe"]):
+        try:
+            name = (proc.info.get("name") or "").lower()
+            exe = (proc.info.get("exe") or "").lower()
+        except Exception:
+            continue
+        # 模型实际跑在 lib\ollama\llama-server.exe（ollama.exe 的子进程）里。
+        # 只杀 ollama.exe 会留下孤儿 runner，显存一点不降（实测 5.4GB）
+        if name not in ("ollama.exe", "ollama app.exe", "llama-server.exe"):
+            continue
+        if not any(exe.startswith(r) for r in roots):
+            continue
+        _add(proc)
+        # 兜底：runner 的 exe 拿不到时（权限等）经父进程的子进程树收
+        try:
+            for child in proc.children(recursive=True):
+                _add(child)
+        except Exception:
+            pass
+    # 托盘程序会在服务退出后自动重拉服务，先收它
+    def _is_tray(p) -> bool:
+        info = getattr(p, "info", None) or {}
+        return (info.get("name") or "").lower() == "ollama app.exe"
+
+    targets.sort(key=lambda p: 0 if _is_tray(p) else 1)
+    for proc in targets:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        psutil.wait_procs(targets, timeout=3)
+    except Exception:
+        pass
+    return len(targets)
+
+
 def start_preload() -> bool:
     """Start one background engine; the UI never waits for the model."""
     global _last_spawn_at

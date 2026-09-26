@@ -1043,9 +1043,18 @@ class Viewer(QWidget):
         self.controls.set_sub_visible(visible)
         self._live_saved_sub_visible = None
 
-    def _adjust_volume(self, delta: int) -> None:
-        self.video_view.set_volume(self.video_view.volume + delta)
-        self._show_toast(t("viewer.volume_toast").format(volume=int(self.video_view.volume)))
+    def _adjust_volume(self, delta: int, keyboard: bool = False) -> None:
+        """keyboard=True（↑/↓）可进入 100%~130% 放大区；滚轮封顶 100%。"""
+        from . import volume_policy as vp
+
+        before = int(round(self.video_view.volume))
+        self.video_view.set_volume(vp.step(before, delta, keyboard=keyboard))
+        vol = int(round(self.video_view.volume))
+        text = t("viewer.volume_toast").format(volume=vol)
+        if not keyboard and delta > 0 and before >= vp.MOUSE_MAX:
+            # 滚轮已到 100%：提示放大要用键盘
+            text += t("viewer.volume_toast_boost_hint").format(max=vp.BOOST_MAX)
+        self._show_toast(text)
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
@@ -2637,10 +2646,10 @@ class Viewer(QWidget):
                 self._show_bars()
                 return
             if k == Qt.Key_Up:
-                self._adjust_volume(5)
+                self._adjust_volume(5, keyboard=True)
                 return
             if k == Qt.Key_Down:
-                self._adjust_volume(-5)
+                self._adjust_volume(-5, keyboard=True)
                 return
             if k == Qt.Key_Home:
                 self._seek_absolute(0)
