@@ -432,6 +432,8 @@ _TR: dict[str, dict[str, str]] = {
     "settings.autoplay_label": {"zh": "一个视频播完自动接着下一个", "en": "Auto-play the next video when one ends"},
     "settings.native_size_label": {"zh": "打开视频时按原始分辨率调整窗口（而不是最大化）", "en": "Fit the window to the video's native resolution (instead of maximizing)"},
     "settings.remember_scroll_label": {"zh": "切换回之前的文件夹时恢复滚动位置", "en": "Restore scroll position when returning to a folder"},
+    "settings.remote_video_thumbs_label": {"zh": "网络盘生成视频缩略图（只生成屏幕上看得到的）", "en": "Video thumbnails on network drives (visible ones only)"},
+    "settings.remote_video_thumbs_tip": {"zh": "包括 RaiDrive、CloudDrive 等挂载成本地盘符的网盘。每张视频缩略图约消耗 80~100MB 网盘流量；关闭后网络盘上的视频不生成缩略图，图片不受影响。", "en": "Includes cloud drives mounted as drive letters (RaiDrive, CloudDrive, ...). Each video thumbnail costs roughly 80-100 MB of transfer; turn off to skip video thumbnails on network drives. Images are unaffected."},
     "settings.hwdec_label": {"zh": "默认解码模式", "en": "Default decode mode"},
     "settings.next_video_hint": {"zh": "下个视频生效", "en": "Applies to the next video"},
     "settings.section_volume": {"zh": "音量 · 字幕", "en": "Volume · Subtitles"},

@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import dircache, fileops, icons, media, theme
+from . import dircache, fileops, icons, media, netpath, theme
 from .albums import albums, orders
 from .browser import DetailsView, MediaModel, TileView
 from .config import flush, settings
@@ -2550,6 +2550,10 @@ class MainWindow(QMainWindow):
             # 播放让路期间跳过视频项：request 会拒收它们（不入队），但
             # submitted 计数照加会把水位空烧在无效提交上，饿死图片预热
             if it.is_video and self._playback_active:
+                continue
+            # 网络盘视频不做预热（request 同样会拒收，见 _remote_video_blocked）：
+            # 这里先跳过，免得空提交把水位烧光、饿死同夹图片的预热
+            if it.is_video and netpath.is_remote(it.path):
                 continue
             # request 返回 None=已提交解码/已排队；返回 QImage=内存命中
             # （无需处理）。磁盘缓存命中走 request 内部的 _load_from_disk

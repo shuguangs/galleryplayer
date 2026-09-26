@@ -492,6 +492,13 @@ class SettingsDialog(QDialog):
         self.cb_scroll.toggled.connect(lambda v: self._set("remember_scroll", v))
         root.addWidget(self.cb_scroll)
 
+        self.cb_remote_thumbs = _WrapCheckBox(t("settings.remote_video_thumbs_label"))
+        self.cb_remote_thumbs.setToolTip(t("settings.remote_video_thumbs_tip"))
+        self.cb_remote_thumbs.setChecked(bool(settings["remote_video_thumbs"]))
+        self.cb_remote_thumbs.toggled.connect(
+            lambda v: self._set("remote_video_thumbs", v))
+        root.addWidget(self.cb_remote_thumbs)
+
         self.combo_hwdec = QComboBox()
         for value, key in _HWDEC_CHOICES:
             self.combo_hwdec.addItem(t(key), value)

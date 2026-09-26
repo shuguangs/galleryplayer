@@ -48,6 +48,9 @@ DEFAULTS: dict[str, Any] = {
     "gif_max_width": 480,           # GIF 缩放到的最大宽度（px）
     "capture_path": "",                # 截图/GIF 保存目录（空=自动：视频所在文件夹，不行则 exe 旁）
     "remember_scroll": True,           # 切换回之前访问过的文件夹时恢复滚动位置
+    # 网络盘（含 RaiDrive/CloudDrive 挂载）视频缩略图：开=只抓屏幕上看得到的
+    #（不整夹预热）；关=一张都不抓（每张实测耗 80~100MB 网盘流量）
+    "remote_video_thumbs": True,
     "language": "",                    # ""=未选择(首启弹窗) | zh | en
     "tree_sort_key": "name",           # 左侧目录树排序: name | mtime | size
     "tree_sort_desc": False,
@@ -112,7 +115,9 @@ class _JsonStore:
         self._lock = threading.Lock()
         self._dirty = False
         try:
-            self._data = json.loads(path.read_text(encoding="utf-8"))
+            # utf-8-sig：容忍 BOM。记事本/PowerShell 另存都会加 BOM，
+            # 严格 utf-8 解析失败会把整份设置静默重置成默认值
+            self._data = json.loads(path.read_text(encoding="utf-8-sig"))
             if not isinstance(self._data, type(default)):
                 self._data = json.loads(json.dumps(default))
         except Exception:

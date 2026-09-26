@@ -21,6 +21,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QImage
 
 from . import netpath
+from .config import settings
 from .media import MediaItem, metadata
 from .runtime import USERDATA_DIR
 
@@ -541,6 +542,11 @@ class ThumbnailCache(QObject):
         with self._lock:
             if self._failed.get(key, 0) >= MAX_ATTEMPTS:
                 return None
+            if item.is_video and self._remote_video_blocked(item, prio):
+                # 网络盘（含 RaiDrive/CloudDrive 挂载）：每张视频缩略图实测
+                # 要从网盘拉 80~100MB（网盘工具的预读）。整夹预热 = 把整个
+                # 文件夹拖一遍，只收屏幕上正在显示的；开关关掉则一张都不抓。
+                return None
             if self._playback_active and item.is_video and prio >= WARMUP_PRIO:
                 # 播放让路：批量/预热单不入队——入了也没 worker 取，只会
                 # 占满队列水位，把图片预热/视口请求饿死。视口单（行号
@@ -581,6 +587,15 @@ class ThumbnailCache(QObject):
                            (prio, -self._prio_seq, key, item, gen))
             self._prio_wake.set()
         return None
+
+    @staticmethod
+    def _remote_video_blocked(item: MediaItem, prio: float) -> bool:
+        """网络盘视频：预热/批量单一律不收；设置关掉时视口单也不收。"""
+        if not netpath.is_remote(item.path):
+            return False
+        if not settings["remote_video_thumbs"]:
+            return True
+        return prio >= WARMUP_PRIO
 
     def focus(self, visible_keys: "set[str]") -> None:
         """只保留当前视口的排队请求，其余请出队列（"清废单"）。
