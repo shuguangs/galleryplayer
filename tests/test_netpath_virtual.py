@@ -59,7 +59,7 @@ class VirtualMountTests(unittest.TestCase):
         netpath._cache.clear()
 
     def test_virtual_mount_is_remote(self):
-        self.assertTrue(netpath.is_remote(r"Y:\移动硬盘备份\x.mp4"))
+        self.assertTrue(netpath.is_remote(r"Y:\media\x.mp4"))
 
     def test_real_disks_stay_local(self):
         for d in "CIK":
