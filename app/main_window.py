@@ -617,12 +617,11 @@ class MainWindow(QMainWindow):
     def _materialize_tree(self) -> None:
         if self.tree is not None:
             return
-        self.fs_model = QFileSystemModel()
-        self.fs_model.setFilter(QDir.Dirs | QDir.Drives | QDir.NoDotAndDotDot)
-        # No file watchers: the tree only lists directories, and watching a large
-        # tree costs handles and startup time for nothing.
-        self.fs_model.setOption(QFileSystemModel.DontWatchForChanges, True)
-        self.fs_model.setRootPath("")
+        from .fs_tree_model import make_dir_tree_model
+
+        # 工厂里换掉了默认图标提供器：它会在 GUI 线程上读文件头做 MIME 嗅探，
+        # 网络盘上每项一次网络往返 → 目录树同步到网盘目录时未响应几十秒
+        self.fs_model = make_dir_tree_model()
 
         self.tree = QTreeView()
         self.tree.setModel(self.fs_model)

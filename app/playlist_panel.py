@@ -106,6 +106,14 @@ class MediaRowDelegate(QStyledItemDelegate):
         self.thumbs = thumbs
         self.owner = owner
         self.thumbs_paused = False
+        # 绘制路径绝不能 stat：网络盘上每行一次网络往返（见 exists_cache）
+        from .exists_cache import ExistsCache
+
+        self.exists = ExistsCache(self)
+        self.exists.changed.connect(lambda: owner.viewport().update())
+
+    def _missing(self, item: MediaItem | None) -> bool:
+        return item is not None and self.exists.known_missing(item.path)
 
     def sizeHint(self, option, index) -> QSize:
         h = ROW_H_THUMB if self.owner.thumb_mode else ROW_H_COMPACT
@@ -117,7 +125,7 @@ class MediaRowDelegate(QStyledItemDelegate):
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
         playing = index.row() == self.owner.playing_row
-        missing = item is not None and not item.exists
+        missing = self._missing(item)
 
         p.save()
         p.setRenderHint(QPainter.Antialiasing)
@@ -210,7 +218,7 @@ class MediaRowDelegate(QStyledItemDelegate):
         f = QFont(p.font()); f.setPointSize(8); p.setFont(f)
         fm = QFontMetrics(f)
         dur = item.duration_text() if (item.is_video and item.duration) else ""
-        if not item.exists:
+        if self._missing(item):
             dur = t("panel.missing")
         dur_w = fm.horizontalAdvance(dur) + 10 if dur else 0
         left = rect.left() + 9
@@ -1249,10 +1257,9 @@ class PlaylistPanel(QWidget):
             except Exception:
                 model = None
         if model is None:
-            model = QFileSystemModel(self)
-            model.setFilter(QDir.Dirs | QDir.Drives | QDir.NoDotAndDotDot)
-            model.setOption(QFileSystemModel.DontWatchForChanges, True)
-            model.setRootPath("")
+            from .fs_tree_model import make_dir_tree_model
+
+            model = make_dir_tree_model(self)
         self.tree = QTreeView()
         self.tree.setObjectName("PanelTree")
         self.tree.setModel(model)
