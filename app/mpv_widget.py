@@ -17,6 +17,9 @@ from . import netpath
 from .config import settings
 from .i18n import t
 
+# mpv --hwdec-extra-frames（默认 6）。见 MpvWidget.__init__ 里的说明
+HWDEC_EXTRA_FRAMES = 16
+
 
 class Track:
     __slots__ = ("id", "kind", "title", "lang", "codec", "selected", "external")
@@ -79,6 +82,11 @@ class MpvWidget(QOpenGLWidget):
         self.mpv = mpv.MPV(
             vo="libmpv",
             hwdec=str(settings["hwdec"]),
+            # 硬解帧池余量。默认 6 不够重排深度大的片子（实测一个 H.264 Main
+            # has_b_frames=16 的竖屏 mp4：池子耗尽 → 未显示的帧被覆盖 → 绿屏/
+            # 大片色块，软解正常）。12 起即恢复，取 16 留余量；代价约每帧
+            # 1.4MB(720p)~12MB(4K) 显存
+            hwdec_extra_frames=str(HWDEC_EXTRA_FRAMES),
             keep_open="always",
             idle="yes",
             terminal="no",
