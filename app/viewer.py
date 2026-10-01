@@ -691,6 +691,14 @@ class Viewer(QWidget):
         else:
             self._show_toast(t("viewer.screenshot_failed"))
 
+    def _copy_frame_to_clipboard(self) -> None:
+        """右键"截取当前画面到剪贴板"：暂停/播放都取当前显示的那一帧，
+        原始分辨率、不含字幕与控制条，不落盘。"""
+        if not self._current_is_video():
+            return
+        ok = fileops.copy_pil_image_to_clipboard(self.video_view.grab_frame())
+        self._show_toast(t("viewer.frame_copied") if ok else t("viewer.frame_copy_failed"))
+
     def _toggle_gif(self) -> None:
         if self._gif_recording:
             self._finish_gif()
@@ -1287,6 +1295,10 @@ class Viewer(QWidget):
         menu = QMenu(self)
 
         if item.is_video:
+            # 放最上面：右键一下就能点到
+            a = self._menu_action(menu, t("viewer.copy_frame"))
+            a.triggered.connect(lambda _=False: self._copy_frame_to_clipboard())
+            menu.addSeparator()
             menu.addMenu(self._build_aspect_menu())
             menu.addSeparator()
             sub = menu.addMenu(t("viewer.sub_menu"))

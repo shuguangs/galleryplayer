@@ -167,6 +167,27 @@ def copy_image_to_clipboard(path: Path) -> bool:
         return False
 
 
+def copy_pil_image_to_clipboard(img) -> bool:
+    """把内存里的 PIL 图（例如视频当前帧）原尺寸放进剪贴板。取不到帧时返回 False。"""
+    if img is None:
+        return False
+    from .thumbs import pil_to_qimage
+
+    try:
+        mode = img.mode
+        img = img.convert("RGBA") if mode in ("RGBA", "LA", "P") else img.convert("RGB")
+        qimg = pil_to_qimage(img)
+        if qimg.isNull():
+            return False
+        cb = QApplication.clipboard()
+        if cb is None:
+            return False
+        cb.setImage(qimg)
+        return True
+    except Exception:
+        return False
+
+
 # --- renaming --------------------------------------------------------------------
 
 _INVALID = set('<>:"/\\|?*')
