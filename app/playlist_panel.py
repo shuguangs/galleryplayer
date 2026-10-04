@@ -837,6 +837,9 @@ class PlaylistPanel(QWidget):
         self.setObjectName("Panel")
         self.thumbs = thumbs
         self._fs_model_provider = fs_model_provider
+        # 主窗口注入的排序函数 fn(items, key, desc) -> items：让面板与浏览器
+        # 用同一套规则（含"按文件夹分组"）。没注入时退回普通排序。
+        self.sort_fn = None
         self._all_items: list[MediaItem] = []
         self._current_album = DEFAULT_ALBUM
         self._resizing = False
@@ -1380,7 +1383,10 @@ class PlaylistPanel(QWidget):
         if 0 <= row < self.list.count():
             cur_item = self.list.item(row)
             playing = cur_item.data(ITEM_ROLE).path if cur_item is not None else None
-        items = media.sort_items(self._all_items, key, desc)
+        if self.sort_fn is not None:
+            items = self.sort_fn(self._all_items, key, desc)
+        else:
+            items = media.sort_items(self._all_items, key, desc)
         self._all_items = list(items)
         self.list.set_items(self._all_items, -1)
         self._apply_filter(self.search.text())

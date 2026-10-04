@@ -50,6 +50,13 @@ SORT_LABELS = {
     "duration": "media.sort_duration",
     "random": "media.sort_random",
 }
+# 按文件夹分组时，文件夹之间的排序方式（文件夹内部仍用 SORT_LABELS）
+FOLDER_SORT_LABELS = {
+    "name": "media.folder_sort_name",
+    "mtime": "media.folder_sort_mtime",
+    "size": "media.folder_sort_size",
+    "duration": "media.folder_sort_duration",
+}
 FILTER_LABELS = {
     "all": "media.filter_all",
     "image": "media.filter_image",
@@ -584,3 +591,67 @@ def sort_items(
     else:
         keyfn = lambda i: i.sort_key  # noqa: E731
     return sorted(items, key=keyfn, reverse=desc)
+
+
+def group_sort_items(
+    items: list[MediaItem],
+    root: Path | None,
+    folder_key: str,
+    folder_desc: bool,
+    key: str,
+    desc: bool,
+    seed: int = 0,
+    manual_order: list[str] | None = None,
+) -> list[MediaItem]:
+    """按文件直接所在的文件夹分组排序（含子文件夹浏览用）。
+
+    - 打开的那一层（root）里的文件固定在最前面，其余按文件夹分组；
+      "2" 与 "2/子" 是两组。
+    - 文件夹之间按 folder_key：name（自然序）/ mtime（组内最新文件）/
+      size（总大小）/ duration（视频总时长；图片不计，无视频的组恒在尾部）。
+      并列时按文件夹名，结果稳定。
+    - 组内顺序完全交给 sort_items（key/desc/seed/manual_order 原样传）。
+    只用扫描时已有的元数据，不额外读盘（网络盘上也快）。
+    """
+    groups: dict[Path, list[MediaItem]] = {}
+    for it in items:
+        groups.setdefault(it.path.parent, []).append(it)
+
+    root_items = groups.pop(root, []) if root is not None else []
+
+    def name_key(folder: Path) -> tuple:
+        try:
+            rel = folder.relative_to(root) if root is not None else folder
+        except ValueError:
+            rel = folder
+        return _natkey(str(rel))
+
+    def metric(folder: Path):
+        members = groups[folder]
+        if folder_key == "mtime":
+            return max(i.mtime for i in members)
+        if folder_key == "size":
+            return sum(i.size for i in members)
+        if folder_key == "duration":
+            vids = [i for i in members if i.is_video]
+            if not vids:
+                return None          # 没有视频：恒排尾部
+            return sum(i.duration or 0.0 for i in vids)
+        return None
+
+    folders = list(groups)
+    if folder_key in ("mtime", "size", "duration"):
+        with_val = [f for f in folders if metric(f) is not None]
+        without = [f for f in folders if metric(f) is None]
+        # 先按名称排一遍再按指标稳定排序：指标并列时保持名称顺序（升序）
+        with_val.sort(key=name_key)
+        with_val.sort(key=metric, reverse=folder_desc)
+        without.sort(key=name_key)
+        ordered = with_val + without
+    else:
+        ordered = sorted(folders, key=name_key, reverse=folder_desc)
+
+    out = sort_items(root_items, key, desc, seed, manual_order)
+    for folder in ordered:
+        out.extend(sort_items(groups[folder], key, desc, seed, manual_order))
+    return out

@@ -18,6 +18,11 @@ DEFAULTS: dict[str, Any] = {
     "grid_columns": 5,
     "sort_key": "name",           # name | mtime | size | duration | random
     "sort_desc": False,
+    # 含子文件夹时"按文件夹分组"：默认关（原排序方式不变）。开启后
+    # sort_key 管文件夹内部顺序，folder_sort_* 管文件夹之间的顺序
+    "group_by_folder": False,
+    "folder_sort_key": "name",       # name | mtime | size | duration
+    "folder_sort_desc": False,
     "filter_kind": "all",         # all | image | video
     "volume": 80,
     "muted": False,

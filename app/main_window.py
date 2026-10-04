@@ -444,6 +444,25 @@ class MainWindow(QMainWindow):
         self.btn_desc.clicked.connect(self._on_sort_changed)
         lay.addWidget(self.btn_desc)
 
+        # 按文件夹分组（默认关）：勾上后多出"文件夹排序"下拉 + 升降序，
+        # 上面的排序下拉改为管文件夹内部顺序
+        self.chk_group = QCheckBox(t("main_window.group_by_folder"))
+        self.chk_group.setToolTip(t("main_window.group_by_folder_tip"))
+        self.chk_group.toggled.connect(self._on_group_toggled)
+        lay.addWidget(self.chk_group)
+        self.folder_sort_combo = icons.ArrowComboBox()
+        for key, label in media.FOLDER_SORT_LABELS.items():
+            self.folder_sort_combo.addItem(t(label), key)
+        self.folder_sort_combo.setToolTip(t("main_window.folder_sort_tip"))
+        self.folder_sort_combo.currentIndexChanged.connect(self._on_sort_changed)
+        lay.addWidget(self.folder_sort_combo)
+        self.btn_folder_desc = _icon_button(
+            icons.SORT_ASC, t("main_window.folder_sort_toggle_tip"), 30, checkable=True)
+        self.btn_folder_desc.clicked.connect(self._on_sort_changed)
+        lay.addWidget(self.btn_folder_desc)
+        self.folder_sort_combo.setVisible(False)
+        self.btn_folder_desc.setVisible(False)
+
         self.chk_image = QCheckBox(t("media.filter_image"))
         self.chk_video = QCheckBox(t("media.filter_video"))
         self.chk_archive = QCheckBox(t("media.filter_archive"))
@@ -702,6 +721,19 @@ class MainWindow(QMainWindow):
         idx = self.sort_combo.findData(settings["sort_key"])
         self.sort_combo.setCurrentIndex(max(0, idx))
         self.btn_desc.setChecked(bool(settings["sort_desc"]))
+        fidx = self.folder_sort_combo.findData(settings["folder_sort_key"])
+        self.folder_sort_combo.blockSignals(True)
+        self.folder_sort_combo.setCurrentIndex(max(0, fidx))
+        self.folder_sort_combo.blockSignals(False)
+        self.btn_folder_desc.setChecked(bool(settings["folder_sort_desc"]))
+        self.chk_group.blockSignals(True)
+        self.chk_group.setChecked(bool(settings["group_by_folder"]))
+        self.chk_group.blockSignals(False)
+        on = self.chk_group.isChecked()
+        self.folder_sort_combo.setVisible(on)
+        self.btn_folder_desc.setVisible(on)
+        if on:
+            self.sort_combo.setToolTip(t("main_window.sort_inside_folder_tip"))
         self._update_desc_icon()
         self.chk_image.setChecked(bool(settings["filter_show_image"]))
         self.chk_video.setChecked(bool(settings["filter_show_video"]))
@@ -725,6 +757,9 @@ class MainWindow(QMainWindow):
         settings["grid_columns"] = self.col_slider.value()
         settings["sort_key"] = self.sort_combo.currentData()
         settings["sort_desc"] = self.btn_desc.isChecked()
+        settings["group_by_folder"] = self.chk_group.isChecked()
+        settings["folder_sort_key"] = self.folder_sort_combo.currentData()
+        settings["folder_sort_desc"] = self.btn_folder_desc.isChecked()
         settings["filter_show_image"] = self.chk_image.isChecked()
         settings["filter_show_video"] = self.chk_video.isChecked()
         settings["filter_show_archive"] = self.chk_archive.isChecked()
@@ -1729,6 +1764,41 @@ class MainWindow(QMainWindow):
 
     def _update_desc_icon(self) -> None:
         self.btn_desc.setText(icons.SORT_DESC if self.btn_desc.isChecked() else icons.SORT_ASC)
+        self.btn_folder_desc.setText(
+            icons.SORT_DESC if self.btn_folder_desc.isChecked() else icons.SORT_ASC)
+
+    def _on_group_toggled(self, on: bool) -> None:
+        self.folder_sort_combo.setVisible(on)
+        self.btn_folder_desc.setVisible(on)
+        # 分组时原排序下拉管的是"文件夹内部"，提示跟着变
+        self.sort_combo.setToolTip(t("main_window.sort_inside_folder_tip") if on else "")
+        settings["group_by_folder"] = bool(on)
+        self._apply_view()
+
+    def _sort_depends_on(self, *keys: str) -> bool:
+        """当前排序是否依赖这些元数据：文件排序键，或分组时的文件夹排序键
+        （按文件夹总时长排时，时长回填会改变文件夹的先后，也要重排）。"""
+        if (self.sort_combo.currentData() or "name") in keys:
+            return True
+        return (self.chk_group.isChecked()
+                and (self.folder_sort_combo.currentData() or "name") in keys)
+
+    def _sorted_for_view(self, items: list, key: str | None = None,
+                         desc: bool | None = None) -> list:
+        """浏览器/播放列表共用的最终排序：分组开关决定走哪条路。
+
+        key/desc 不传时用工具栏当前值；播放列表面板改自己的排序下拉时传入。
+        """
+        sort_key = key or self.sort_combo.currentData() or "name"
+        sort_desc = self.btn_desc.isChecked() if desc is None else desc
+        manual = orders.get(self.folder) if (sort_key == "custom" and self.folder) else None
+        if self.chk_group.isChecked():
+            return media.group_sort_items(
+                items, self.folder,
+                self.folder_sort_combo.currentData() or "name",
+                self.btn_folder_desc.isChecked(),
+                sort_key, sort_desc, self._random_seed, manual)
+        return media.sort_items(items, sort_key, sort_desc, self._random_seed, manual)
 
     def _on_header_sort(self, key: str, desc: bool) -> None:
         i = self.sort_combo.findData(key)
@@ -1799,7 +1869,7 @@ class MainWindow(QMainWindow):
         # ~350ms＝掉帧。标记留着，播放结束后统一补一次。
         if self._playback_active:
             return
-        if self.sort_combo.currentData() == "duration":
+        if self._sort_depends_on("duration"):
             self._resort_timer.start()
 
     def _on_resort_debounced(self) -> None:
@@ -1828,8 +1898,7 @@ class MainWindow(QMainWindow):
             return
         if not self._meta_dirty:
             return
-        sort_key = self.sort_combo.currentData() or "name"
-        if sort_key not in ("duration", "mtime", "size"):
+        if not self._sort_depends_on("duration", "mtime", "size"):
             self._meta_dirty = False
             return
         if self.tiles is None or not self.model.items:
@@ -2365,10 +2434,7 @@ class MainWindow(QMainWindow):
                 # 安静扫描（命令行/双击打开）时浏览器的 model 还没建，all_items
                 # 是扫描顺序：按当前排序规则排一次，播放器与面板的顺序才与
                 # 浏览器一致（面板不再自己重排，否则行号与 viewer.items 错位）
-                items = media.sort_items(
-                    items, self.sort_combo.currentData() or "name",
-                    self.btn_desc.isChecked(), self._random_seed,
-                )
+                items = self._sorted_for_view(items)
             row = next(
                 (i for i, it in enumerate(items) if it.path == startup),
                 -1,
@@ -2403,7 +2469,7 @@ class MainWindow(QMainWindow):
         # 流式增量的滚动保持：名称/随机等稳定排序下新项只追加，保持像素
         # 偏移即可；时长/mtime/大小等"元数据排序"下新项会插到中间（搬家），
         # 像素偏移=视口内容大换血——改用锚定项保持可见。
-        meta_sort = (self.sort_combo.currentData() or "name") in ("duration", "mtime", "size")
+        meta_sort = self._sort_depends_on("duration", "mtime", "size")
         self._apply_view(count_suffix=t("main_window.scanning_suffix"),
                          keep="visible" if meta_sort else "offset")
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -2428,14 +2494,7 @@ class MainWindow(QMainWindow):
         term = "" if getattr(self, "_locate_mode", False) \
             else self.search.text().strip()
         items = media.apply_filter(self.all_items, flags, term)
-        sort_key = self.sort_combo.currentData() or "name"
-        items = media.sort_items(
-            items,
-            sort_key,
-            self.btn_desc.isChecked(),
-            self._random_seed,
-            orders.get(self.folder) if (sort_key == "custom" and self.folder) else None,
-        )
+        items = self._sorted_for_view(items)
         # meta 回填引发的自动重排（keep=visible）加"结果未变"守卫：预热期
         # 间持续 meta_ready → 每 700ms 一次全量 set_items+relayout（48k 项
         # ~100ms/次）让界面持续卡顿（观感"未响应"）。排序键没变时（名称
@@ -2585,6 +2644,8 @@ class MainWindow(QMainWindow):
             _slog.stage("ensure-viewer", "开始构建 Viewer")
             self.viewer = Viewer(self.thumbs, self._fs_model_for_panel)
             _slog.stage("ensure-viewer", "Viewer 构建完成")
+            # 播放列表面板的排序下拉与浏览器同一套规则（含按文件夹分组）
+            self.viewer.panel.sort_fn = self._sorted_for_view
             # Show/Hide 事件驱动缩略图视频解码余量：播放器不可见时放开
             # 第 2 路通用视频线程（见 ThumbnailCache.set_video_headroom）
             self.viewer.installEventFilter(self)
