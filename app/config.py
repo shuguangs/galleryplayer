@@ -66,6 +66,8 @@ DEFAULTS: dict[str, Any] = {
     "live_translate_target": "zh",     # 翻译目标语言: zh / zh-Hant / en
     "translate_scenario": "general",   # 场景选项由 live-subtitle/scenarios/*.json 提供
     "live_caption_idle_unload": 1800,  # 引擎空闲 N 秒后自动卸载模型释放显存；0=不卸载
+    # 右键"仅原语（不翻译）"打开前用的翻译模型，取消勾选时恢复它（空=用默认）
+    "live_translate_last_model": "",
     "srt_translate_model": "live",     # 生成 SRT 的翻译模型: live=跟随实时字幕 / Ollama 名 / hy-mt2-30b（llama.cpp）
     "srt_export_format": "srt",        # SRT 导出格式: srt / vtt / ass
     "live_caption_font_size": 32,       # 实时字幕覆盖层字号（px）

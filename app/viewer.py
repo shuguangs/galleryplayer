@@ -1342,6 +1342,11 @@ class Viewer(QWidget):
                 sub, t("viewer.live_caption_off") if self._live_on
                 else t("viewer.live_caption_on"))
             a.triggered.connect(lambda _=False: self._toggle_live_caption())
+            # 仅原语（不翻译）：方言/中文片只要识别原文，省掉翻译模型
+            a = self._menu_action(sub, t("viewer.live_no_translate"))
+            a.setCheckable(True)
+            a.setChecked(str(settings["live_ollama_model"]) == "none")
+            a.toggled.connect(lambda on: self._set_live_translate_off(on))
             display = sub.addMenu(t("viewer.live_caption_display_menu"))
             a = self._menu_action(display, t("viewer.live_caption_font_bigger"))
             a.triggered.connect(lambda _=False: self._step_live_caption_display("font", 2))
@@ -1484,6 +1489,42 @@ class Viewer(QWidget):
             self._live_paused = False
             self._start_live_caption()
         else:
+            self._start_live_caption()
+
+    def _set_live_translate_off(self, off: bool) -> None:
+        """右键"仅原语（不翻译）"：只出识别原文（方言/中文片不需要翻译）。
+
+        与设置里"翻译模型 → 不翻译（仅原语）"是同一个开关。取消勾选时恢复
+        之前用的翻译模型。实时字幕正在跑时立刻按新设置重启引擎（翻译与否是
+        引擎启动参数，不重启不生效）。
+        """
+        current = str(settings["live_ollama_model"])
+        if off:
+            if current == "none":
+                return
+            settings["live_translate_last_model"] = current
+            settings["live_ollama_model"] = "none"
+        else:
+            if current != "none":
+                return
+            last = str(settings["live_translate_last_model"] or "")
+            settings["live_ollama_model"] = (
+                last if last and last != "none" else DEFAULTS["live_ollama_model"])
+        self._show_toast(t("viewer.live_no_translate_on") if off
+                         else t("viewer.live_no_translate_off"))
+        if self._live_on or getattr(self, "_live_paused", False):
+            self._restart_live_with_new_settings()
+
+    def _restart_live_with_new_settings(self) -> None:
+        """引擎配置变了（如翻译开关）：杀掉旧引擎，正在显示的话按新配置重开。"""
+        was_on = self._live_on
+        if was_on:
+            self._stop_live_poll()
+            self._live_on = False
+            self._live_label.hide()
+        self._live_paused = False
+        self._kill_live_proc()
+        if was_on:
             self._start_live_caption()
 
     def _live_caption_display_value(self, key: str) -> int:
