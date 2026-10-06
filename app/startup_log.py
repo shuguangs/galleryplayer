@@ -209,8 +209,10 @@ def recent_logs(n: int = 5) -> list[Path]:
     if path is None:
         return []
     try:
+        # 修改时间相同（同一时钟刻度内写的两份）时按文件名：名字里就是
+        # 可排序的启动时间戳，不加这条排序结果随机（测试偶发失败）
         return sorted(path.parent.glob("startup_*.log"),
-                      key=lambda p: p.stat().st_mtime,
+                      key=lambda p: (p.stat().st_mtime, p.name),
                       reverse=True)[:n]
     except Exception:
         return []
