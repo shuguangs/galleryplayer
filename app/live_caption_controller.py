@@ -6,6 +6,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+# 边下边播：引擎读到下载前沿就收尾，文件还在变时延后再派任务接着识别。
+GROW_WAIT_MIN_MS = 3000      # 首次等待
+GROW_WAIT_MAX_MS = 15000     # 连续无新产出时逐步拉长到这里
+GROW_STALE_S = 120.0         # 文件超过这么久没变：不再等待（下载停了/完成了）
+
+
+def _default_stat(path) -> tuple[int, float]:
+    st = Path(path).stat()       # 调用方可能传 str
+    return st.st_size, st.st_mtime
+
 
 class LiveCaptionController(QObject):
     """Own caption rows and seek decisions for one viewer session.
@@ -18,8 +28,18 @@ class LiveCaptionController(QObject):
     rows_changed = Signal()
     restart_requested = Signal(float, bool)
 
-    def __init__(self, parent: QObject | None = None) -> None:
+    def __init__(self, parent: QObject | None = None, stat_fn=None, clock=None) -> None:
         super().__init__(parent)
+        # 可注入：测试里用假的文件状态和时钟
+        self._stat_fn = stat_fn or _default_stat
+        self._clock = clock or time.monotonic
+        self._task_file_state: tuple[int, float] | None = None
+        self._task_rows_at_start = 0
+        self._file_changed_at = self._clock()
+        self._grow_wait_ms = GROW_WAIT_MIN_MS
+        self._grow_waited = False
+        # 任务在跑时用户拖到的位置（见 handle_position），收尾后优先识别那里
+        self.pending_seek: float | None = None
         self.rows: list[tuple[float, float, str, str]] = []
         self._row_keys: set[tuple[float, float, str, str]] = set()
         # (t0, t1, 原文) → rows 下标：译文更新行 O(1) 定位（全片 ~2000 行，
@@ -83,6 +103,8 @@ class LiveCaptionController(QObject):
             self._media_duration = duration
         self.media_path = media
         self.generation = generation
+        # 新任务本身就是从拖到的位置（或新片）起：之前记下的拖动已兑现/作废
+        self.pending_seek = None
         start = max(0.0, float(seek))
         self.task_spans[generation] = [start, start]
         self.task_start_seek = start
@@ -93,6 +115,24 @@ class LiveCaptionController(QObject):
         self.last_position = seek
         self._last_submit_at = time.time()
         self._last_submit_seek = seek
+        self._grow_wait_ms = GROW_WAIT_MIN_MS
+        self._snapshot_task_start(reset_change_clock=True)
+
+    def _file_state(self) -> tuple[int, float] | None:
+        if self.media_path is None:
+            return None
+        try:
+            return self._stat_fn(self.media_path)
+        except OSError:
+            return None
+
+    def _snapshot_task_start(self, reset_change_clock: bool = False) -> None:
+        """记下任务派出时的文件状态和行数，任务收尾时据此判断"还在下载吗"
+        与"这次有没有新产出"。"""
+        self._task_file_state = self._file_state()
+        self._task_rows_at_start = len(self.rows)
+        if reset_change_clock:
+            self._file_changed_at = self._clock()
 
     def accept_line(self, obj: dict) -> bool:
         if int(obj.get("g", -1)) != self.generation:
@@ -236,12 +276,31 @@ class LiveCaptionController(QObject):
             self.catching = False
             return "covered"
         # 引擎任务在途（降噪/转写中）：不当追赶失败——降噪期间无行产出，
-        # 前沿恒 0，旧逻辑 8 秒即顶掉在途任务又从头降噪，死循环风暴
+        # 前沿恒 0，旧逻辑 8 秒即顶掉在途任务又从头降噪，死循环风暴。
+        # 但要记住这次拖动：任务收尾后先去识别拖到的位置（边下边播时每个
+        # 任务都要等下载，旧版这里直接丢掉拖动，字幕永远到不了拖到的地方）
         if self.task_running:
             return "normal"
 
         self.request_restart(pos)
         return "restart"
+
+    def note_user_seek(self, pos: float) -> None:
+        """用户主动拖动/跳转（进度条、方向键）。
+
+        引擎任务在跑时，handle_position 不会顶掉它（防降噪死循环），这里记下
+        位置，任务收尾后先去识别那里（边下边播时每个任务都要等下载，旧版直接
+        丢掉这次拖动，字幕永远到不了拖到的地方）。
+        只认用户主动操作：播放自然前进、读到文件末尾时 mpv 的位置跳变不算——
+        曾把"拖到 144s"覆盖成 EOF 的 240s，任务跑去全是空洞的片尾。
+        """
+        if self.span_covered(pos):
+            return
+        # 关注点：无论引擎此刻忙不忙都记下。拖到处还没下载时 seek 任务会 0 产出
+        # 收尾，之后的补洞必须继续盯着这里，而不是回头去补最早的空缺
+        self._focus = pos
+        if self.task_running:
+            self.pending_seek = pos
 
     def request_restart(self, pos: float, catching: bool = True) -> None:
         if (time.time() - self._last_submit_at < 12.0
@@ -285,3 +344,85 @@ class LiveCaptionController(QObject):
         self.task_start_seek = start
         self.full_pass_running = True
         self.catching = False
+        self.task_running = True
+        self._snapshot_task_start()
+
+    def after_task(self, generation: int) -> tuple[str, int]:
+        """任务收尾后的下一步：(动作, 延迟毫秒)。
+
+        - "done"：已覆盖到片尾；
+        - "wait"：文件还在下载（大小或修改时间变了），延迟后再派任务接着识别；
+        - "full_pass"：文件没变、本任务有新产出 → 立即补洞（原行为）；
+        - "idle"：文件没变且本任务 0 产出，或文件很久没变了 → 停止重派
+          （没有人声的片子旧版会连续空转重派几十次）；
+        - "ignored"：过期任务。
+        """
+        result = self.task_done(generation)
+        if result == "ignored":
+            return "ignored", 0
+        if result == "done":
+            return "done", 0
+        now = self._clock()
+        state = self._file_state()
+        if state is None:
+            return "idle", 0
+        changed = self._task_file_state is not None and state != self._task_file_state
+        produced = len(self.rows) > self._task_rows_at_start
+        if changed:
+            self._file_changed_at = now
+            if produced:
+                self._grow_wait_ms = GROW_WAIT_MIN_MS
+            else:
+                self._grow_wait_ms = min(GROW_WAIT_MAX_MS, self._grow_wait_ms * 2) \
+                    if getattr(self, "_grow_waited", False) else GROW_WAIT_MIN_MS
+            self._grow_waited = True
+            return "wait", self._grow_wait_ms
+        if now - self._file_changed_at > GROW_STALE_S:
+            return "idle", 0
+        if produced:
+            return "full_pass", 0
+        # 0 产出：若这次是"接着关注段往后"的任务，说明关注段已经到头（片尾没人声
+        # 或到下载前沿）。放下关注点，回头补前面的空缺——真机实测旧逻辑在这里
+        # 停下，拖动前那段（41~139s，当时还在下载）再也没人补
+        focus = getattr(self, "_focus", None)
+        if focus is not None and self.span_covered(focus):
+            # 只有关注点那里已经识别出过内容、这次是"接着往后"才算到头；关注点
+            # 那里还一句都没有时，是还在下载，保持关注（见下一次 wait/重试）
+            self._focus = None
+            if self.next_full_pass_start(self._media_duration) >= 0:
+                return "full_pass", 0
+        return "idle", 0
+
+    def resume_point(self, duration: float | None, position: float | None) -> float:
+        """下一个补洞任务的起点。
+
+        边下边播且拖过进度条时，下载器从拖到的位置往后下；字幕应接着"播放
+        位置所在的那一段"往后识别，而不是回头去补最早的空缺（那里多半还没
+        下载）。播放位置不在任何已识别段里时退回 next_full_pass_start。
+        返回 -1 表示已覆盖到片尾。
+        """
+        seek, self.pending_seek = self.pending_seek, None
+        if seek is not None and not self.span_covered(seek):
+            self._focus = seek
+            return max(0.0, seek - 5.0)   # 与 seek 任务一致：前 5 秒起，避免切在句中
+        # 关注点：最近一次拖到的位置，没有则用播放位置。接着"关注点所在的那段"
+        # 往后识别，直到片尾；到了片尾才回头补前面的空缺。（真机实测：去到拖到
+        # 的位置识别了一段后，旧逻辑又跳回开头补空缺，字幕在拖到处停住）
+        # 用任务覆盖区间（display_ranges，含句间静音）而不是逐句区间：拖到的
+        # 位置常落在第一句话之前的静音里（实测拖到 144s，第一句在 159s）
+        focus = getattr(self, "_focus", None)
+        for anchor in (focus, position):
+            if anchor is None:
+                continue
+            for start, end in self.display_ranges():
+                if start - 6.0 <= anchor <= end + 1.0:
+                    if duration is not None and end >= max(0.0, duration - 1.0):
+                        break
+                    return end
+        # 关注点那里还一句都没识别出来（还在下载）：就从关注点本身再试，
+        # 而不是回头补最早的空缺
+        if focus is not None and not self.span_covered(focus):
+            if duration is None or focus < duration - 1.0:
+                return max(0.0, focus - 5.0)
+        self._focus = None
+        return self.next_full_pass_start(duration)

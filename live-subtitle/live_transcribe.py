@@ -114,6 +114,63 @@ class DecodeCancelled(Exception):
     """新任务到达时中止解码（旧实现要等整段解完才看得到 cancel）。"""
 
 
+# 边下边播：起点落在未下载区（预分配的全 0 空洞）时，最多往后找这么远去
+# 找第一段已下载的数据。找得太远会跳进另一段由别的任务负责的数据，造成重复
+# 识别；不找则 seek 正好落在空洞里时一个字都解不出。
+HOLE_SKIP_MAX_S = 15.0
+# 已经开始出音频后，连续这么多个坏包/坏帧就认定撞上了"下载前沿"（后面是
+# 还没下载的空洞），停下。正常文件偶发的单个坏包不会连续这么多。
+FRONTIER_BAD_RUN = 8
+
+
+def _tolerant_decode(container, stream, start_seconds: float):
+    """逐包解复用+解码，容忍未下载区（全 0）的坏数据。
+
+    container.decode() 遇到第一个坏包整个生成器就终止，faster-whisper 的
+    _ignore_invalid_frames 也救不回来（它 continue 的是已经结束的迭代器）。
+    这里自己逐包处理：
+    - 还没出过音频：跳过坏包继续找，直到已下载段（或超出 HOLE_SKIP_MAX_S）；
+    - 已经出过音频：连续 FRONTIER_BAD_RUN 个坏包 → 视为下载前沿，停止。
+    """
+    import av
+
+    tb = stream.time_base
+    started = False
+    bad_run = 0
+    demux = container.demux(stream)
+    while True:
+        try:
+            packet = next(demux)
+        except StopIteration:
+            return
+        except (av.error.FFmpegError, OSError):
+            if started:
+                bad_run += 1
+                if bad_run >= FRONTIER_BAD_RUN:
+                    return
+            continue
+        if packet.pts is not None and not started:
+            if float(packet.pts * tb) > start_seconds + HOLE_SKIP_MAX_S:
+                return              # 起点附近全是空洞：不跳去远处的数据段
+        try:
+            frames = packet.decode()
+        except av.error.FFmpegError:
+            if started:
+                bad_run += 1
+                if bad_run >= FRONTIER_BAD_RUN:
+                    return
+            continue
+        for fr in frames:
+            if not started and fr.pts is not None and \
+                    float(fr.pts * tb) > start_seconds + HOLE_SKIP_MAX_S:
+                return
+            started = True
+            bad_run = 0
+            yield fr
+        if packet.size == 0:        # flush 包：解复用结束
+            return
+
+
 def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0,
                        should_cancel=None):
     """从 seek 秒附近解码音频为 16kHz float32 mono（与 decode_audio 输出一致）。
@@ -170,7 +227,7 @@ def _decode_audio_from(media: str, seek: float, max_seconds: float = 900.0,
                     first_pts.append(float(fr.pts * audio_stream.time_base))
                 yield fr
 
-        frames = _track_first(container.decode(audio_stream))
+        frames = _track_first(_tolerant_decode(container, audio_stream, start_seconds))
         frames = _ignore_invalid_frames(frames)
         frames = _group_frames(frames, 500000)
         frames = _resample_frames(frames, resampler)

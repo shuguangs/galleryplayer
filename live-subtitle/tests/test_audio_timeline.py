@@ -261,6 +261,92 @@ class CoarseSeekContainerTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_av_available() and _ffmpeg(), "需要 av 与系统 ffmpeg")
+class SparseDownloadTests(unittest.TestCase):
+    """边下边播：文件按完整大小预分配，未下载区全是 0（迅雷/BT/网盘挂载的
+    典型落盘方式）。用户拖进度条后下载跳到后面，形成"前段 + 空洞 + 后段"。
+
+    回归点：旧实现读到第一个坏包解码器生成器就终止——seek 正好落在空洞里
+    时一个字都解不出（实测 65~96s 数据已在盘上，解出 0 秒）。
+    """
+
+    BEEPS = (10, 40, 70, 100)
+
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+
+        cls._td = tempfile.TemporaryDirectory()
+        src = Path(cls._td.name) / "beeps.mp4"
+        expr = "+".join(f"between(t,{b},{b + 0.4})" for b in cls.BEEPS)
+        subprocess.run([
+            _ffmpeg(), "-y", "-v", "error",
+            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=120",
+            "-f", "lavfi", "-i",
+            f"aevalsrc='0.8*sin(2*PI*1000*t)*({expr})':s=44100:d=120",
+            "-c:v", "libx264", "-preset", "ultrafast", "-g", "50", "-c:a", "aac",
+            "-movflags", "+faststart", str(src)], check=True)
+        data = src.read_bytes()
+        n = len(data)
+
+        def holes(name, ranges):
+            buf = bytearray(n)
+            for a, b in ranges:
+                buf[int(a * n):int(b * n)] = data[int(a * n):int(b * n)]
+            p = Path(cls._td.name) / name
+            p.write_bytes(bytes(buf))
+            return p
+
+        # 音频 65s 约在文件 54.5%，96s 约在 80%
+        cls.jump = holes("jump.mp4", [(0, 0.20), (0.55, 0.80)])
+        cls.head = holes("head.mp4", [(0, 0.30)])
+        cls.full = src
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._td.cleanup()
+
+    def _beeps(self, path, seek):
+        import numpy as np
+
+        from live_transcribe import _decode_audio_from
+
+        audio = _decode_audio_from(str(path), seek, max_seconds=float("inf"),
+                                   should_cancel=lambda: False)
+        hop = 160
+        e = np.array([np.abs(audio[i:i + hop]).mean()
+                      for i in range(0, len(audio) - hop, hop)])
+        on = e > 0.1
+        out = []
+        for i in range(len(on)):
+            if on[i] and (i == 0 or not on[i - 1]):
+                out.append(round(seek + i * hop / 16000, 1))
+        return out, len(audio) / 16000
+
+    def test_seek_into_downloaded_island_after_hole(self):
+        got, _ = self._beeps(self.jump, 60.0)
+        self.assertEqual(len(got), 1, f"空洞后的已下载段没解出来：{got}")
+        self.assertAlmostEqual(got[0], 70.0, delta=0.2, msg="空洞后的时间戳错位")
+
+    def test_stops_at_download_frontier(self):
+        """顺序下载中：解到已下载的边界就停，不跨过空洞把后面的内容接上来。"""
+        got, secs = self._beeps(self.head, 0.0)
+        self.assertEqual(got, [10.0])
+        self.assertLess(secs, 40.0)
+
+    def test_gap_task_does_not_jump_to_far_island(self):
+        """补空缺的任务从空洞里开始：不能一路跳到 40 秒外的下一段（那段已由
+        别的任务负责，跳过去会重复识别，时间也不对）。"""
+        got, _secs = self._beeps(self.jump, 25.0)
+        self.assertEqual(got, [], f"从空洞起的任务跳去了远处的数据段：{got}")
+
+    def test_complete_file_unchanged(self):
+        got, _ = self._beeps(self.full, 0.0)
+        self.assertEqual(got, [10.0, 40.0, 70.0, 100.0])
+        got, _ = self._beeps(self.full, 65.0)
+        self.assertEqual(got, [70.0, 100.0])
+
+
+@unittest.skipUnless(_av_available() and _ffmpeg(), "需要 av 与系统 ffmpeg")
 class ContainerOffsetVadTests(unittest.TestCase):
     """端到端：VAD 时间戳 + 容器偏移 = 媒体时间（本地回归，CI 自动跳过）。
 

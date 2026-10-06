@@ -133,6 +133,10 @@ class Viewer(QWidget):
         self._live_ctl.restart_requested.connect(
             lambda pos, catching: self._restart_live_for_seek(int(pos), catching=catching)
         )
+        # 边下边播：文件还在下载时，延后再派任务接着识别（见 after_task）
+        self._live_grow_timer = QTimer(self)
+        self._live_grow_timer.setSingleShot(True)
+        self._live_grow_timer.timeout.connect(self._on_live_grow_timer)
         self._live_label = QLabel("", self.stage)
         self._live_label.setObjectName("LiveCaption")
         self._live_label.setAlignment(Qt.AlignCenter)
@@ -983,12 +987,14 @@ class Viewer(QWidget):
         """手动定位后播放应从该处继续（退出“播完停帧”状态）。"""
         self._at_eof = False
         self.video_view.seek_absolute(seconds)
+        self._live_ctl.note_user_seek(seconds)
         self._maybe_restart_live_for_position(seconds)
 
     def _seek_relative(self, delta: float) -> None:
         self._at_eof = False
         target = max(0.0, float(self.video_view.position or 0.0) + delta)
         self.video_view.seek_relative(delta)
+        self._live_ctl.note_user_seek(target)
         self._maybe_restart_live_for_position(target)
 
     def _toggle_mute(self) -> None:
@@ -1691,6 +1697,8 @@ class Viewer(QWidget):
             self._pause_live_for_srt()
             return
         self._suppress_file_subtitles_for_live()
+        # 新任务取代旧任务：作废"等下载"的延后重试
+        self._live_grow_timer.stop()
         old_log_size = self._live_log.stat().st_size if self._live_log.is_file() else 0
         if self._live_media_path != media:
             self.controls.set_caption_ranges([])
@@ -1726,13 +1734,30 @@ class Viewer(QWidget):
         self._relayout()
         self._start_live_poll()
 
+    def _on_live_grow_timer(self) -> None:
+        """边下边播的延后重试：字幕仍开着、还是同一个文件、引擎空闲时才派。"""
+        if not getattr(self, "_live_on", False) or getattr(self, "_live_paused", False):
+            return
+        if self._live_ctl.task_running:
+            return              # 期间用户拖了进度条，已经有新任务在跑
+        media = self.items[self.index].path if 0 <= self.index < len(self.items) else None
+        if media is None or media != self._live_ctl.media_path:
+            return
+        self._start_live_full_pass()
+
     def _start_live_full_pass(self) -> None:
         """Fill previously skipped ranges after the foreground catch-up task."""
         media = self.items[self.index].path if 0 <= self.index < len(self.items) else None
         if media is None or getattr(self, "_live_full_pass_done", False):
             return
         duration = self.video_view.duration if self._current_is_video() else None
-        seek = self._live_ctl.next_full_pass_start(duration)
+        try:
+            position = float(self.video_view.position or 0.0) if self._current_is_video() else None
+        except Exception:
+            position = None
+        # 优先接着"正在看的那段"往后识别（边下边播拖过进度条时，下载器也是
+        # 从那里往后下）；播放位置不在已识别段里时退回最早的空缺
+        seek = self._live_ctl.resume_point(duration, position)
         if seek < 0:
             self._live_ctl.full_pass_done = True
             return
@@ -2230,6 +2255,9 @@ class Viewer(QWidget):
         if tmr is not None:
             tmr.stop()
         self._live_srt_save_timer.stop()
+        grow = getattr(self, "_live_grow_timer", None)
+        if grow is not None:
+            grow.stop()
 
     def _handle_live_engine_event(self, event_data) -> None:
         event = event_data.event
@@ -2259,12 +2287,15 @@ class Viewer(QWidget):
         elif event == EngineEvent.TASK_DONE:
             if getattr(self, "_live_no_audio", False):
                 return  # 无音轨的收尾 TASK_DONE：不再调度补洞/预转写
-            result = self._live_ctl.task_done(
+            action, delay_ms = self._live_ctl.after_task(
                 event_data.generation if event_data.generation is not None else -1
             )
-            if result == "needs_full_pass":
+            if action == "full_pass":
                 self._start_live_full_pass()
-            elif result == "done":
+            elif action == "wait":
+                # 文件还在下载：引擎读到了下载前沿。几秒后接着识别新下好的部分
+                self._live_grow_timer.start(delay_ms)
+            elif action == "done":
                 self._prefetch_next_live_media()
         elif event == EngineEvent.LANG_REWRITE:
             # 延迟探测改判：清掉误判区间内的行，引擎正按探测语言逐区间
