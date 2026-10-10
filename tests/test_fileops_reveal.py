@@ -30,8 +30,10 @@ class RevealTests(unittest.TestCase):
                 mock.patch.object(fileops.subprocess, "Popen") as popen:
             fileops.reveal(Path("Z:/x/file.mp4"))
         fake_shell.SHOpenFolderAndSelectItems.assert_called_once()
-        arr = fake_shell.SHOpenFolderAndSelectItems.call_args[0][0]
-        self.assertEqual(arr[0], 0x1234)  # 传入的是 PIDL 数组
+        args = fake_shell.SHOpenFolderAndSelectItems.call_args[0]
+        # 文件的完整 PIDL 作 pidlFolder、cidl=0（以前传数组+cidl=1+NULL 致「参数错误」）
+        self.assertEqual(args[0].value, 0x1234)
+        self.assertEqual(args[1], 0)
         popen.assert_not_called()
 
     def test_api_failure_falls_back(self):

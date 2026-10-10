@@ -90,14 +90,16 @@ def reveal(path: Path) -> None:
         try:
             shell = ctypes.windll.shell32
             pidl = ctypes.c_void_p()
-            # 路径 → PIDL（Shell 的项标识）
+            # 路径 → PIDL（Shell 的项标识，绝对路径形式）
             if shell.SHParseDisplayName(
                     wintypes.LPCWSTR(str(path)), None,
                     ctypes.byref(pidl), 0, None) == 0 and pidl.value:
                 try:
-                    # 参数是 PIDL 数组（这里只有一项）
-                    arr = (ctypes.c_void_p * 1)(pidl.value)
-                    if shell.SHOpenFolderAndSelectItems(arr, 1, None, 0) == 0:
+                    # cidl=0：pidlFolder 直接给文件本身的完整 PIDL，Shell
+                    # 自己打开其父文件夹并选中它。以前误把 PIDL 数组当
+                    # pidlFolder、cidl=1 却 apidl=NULL——参数非法，资源管理器
+                    # 弹「参数错误」，点确定后才由下面的命令行回退打开。
+                    if shell.SHOpenFolderAndSelectItems(pidl, 0, None, 0) == 0:
                         return
                 finally:
                     shell.ILFree(pidl)
