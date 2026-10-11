@@ -19,7 +19,7 @@ APP_NAME = "媒体播放器"
 
 _VIDEO = [
     ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
-    ".ts", ".mpg", ".mpeg", ".rmvb", ".rm", ".3gp", ".m2ts", ".vob",
+    ".ts", ".mpg", ".mpeg", ".rmvb", ".rm", ".3gp", ".m2ts", ".vob", ".asf",
 ]
 _IMAGE = [
     ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
