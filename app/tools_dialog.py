@@ -276,8 +276,7 @@ class ToolsDialog(QDialog):
     def _add_videos(self) -> None:
         files, _ = QFileDialog.getOpenFileNames(
             self, t("tools.add_videos"), "",
-            "Videos (*.mp4 *.mkv *.avi *.mov *.wmv *.asf *.flv *.ts *.m2ts "
-            "*.webm *.mpg *.mpeg);;All files (*.*)")
+            f"Videos ({media.dialog_patterns(media.VIDEO_EXTS)});;All files (*.*)")
         if files:
             self._add_paths(files)
 

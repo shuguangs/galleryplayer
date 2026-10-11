@@ -42,6 +42,15 @@ def is_archive_name(name: str) -> bool:
 ANIMATED_EXTS = {".gif", ".webp", ".apng", ".png"}
 MEDIA_EXTS = VIDEO_EXTS | IMAGE_EXTS
 
+
+def dialog_patterns(exts) -> str:
+    """'*.mp4 *.mkv ...' for a Qt file-dialog filter, from the real ext sets.
+
+    文件对话框的筛选串一律由 VIDEO_EXTS/IMAGE_EXTS 生成，避免各处手写列表
+    漏格式（.asf 等曾漏写：能播却在「打开」对话框里看不到）。
+    """
+    return " ".join(f"*{e}" for e in sorted(exts))
+
 # Values are i18n keys; consumers must render them via t() (see main_window.py).
 SORT_LABELS = {
     "name": "media.sort_name",

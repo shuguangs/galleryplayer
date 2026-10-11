@@ -12,20 +12,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from . import media
 from .i18n import t
 
 PROGID = "MediaPlayer.PortableMedia"
 APP_NAME = "媒体播放器"
 
-_VIDEO = [
-    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
-    ".ts", ".mpg", ".mpeg", ".rmvb", ".rm", ".3gp", ".m2ts", ".vob", ".asf",
-]
-_IMAGE = [
-    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
-    ".tif", ".tiff", ".ico", ".jfif", ".avif",
-]
-EXTENSIONS = _VIDEO + _IMAGE
+# 与浏览/播放用的同一份格式表，避免两处列表不一致（以前漏了 .asf 等）。
+EXTENSIONS = sorted(media.VIDEO_EXTS) + sorted(media.IMAGE_EXTS)
 
 
 def is_supported() -> bool:

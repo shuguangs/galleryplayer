@@ -1232,7 +1232,8 @@ class PlaylistPanel(QWidget):
     def _album_add_files(self) -> None:
         paths, _sel = QFileDialog.getOpenFileNames(
             self, t("panel.add_to_album_files"), str(settings["last_folder"] or ""),
-            t("panel.filter_media") + ";;" + t("panel.filter_all"),
+            f"{t('panel.filter_media')} ({media.dialog_patterns(media.MEDIA_EXTS)})"
+            f";;{t('panel.filter_all')} (*.*)",
         )
         if paths:
             albums.add(self._current_album, paths)
