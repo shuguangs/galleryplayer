@@ -125,6 +125,7 @@ def main() -> int:
             win.raise_window()
     win.show()
     startup_log.stage("shown", "主窗口 show() 完成，进入事件循环")
+    _refresh_shell_registration()
 
     # A folder passed on the command line wins over the remembered location.
     # Files are handled inside MainWindow (player first, then the folder scan).
@@ -136,6 +137,29 @@ def main() -> int:
     rc = app.exec()
     startup_log.end(f"事件循环退出 rc={rc}")
     return rc
+
+
+def _refresh_shell_registration() -> None:
+    """已注册过「打开方式」时，启动后静默重写一遍注册项。
+
+    新版本加的右键菜单（如文件夹「用媒体播放器打开」）这样无需用户再去
+    设置里点一次注册就生效；exe 挪了位置也会自动指向新路径。只在打包版
+    做：源码运行时重写会把关联改指向 python main.py。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    import threading
+
+    def _work() -> None:
+        try:
+            from app import assoc
+
+            if assoc.is_supported() and assoc.is_registered():
+                assoc.register()
+        except Exception as exc:  # 注册表异常不影响启动
+            print(f"[assoc] refresh failed: {exc}")
+
+    threading.Thread(target=_work, daemon=True).start()
 
 
 if __name__ == "__main__":
