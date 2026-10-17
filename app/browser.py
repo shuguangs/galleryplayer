@@ -28,9 +28,16 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
 )
-from PySide6.QtWidgets import QAbstractScrollArea, QTableView, QHeaderView
+from PySide6.QtWidgets import (
+    QAbstractScrollArea,
+    QHeaderView,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QTableView,
+)
 
 from . import theme
+from .folder_groups import Group, build_groups, folder_key, group_index_of_row
 from .i18n import t
 from .media import MediaItem, format_duration
 from .thumbs import ThumbnailCache
@@ -42,6 +49,67 @@ MIN_TILE_W = 96
 # 4:3 rather than 16:9: a cover-cropped portrait photo keeps much more of its
 # subject, and video thumbnails still read fine with slim side bars.
 GRID_TILE_ASPECT = 3 / 4
+# 按文件夹分组时每组前的标题栏
+HEADER_H = 36          # 缩略图/瀑布流：标题栏占的高度（含上下留白）
+GROUP_TOP_PAD = 4
+GROUP_GAP = 6
+DETAIL_HEADER_H = 26   # 详细列表：组首行上方多出的标题带
+
+
+def group_context_menu(parent, model: MediaModel, gi: int, global_pos: QPoint) -> None:
+    """分组标题栏右键菜单：折叠/展开这一组、全部折叠、全部展开。"""
+    from PySide6.QtWidgets import QMenu
+
+    if not (0 <= gi < len(model.groups)):
+        return
+    g = model.groups[gi]
+    menu = QMenu(parent)
+    act_one = menu.addAction(t("browser.group_expand") if g.collapsed else t("browser.group_collapse"))
+    menu.addSeparator()
+    act_all_c = menu.addAction(t("browser.group_collapse_all"))
+    act_all_e = menu.addAction(t("browser.group_expand_all"))
+    chosen = menu.exec(global_pos)
+    if chosen is act_one:
+        model.toggle_group(gi)
+    elif chosen is act_all_c:
+        model.set_all_collapsed(True)
+    elif chosen is act_all_e:
+        model.set_all_collapsed(False)
+
+
+def paint_group_band(p: QPainter, rect: QRect, g: Group, hovered: bool) -> None:
+    """画一条分组标题栏：折叠箭头 + 文件夹名 + 文件数。"""
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    path = QPainterPath()
+    path.addRoundedRect(rect, 6, 6)
+    p.fillPath(path, QColor(theme.BG_HOVER if hovered else theme.BG_PANEL))
+    p.fillRect(QRect(rect.left(), rect.top() + 4, 3, rect.height() - 8), QColor(theme.ACCENT_DIM))
+    f = QFont(p.font())
+    f.setPointSize(9)
+    f.setBold(True)
+    fm = QFontMetrics(f)
+    f2 = QFont(f)
+    f2.setBold(False)
+    f2.setPointSize(8)
+    fm2 = QFontMetrics(f2)
+    x = rect.left() + 10
+    p.setFont(f)
+    p.setPen(QColor(theme.ACCENT))
+    p.drawText(QRect(x, rect.top(), 14, rect.height()), Qt.AlignVCenter | Qt.AlignLeft,
+               "▸" if g.collapsed else "▾")
+    x += 18
+    count = t("browser.group_count").format(count=g.count)
+    cw = fm2.horizontalAdvance(count) + 4
+    avail = max(20, rect.right() - x - cw - 14)
+    p.setPen(QColor(theme.TEXT))
+    p.drawText(QRect(x, rect.top(), avail, rect.height()), Qt.AlignVCenter | Qt.AlignLeft,
+               fm.elidedText(g.label, Qt.ElideMiddle, avail))
+    p.setFont(f2)
+    p.setPen(QColor(theme.TEXT_DIM))
+    p.drawText(QRect(rect.right() - cw - 10, rect.top(), cw, rect.height()),
+               Qt.AlignVCenter | Qt.AlignRight, count)
+    p.restore()
 
 
 class MediaModel(QAbstractTableModel):
@@ -57,10 +125,68 @@ class MediaModel(QAbstractTableModel):
         "browser.col_mtime",
     ]
     sort_requested = Signal(str, bool)
+    groups_changed = Signal(int)     # 某个分组被折叠/展开（分组下标）
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.items: list[MediaItem] = []
+        # 按文件夹分组显示（含子文件夹 + 按文件夹分组同时打开）：两个视图共用
+        # 一份分组表和折叠状态。行号始终等于 items 下标，标题栏只是画出来的。
+        self.grouping = False
+        self.group_root = None
+        self.collapsed: set[str] = set()      # 折叠的文件夹（完整路径，小写）
+        self.groups: list[Group] = []
+        self.group_starts: list[int] = []
+
+    def set_grouping(self, on: bool, root) -> None:
+        """下一次 set_items 时生效。"""
+        self.grouping = bool(on)
+        self.group_root = root if on else None
+
+    def _rebuild_groups(self) -> None:
+        if self.grouping and self.items:
+            self.groups = build_groups(self.items, self.group_root, self.collapsed)
+        else:
+            self.groups = []
+        self.group_starts = [g.start for g in self.groups]
+
+    def group_of(self, row: int) -> int:
+        if not self.groups or not (0 <= row < len(self.items)):
+            return -1
+        return group_index_of_row(self.group_starts, row)
+
+    def row_collapsed(self, row: int) -> bool:
+        gi = self.group_of(row)
+        return gi >= 0 and self.groups[gi].collapsed
+
+    def toggle_group(self, gi: int, collapsed: bool | None = None) -> None:
+        if not (0 <= gi < len(self.groups)):
+            return
+        g = self.groups[gi]
+        new = (not g.collapsed) if collapsed is None else bool(collapsed)
+        if new == g.collapsed:
+            return
+        g.collapsed = new
+        key = folder_key(g.folder)
+        if new:
+            self.collapsed.add(key)
+        else:
+            self.collapsed.discard(key)
+        self.groups_changed.emit(gi)
+
+    def set_all_collapsed(self, collapsed: bool) -> None:
+        changed = False
+        for g in self.groups:
+            if g.collapsed != collapsed:
+                g.collapsed = collapsed
+                changed = True
+            key = folder_key(g.folder)
+            if collapsed:
+                self.collapsed.add(key)
+            else:
+                self.collapsed.discard(key)
+        if changed:
+            self.groups_changed.emit(-1)
 
     def set_items(self, items: list[MediaItem], reset_scroll: bool = True) -> None:
         """Replace the listing.
@@ -74,6 +200,7 @@ class MediaModel(QAbstractTableModel):
             view._snapshot_selection()  # reset 后按路径重定位选中行
         self.beginResetModel()
         self.items = items
+        self._rebuild_groups()
         self.endResetModel()
 
     def item(self, row: int) -> MediaItem | None:
@@ -127,6 +254,24 @@ class MediaModel(QAbstractTableModel):
         self.sort_requested.emit(key, order == Qt.DescendingOrder)
 
 
+class _DetailsDelegate(QStyledItemDelegate):
+    """组首行的单元格画在标题带下面；折叠组的首行只剩标题带。"""
+
+    def __init__(self, view: DetailsView) -> None:
+        super().__init__(view)
+        self.view = view
+
+    def paint(self, p, option, index):
+        if self.view.is_band_row(index.row()):
+            if self.view.model().row_collapsed(index.row()):
+                return
+            o = QStyleOptionViewItem(option)
+            o.rect = option.rect.adjusted(0, DETAIL_HEADER_H, 0, 0)
+            super().paint(p, o, index)
+            return
+        super().paint(p, option, index)
+
+
 class DetailsView(QTableView):
     activatedRow = Signal(int)
     contextRow = Signal(int, QPoint)   # row (-1 for empty space), global position
@@ -149,6 +294,120 @@ class DetailsView(QTableView):
         for c in range(1, len(MediaModel.COLUMNS)):
             hh.setSectionResizeMode(c, QHeaderView.ResizeToContents)
         self.doubleClicked.connect(lambda idx: self.activatedRow.emit(idx.row()))
+        # 按文件夹分组：每组首行加高 DETAIL_HEADER_H，上面画标题带；折叠的组只剩
+        # 标题带（首行只留标题带高度、其余行隐藏）。行号仍等于列表下标。
+        self._band_rows: set[int] = set()
+        self._hidden_rows: list[int] = []
+        self._hover_group = -1
+        self.setMouseTracking(True)
+        self.setItemDelegate(_DetailsDelegate(self))
+        model.modelReset.connect(self._apply_groups)
+        model.groups_changed.connect(self._apply_groups)
+
+    # -- 分组 --------------------------------------------------------------
+
+    def _apply_groups(self, *_args) -> None:
+        m = self.model()
+        vh = self.verticalHeader()
+        base = vh.defaultSectionSize()
+        n = m.rowCount()
+        for r in self._band_rows:
+            if r < n:
+                vh.resizeSection(r, base)
+        for r in self._hidden_rows:
+            if r < n:
+                self.setRowHidden(r, False)
+        self._band_rows = set()
+        self._hidden_rows = []
+        for g in m.groups:
+            self._band_rows.add(g.start)
+            vh.resizeSection(g.start, DETAIL_HEADER_H if g.collapsed else base + DETAIL_HEADER_H)
+            if g.collapsed:
+                for r in range(g.start + 1, g.end):
+                    self.setRowHidden(r, True)
+                    self._hidden_rows.append(r)
+        self.viewport().update()
+
+    def is_band_row(self, row: int) -> bool:
+        return row in self._band_rows
+
+    def _band_at(self, pos: QPoint) -> int:
+        """视口坐标下的分组标题带下标；不在标题带上返回 -1。"""
+        m = self.model()
+        if not m.groups:
+            return -1
+        r = self.rowAt(pos.y())
+        if r < 0 or r not in self._band_rows:
+            return -1
+        if pos.y() - self.rowViewportPosition(r) >= DETAIL_HEADER_H:
+            return -1
+        return m.group_of(r)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        m = self.model()
+        if not m.groups:
+            return
+        vp = self.viewport()
+        first = self.rowAt(0)
+        if first < 0:
+            return
+        last = self.rowAt(vp.height() - 1)
+        if last < 0:
+            last = len(m.items) - 1
+        p = QPainter(vp)
+        w = vp.width()
+        for gi in range(max(0, m.group_of(first)), len(m.groups)):
+            g = m.groups[gi]
+            if g.start > last:
+                break
+            y = self.rowViewportPosition(g.start)
+            paint_group_band(p, QRect(4, y + 2, max(40, w - 8), DETAIL_HEADER_H - 4), g,
+                             gi == self._hover_group)
+        p.end()
+
+    def mousePressEvent(self, e):
+        gi = self._band_at(e.position().toPoint())
+        if gi >= 0:
+            if e.button() == Qt.LeftButton:
+                self.model().toggle_group(gi)
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseDoubleClickEvent(self, e):
+        if self._band_at(e.position().toPoint()) >= 0:
+            e.accept()
+            return
+        super().mouseDoubleClickEvent(e)
+
+    def mouseMoveEvent(self, e):
+        gi = self._band_at(e.position().toPoint())
+        if gi != self._hover_group:
+            self._hover_group = gi
+            self.viewport().update()
+        super().mouseMoveEvent(e)
+
+    def leaveEvent(self, e):
+        if self._hover_group != -1:
+            self._hover_group = -1
+            self.viewport().update()
+        super().leaveEvent(e)
+
+    def moveCursor(self, action, modifiers):
+        """方向键跳过折叠组里的行（折叠组的首行只剩标题带，也不该选中）。"""
+        idx = super().moveCursor(action, modifiers)
+        m = self.model()
+        if not m.groups or not idx.isValid() or not m.row_collapsed(idx.row()):
+            return idx
+        r = idx.row()
+        d = 1 if r >= self.currentIndex().row() else -1
+        while 0 <= r < len(m.items) and m.row_collapsed(r):
+            g = m.groups[m.group_of(r)]
+            r = g.end if d > 0 else g.start - 1
+        if not (0 <= r < len(m.items)):
+            return self.currentIndex()
+        return m.index(r, idx.column())
 
     def keyPressEvent(self, e):
         if e.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -159,6 +418,10 @@ class DetailsView(QTableView):
         super().keyPressEvent(e)
 
     def contextMenuEvent(self, e):
+        gi = self._band_at(e.pos())
+        if gi >= 0:
+            group_context_menu(self, self.model(), gi, e.globalPos())
+            return
         idx = self.indexAt(e.pos())
         if idx.isValid():
             self.selectRow(idx.row())
@@ -199,6 +462,10 @@ class TileView(QAbstractScrollArea):
         self._tile_w = MIN_TILE_W
         self._tile_h = MIN_TILE_W
         self._content_h = 0
+        # 按文件夹分组：各组标题栏顶（内容坐标，升序，供 bisect）与标题栏宽度
+        self._group_tops: list[int] = []
+        self._band_w = 0
+        self._hover_group = -1
         self._current = -1
         self._hover = -1
         self._key_to_row: dict[str, int] = {}
@@ -227,6 +494,7 @@ class TileView(QAbstractScrollArea):
         self.verticalScrollBar().setSingleStep(48)
         self.model._view_ref = self
         self.model.modelReset.connect(self._on_model_reset)
+        self.model.groups_changed.connect(self._on_groups_changed)
         self.thumbs.ready.connect(self._on_thumb_ready)
         self.thumbs.meta_ready.connect(self._on_meta_ready)
 
@@ -260,6 +528,9 @@ class TileView(QAbstractScrollArea):
     def scroll_to(self, row: int) -> None:
         if not (0 <= row < len(self.model.items)):
             return
+        if self.model.row_collapsed(row):
+            # 要定位的项在折叠的文件夹里（如播放器切到了它）：先展开
+            self.model.toggle_group(self.model.group_of(row), False)
         r = self.rect_for(row)
         bar = self.verticalScrollBar()
         top, bottom = bar.value(), bar.value() + self.viewport().height()
@@ -410,14 +681,16 @@ class TileView(QAbstractScrollArea):
         cols = max(1, self.columns)
         self._tile_w = max(MIN_TILE_W, (w - TILE_GAP * (cols - 1)) // cols - 1)
 
-        if self.mode == "waterfall":
+        self._band_w = cols * (self._tile_w + TILE_GAP) - TILE_GAP
+        self._group_tops = []
+        if self.model.groups:
+            self._relayout_grouped(cols)
+        elif self.mode == "waterfall":
             heights = [TILE_GAP] * cols
             rects = []
             for it in items:
                 c = heights.index(min(heights))
-                img_h = int(self._tile_w / max(0.25, min(4.0, it.aspect)))
-                img_h = max(60, min(int(self._tile_w * 2.2), img_h))
-                h = img_h + TILE_PAD * 2
+                h = self._wf_height(it)
                 x = TILE_GAP + c * (self._tile_w + TILE_GAP)
                 rects.append(QRect(x, heights[c], self._tile_w, h))
                 heights[c] += h + TILE_GAP
@@ -440,11 +713,111 @@ class TileView(QAbstractScrollArea):
         bar.setPageStep(self.viewport().height())
         self.viewport().update()
 
+    def _wf_height(self, it: MediaItem) -> int:
+        img_h = int(self._tile_w / max(0.25, min(4.0, it.aspect)))
+        img_h = max(60, min(int(self._tile_w * 2.2), img_h))
+        return img_h + TILE_PAD * 2
+
+    def _relayout_grouped(self, cols: int) -> None:
+        """分组布局：每组 = 标题栏 + 组内网格/瀑布流，每组都从新的一行开始。
+
+        折叠的组只剩标题栏；组内的项 rect_for 返回空矩形，不参与命中/绘制。
+        """
+        items = self.model.items
+        groups = self.model.groups
+        wf = self.mode == "waterfall"
+        self._tile_h = int(self._tile_w * GRID_TILE_ASPECT) + NAME_ROW_H + TILE_PAD * 2
+        rects: list[QRect] = [QRect()] * len(items) if wf else []
+        order: list[int] = []
+        y = GROUP_TOP_PAD
+        for g in groups:
+            g.top = y
+            g.body_top = y + HEADER_H
+            y = g.body_top
+            if not g.collapsed and g.count:
+                if wf:
+                    heights = [y] * cols
+                    for row in range(g.start, g.end):
+                        c = heights.index(min(heights))
+                        h = self._wf_height(items[row])
+                        x = TILE_GAP + c * (self._tile_w + TILE_GAP)
+                        rects[row] = QRect(x, heights[c], self._tile_w, h)
+                        heights[c] += h + TILE_GAP
+                        order.append(row)
+                    y = max(heights)
+                else:
+                    nrows = (g.count + cols - 1) // cols
+                    y += nrows * (self._tile_h + TILE_GAP)
+            g.bottom = y
+            y += GROUP_GAP
+        self._group_tops = [g.top for g in groups]
+        self._content_h = y if groups else 0
+        if wf:
+            self._rects = rects
+            order.sort(key=lambda i: rects[i].top())
+            self._wf_order = order
+            self._wf_tops = [rects[i].top() for i in order]
+        else:
+            self._rects = []
+            self._wf_order = []
+            self._wf_tops = []
+
+    def _band_rect(self, g: Group) -> QRect:
+        """分组标题栏（内容坐标）。"""
+        return QRect(TILE_GAP, g.top, max(40, self._band_w), HEADER_H - GROUP_GAP)
+
+    def _header_at(self, pos: QPoint) -> int:
+        """视口坐标下的分组标题栏下标；不在标题栏上返回 -1。"""
+        if not self.model.groups or not self._group_tops:
+            return -1
+        p = QPoint(pos.x(), pos.y() + self.verticalScrollBar().value())
+        gi = bisect_right(self._group_tops, p.y()) - 1
+        if 0 <= gi < len(self.model.groups) and self._band_rect(self.model.groups[gi]).contains(p):
+            return gi
+        return -1
+
+    def _on_groups_changed(self, gi: int) -> None:
+        """折叠/展开后重排：被点的标题栏停在屏幕上原来的位置。"""
+        groups = self.model.groups
+        bar = self.verticalScrollBar()
+        screen_y = None
+        if 0 <= gi < len(groups):
+            screen_y = groups[gi].top - bar.value()
+        # 折叠起来的项不再留在选区里：看不见的东西不该被“删除/移动”带走
+        hidden = {r for r in self._selected_rows if self.model.row_collapsed(r)}
+        if hidden:
+            self._selected_rows -= hidden
+            self.selectionChanged.emit()
+        if self._current >= 0 and self.model.row_collapsed(self._current):
+            self._current = -1
+            self.currentRowChanged.emit(-1)
+        self._hover = -1
+        self.relayout()
+        if screen_y is not None and 0 <= gi < len(groups):
+            bar.setValue(max(0, min(bar.maximum(), groups[gi].top - max(0, screen_y))))
+
+    def _group_menu(self, gi: int, global_pos: QPoint) -> None:
+        group_context_menu(self, self.model, gi, global_pos)
+
     def rect_for(self, row: int) -> QRect:
         """Content-space geometry of one tile."""
         if self.mode == "waterfall":
             return self._rects[row] if 0 <= row < len(self._rects) else QRect()
         cols = max(1, self.columns)
+        if self.model.groups:
+            gi = self.model.group_of(row)
+            if gi < 0:
+                return QRect()
+            g = self.model.groups[gi]
+            if g.collapsed:
+                return QRect()
+            r, c = divmod(row - g.start, cols)
+            return QRect(
+                TILE_GAP + c * (self._tile_w + TILE_GAP),
+                g.body_top + r * (self._tile_h + TILE_GAP),
+                self._tile_w,
+                self._tile_h,
+            )
         r, c = divmod(row, cols)
         return QRect(
             TILE_GAP + c * (self._tile_w + TILE_GAP),
@@ -462,10 +835,11 @@ class TileView(QAbstractScrollArea):
     def _row_at(self, pos: QPoint) -> int:
         p = QPoint(pos.x(), pos.y() + self.verticalScrollBar().value())
         n = len(self.model.items)
-        if self.mode == "waterfall":
+        if self.mode == "waterfall" or self.model.groups:
             # Only the tiles near the cursor's band can contain it.
+            # 分组网格不存 rect（_rects 为空），统一走 rect_for
             for i in self._visible_rows():
-                if self._rects[i].contains(p):
+                if self.rect_for(i).contains(p):
                     return i
             return -1
         if n == 0:
@@ -502,6 +876,21 @@ class TileView(QAbstractScrollArea):
 
         cols = max(1, self.columns)
         pitch = self._tile_h + TILE_GAP
+        if self.model.groups:
+            rows: list[int] = []
+            groups = self.model.groups
+            gi0 = max(0, bisect_right(self._group_tops, top) - 1)
+            for g in groups[gi0:]:
+                if g.top > bottom:
+                    break
+                if g.collapsed or g.bottom < top:
+                    continue
+                fr = max(0, (top - g.body_top) // pitch)
+                lr = (bottom - g.body_top) // pitch
+                if lr < 0:
+                    continue
+                rows.extend(range(g.start + fr * cols, min(g.end, g.start + (lr + 1) * cols)))
+            return rows
         first_row = max(0, (top - TILE_GAP) // pitch)
         last_row = (bottom - TILE_GAP) // pitch
         return range(min(n, first_row * cols), min(n, (last_row + 1) * cols))
@@ -568,6 +957,16 @@ class TileView(QAbstractScrollArea):
                 t("browser.empty_folder"),
             )
             return
+
+        if self.model.groups and self._group_tops:
+            vh = self.viewport().height()
+            gi0 = max(0, bisect_right(self._group_tops, off) - 1)
+            for gi in range(gi0, len(self.model.groups)):
+                g = self.model.groups[gi]
+                if g.top > off + vh:
+                    break
+                paint_group_band(p, self._band_rect(g).translated(0, -off), g,
+                                 gi == self._hover_group)
 
         rows = self._visible_rows()
         for i in rows:
@@ -722,6 +1121,19 @@ class TileView(QAbstractScrollArea):
         if self._rubber_origin is not None:
             self._update_rubber(pos)
             return
+        gi = self._header_at(pos)
+        if gi != self._hover_group:
+            self._hover_group = gi
+            self.viewport().setCursor(Qt.PointingHandCursor if gi >= 0 else Qt.ArrowCursor)
+            if gi >= 0:
+                g = self.model.groups[gi]
+                self.setToolTip(str(g.folder))
+            self.viewport().update()
+        if gi >= 0:
+            if self._hover != -1:
+                self._hover = -1
+                self.viewport().update()
+            return
         row = self._row_at(pos)
         if row != self._hover:
             self._hover = row
@@ -729,12 +1141,20 @@ class TileView(QAbstractScrollArea):
             self.viewport().update()
 
     def leaveEvent(self, e):
-        if self._hover != -1:
+        if self._hover != -1 or self._hover_group != -1:
             self._hover = -1
+            self._hover_group = -1
             self.viewport().update()
 
     def mousePressEvent(self, e):
         pos = e.position().toPoint()
+        gi = self._header_at(pos)
+        if gi >= 0:
+            # 点标题栏：折叠 / 展开这个文件夹（右键走 contextMenuEvent）
+            if e.button() == Qt.LeftButton:
+                self.model.toggle_group(gi)
+            self.setFocus()
+            return
         row = self._row_at(pos)
         mods = e.modifiers()
         if e.button() == Qt.LeftButton:
@@ -796,7 +1216,7 @@ class TileView(QAbstractScrollArea):
             off = self.verticalScrollBar().value()
             content_rect = rect.translated(0, off)
             hit = set()
-            for i, it in enumerate(self.model.items):
+            for i in range(len(self.model.items)):
                 r = self.rect_for(i)
                 if r.intersects(content_rect):
                     hit.add(i)
@@ -840,12 +1260,22 @@ class TileView(QAbstractScrollArea):
         self.viewport().update()
 
     def mouseDoubleClickEvent(self, e):
+        gi = self._header_at(e.position().toPoint())
+        if gi >= 0:
+            # 连点两下 = 两次切换（第二下 Qt 只发 doubleClick 不发 press）
+            if e.button() == Qt.LeftButton:
+                self.model.toggle_group(gi)
+            return
         row = self._row_at(e.position().toPoint())
         if row >= 0:
             self.set_current_row(row, scroll=False)
             self.activatedRow.emit(row)
 
     def contextMenuEvent(self, e):
+        gi = self._header_at(e.pos())
+        if gi >= 0:
+            self._group_menu(gi, e.globalPos())
+            return
         row = self._row_at(e.pos())
         if row >= 0:
             # right-clicking a tile selects it, so the menu acts on what was clicked
@@ -862,6 +1292,12 @@ class TileView(QAbstractScrollArea):
             if self._current >= 0:
                 self.activatedRow.emit(self._current)
             return
+        if self.model.groups:
+            target = self._grouped_key_target(cur, key)
+            if target is not None:
+                if target >= 0:
+                    self.set_current_row(target)
+                return
         step_cols = self.columns if self.mode == "grid" else 1
         moves = {
             Qt.Key_Left: -1,
@@ -881,6 +1317,69 @@ class TileView(QAbstractScrollArea):
             self.set_current_row(n - 1)
             return
         super().keyPressEvent(e)
+
+    # -- grouped keyboard navigation -------------------------------------
+
+    def _step_visible(self, row: int, d: int) -> int:
+        """从 row 往 d 方向走一个可见（未折叠）的项；走不动返回 row。"""
+        n = len(self.model.items)
+        groups = self.model.groups
+        r = row + d
+        while 0 <= r < n:
+            gi = self.model.group_of(r)
+            if gi < 0 or not groups[gi].collapsed:
+                return r
+            r = groups[gi].end if d > 0 else groups[gi].start - 1
+        return row
+
+    def _grid_vertical(self, cur: int, d: int) -> int:
+        """分组网格里的上 / 下：组内按列走，出了组跳到相邻展开组的同一列。"""
+        groups = self.model.groups
+        cols = max(1, self.columns)
+        gi = self.model.group_of(cur)
+        if gi < 0 or groups[gi].collapsed:
+            return self._step_visible(cur, d)
+        g = groups[gi]
+        local = cur - g.start
+        col = local % cols
+        t_local = local + d * cols
+        if 0 <= t_local < g.count:
+            return g.start + t_local
+        if d > 0 and local // cols < (g.count - 1) // cols:
+            return g.end - 1          # 下一行不满：落到它的最后一项
+        j = gi + d
+        while 0 <= j < len(groups) and (groups[j].collapsed or not groups[j].count):
+            j += d
+        if not (0 <= j < len(groups)):
+            return cur
+        h = groups[j]
+        if d > 0:
+            return h.start + min(col, h.count - 1)
+        last_row_start = ((h.count - 1) // cols) * cols
+        return h.start + min(last_row_start + col, h.count - 1)
+
+    def _grouped_key_target(self, cur: int, key) -> int | None:
+        """分组模式下的方向键目标行；None = 不是导航键，交给默认处理。"""
+        n = len(self.model.items)
+        grid = self.mode == "grid"
+        if key == Qt.Key_Left:
+            return self._step_visible(cur, -1)
+        if key == Qt.Key_Right:
+            return self._step_visible(cur, 1)
+        if key in (Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown):
+            d = -1 if key in (Qt.Key_Up, Qt.Key_PageUp) else 1
+            times = 3 if key in (Qt.Key_PageUp, Qt.Key_PageDown) else 1
+            r = cur
+            for _ in range(times):
+                r = self._grid_vertical(r, d) if grid else self._step_visible(r, d)
+            return r
+        if key == Qt.Key_Home:
+            r = self._step_visible(-1, 1)
+            return r if r >= 0 else -1
+        if key == Qt.Key_End:
+            r = self._step_visible(n, -1)
+            return r if r < n else -1
+        return None
 
     def wheelEvent(self, e):
         if e.modifiers() & Qt.ControlModifier:

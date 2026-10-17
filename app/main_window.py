@@ -1813,6 +1813,18 @@ class MainWindow(QMainWindow):
     def _on_recursive_toggled(self) -> None:
         self.set_folder(self.folder, force=True)
 
+    def _grouping_active(self) -> bool:
+        """标题栏分组只在「包含子文件夹」+「按文件夹分组」都开时出现。"""
+        return (self.chk_group.isChecked() and self.btn_recursive.isChecked()
+                and not self._archive_mode)
+
+    def _sync_grouping(self) -> None:
+        """把分组开关同步到浏览器模型（下一次 set_items 生效）和播放列表。"""
+        on = self._grouping_active()
+        self.model.set_grouping(on, self.folder)
+        if self.viewer is not None:
+            self.viewer.panel.list.set_group_heads(on, self.folder)
+
     def _sync_tree(self, folder: Path) -> None:
         """Reveal `folder` in the directory tree without re-triggering a scan.
 
@@ -2495,6 +2507,7 @@ class MainWindow(QMainWindow):
             else self.search.text().strip()
         items = media.apply_filter(self.all_items, flags, term)
         items = self._sorted_for_view(items)
+        self._sync_grouping()
         # meta 回填引发的自动重排（keep=visible）加"结果未变"守卫：预热期
         # 间持续 meta_ready → 每 700ms 一次全量 set_items+relayout（48k 项
         # ~100ms/次）让界面持续卡顿（观感"未响应"）。排序键没变时（名称
@@ -2646,6 +2659,7 @@ class MainWindow(QMainWindow):
             _slog.stage("ensure-viewer", "Viewer 构建完成")
             # 播放列表面板的排序下拉与浏览器同一套规则（含按文件夹分组）
             self.viewer.panel.sort_fn = self._sorted_for_view
+            self.viewer.panel.list.set_group_heads(self._grouping_active(), self.folder)
             # Show/Hide 事件驱动缩略图视频解码余量：播放器不可见时放开
             # 第 2 路通用视频线程（见 ThumbnailCache.set_video_headroom）
             self.viewer.installEventFilter(self)

@@ -152,7 +152,35 @@ class MediaRowDelegate(QStyledItemDelegate):
             self._paint_thumb_row(p, rect, item, index, text_color, dim_color, missing)
         else:
             self._paint_compact_row(p, rect, item, index, text_color, dim_color)
+        if self.owner.group_heads:
+            self._paint_group_head(p, rect, item, index.row())
         p.restore()
+
+    def _paint_group_head(self, p, rect, item, row) -> None:
+        """按文件夹分组时：每个文件夹的第一行顶上画分隔线 + 文件夹名。
+
+        行高不变（列表开着 uniformItemSizes，十万级行靠它才不卡），
+        所以文件夹名做成右上角的小标签。
+        """
+        if row > 0:
+            prev = self.owner.item(row - 1)
+            prev_it = prev.data(ITEM_ROLE) if prev is not None else None
+            if prev_it is not None and prev_it.path.parent == item.path.parent:
+                return
+        from .folder_groups import folder_label
+
+        p.fillRect(QRect(rect.left(), rect.top(), rect.width(), 2), QColor(theme.ACCENT_DIM))
+        f = QFont(p.font()); f.setPointSize(7); p.setFont(f)
+        fm = QFontMetrics(f)
+        label = fm.elidedText(folder_label(item.path.parent, self.owner.group_root),
+                              Qt.ElideMiddle, max(40, rect.width() // 2))
+        w = fm.horizontalAdvance(label) + 10
+        tag = QRect(rect.right() - w - 4, rect.top() + 2, w, fm.height() + 2)
+        path = QPainterPath()
+        path.addRoundedRect(tag, 3, 3)
+        p.fillPath(path, QColor(theme.ACCENT_DIM))
+        p.setPen(QColor("#ffffff"))
+        p.drawText(tag, Qt.AlignCenter, label)
 
     # -- densities --------------------------------------------------------
 
@@ -300,6 +328,8 @@ class MediaListWidget(QListWidget):
         self.thumb_mode = True
         self.playing_row = -1
         self.thumbs_paused = False  # low-priority mode: skip thumbnail requests
+        self.group_heads = False    # 按文件夹分组：每个文件夹首行画分隔线
+        self.group_root = None
         self.setObjectName("PanelList")
         # 行高全局统一（缩略图模式 54 / 紧凑 26，切换时整表一起改，见
         # set_thumb_mode 与 MediaRowDelegate.sizeHint）——所以可以开
@@ -437,6 +467,14 @@ class MediaListWidget(QListWidget):
             "panel-fill",
             f"续填 {pos}/{len(items)} 行（免去 {len(items) - pos} 行同步补齐）")
         return True
+
+    def set_group_heads(self, on: bool, root) -> None:
+        on = bool(on)
+        if on == self.group_heads and root == self.group_root:
+            return
+        self.group_heads = on
+        self.group_root = root
+        self.viewport().update()
 
     def setDelegateInstance(self, thumbs: ThumbnailCache) -> None:
         self._delegate = MediaRowDelegate(thumbs, self)
