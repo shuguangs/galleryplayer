@@ -21,18 +21,33 @@ APP_NAME = "媒体播放器"
 # 与浏览/播放用的同一份格式表，避免两处列表不一致（以前漏了 .asf 等）。
 EXTENSIONS = sorted(media.VIDEO_EXTS) + sorted(media.IMAGE_EXTS)
 
+# 资源管理器右键「用媒体播放器打开」：文件夹空白处（Background）与右键文件夹本身。
+# 值为命令里代表目标文件夹的占位符。末尾补 "\." ：盘符根目录时 %V 是 "I:\"，
+# 直接加引号成 "I:\"，反斜杠会把收尾引号转义掉（argv 解析成 I:"）；
+# "I:\." 无此问题，pathlib 会把 "." 吃掉。
+FOLDER_VERB = "MediaPlayer.OpenFolder"
+_FOLDER_MENUS = {
+    r"Software\Classes\Directory\Background\shell": r"%V\.",
+    r"Software\Classes\Directory\shell": r"%V\.",
+    r"Software\Classes\Drive\shell": r"%V\.",
+}
+
 
 def is_supported() -> bool:
     return sys.platform.startswith("win")
 
 
-def _launch_command() -> str:
-    """The command Windows should run, with '%1' standing in for the file."""
+def _launch_command(arg: str = "%1") -> str:
+    """The command Windows should run, with `arg` standing in for the target.
+
+    "%1" = the clicked file/folder; "%V" = the folder whose blank area was
+    right-clicked (Directory\Background has no item, so %1 is empty there).
+    """
     if getattr(sys, "frozen", False):
-        return f'"{Path(sys.executable)}" "%1"'
+        return f'"{Path(sys.executable)}" "{arg}"'
     py = Path(sys.executable)
     main = Path(__file__).resolve().parent.parent / "main.py"
-    return f'"{py}" "{main}" "%1"'
+    return f'"{py}" "{main}" "{arg}"'
 
 
 def _icon_ref() -> str:
@@ -73,6 +88,13 @@ def register() -> None:
         with winreg.CreateKey(root, rf"Software\Classes\Applications\{exe}\SupportedTypes") as key:
             winreg.SetValueEx(key, ext, 0, winreg.REG_SZ, "")
 
+    # 资源管理器里文件夹空白处 / 文件夹 / 盘符右键 →「用媒体播放器打开」
+    for base, arg in _FOLDER_MENUS.items():
+        verb = rf"{base}\{FOLDER_VERB}"
+        _set(verb, t("assoc.open_folder_menu"))
+        _set(verb, _icon_ref(), name="Icon")
+        _set(rf"{verb}\command", _launch_command(arg))
+
     _notify_shell()
 
 
@@ -89,6 +111,8 @@ def unregister() -> None:
         _del_value(root, rf"Software\Classes\{ext}\OpenWithProgids", PROGID)
     _del_tree(root, rf"Software\Classes\{PROGID}")
     _del_tree(root, rf"Software\Classes\Applications\{exe}")
+    for base in _FOLDER_MENUS:
+        _del_tree(root, rf"{base}\{FOLDER_VERB}")
 
     _notify_shell()
 

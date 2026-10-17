@@ -43,6 +43,7 @@ _TR: dict[str, dict[str, str]] = {
     # ---- albums / assoc / runtime / netpath ----
     "albums.default": {"zh": "默认专辑", "en": "Default album"},
     "albums.new": {"zh": "新建专辑", "en": "New album"},
+    "assoc.open_folder_menu": {"zh": "用媒体播放器打开", "en": "Open with Media Player"},
     "assoc.win_only": {"zh": "文件关联仅支持 Windows", "en": "File association is only available on Windows"},
     "runtime.libmpv_missing": {"zh": "找不到 {dll}", "en": "Cannot find {dll}"},
     "runtime.libmpv_vendor": {"zh": "请把 libmpv-2.dll 放到 vendor 目录下。", "en": "Put libmpv-2.dll into the vendor directory."},
@@ -568,8 +569,8 @@ _TR: dict[str, dict[str, str]] = {
     "settings.export_log_failed": {"zh": "导出失败：{err}", "en": "Export failed: {err}"},
     "settings.assoc_windows_only": {"zh": "文件关联仅在 Windows 上可用。", "en": "File association is only available on Windows."},
     "settings.assoc_status_registered": {"zh": "状态：已注册到「打开方式」。", "en": "Status: registered in \"Open with\"."},
-    "settings.assoc_status_unregistered": {"zh": "把本程序加入右键「打开方式」列表（仅当前用户，无需管理员）。", "en": "Add this app to the right-click \"Open with\" list (current user only, no admin needed)."},
-    "settings.assoc_registered_hint": {"zh": "已注册。现在右键任意视频/图片 →「打开方式」即可看到「媒体播放器」，选中并勾选「始终使用」就能设为默认。", "en": "Registered. Right-click any video/image → \"Open with\" to find \"Media Player\"; tick \"Always use this app\" to make it the default."},
+    "settings.assoc_status_unregistered": {"zh": "把本程序加入右键「打开方式」列表，并在资源管理器文件夹右键菜单加入「用媒体播放器打开」（仅当前用户，无需管理员）。", "en": "Add this app to the right-click \"Open with\" list and add \"Open with Media Player\" to Explorer's folder context menu (current user only, no admin needed)."},
+    "settings.assoc_registered_hint": {"zh": "已注册。现在右键任意视频/图片 →「打开方式」即可看到「媒体播放器」，选中并勾选「始终使用」就能设为默认。在资源管理器里文件夹空白处（或文件夹、盘符上）右键 →「用媒体播放器打开」可直接打开该文件夹（Windows 11 在「显示更多选项」里）。", "en": "Registered. Right-click any video/image → \"Open with\" to find \"Media Player\"; tick \"Always use this app\" to make it the default. Right-click a folder's blank area (or a folder/drive) in Explorer → \"Open with Media Player\" to open that folder (on Windows 11 it is under \"Show more options\")."},
     "settings.assoc_register_failed": {"zh": "注册失败：{err}", "en": "Registration failed: {err}"},
     "settings.assoc_unregistered_hint": {"zh": "已取消关联。", "en": "Unregistered."},
     "settings.assoc_unregister_failed": {"zh": "取消失败：{err}", "en": "Unregister failed: {err}"},
