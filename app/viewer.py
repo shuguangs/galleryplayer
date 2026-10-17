@@ -33,6 +33,7 @@ from .playlist_panel import PlaylistPanel
 from .runtime import APP_DIR, USERDATA_DIR
 from .thumbs import FramePreviewer, ThumbnailCache
 from .welcome import remember_recent_file
+from .wheel_policy import WheelStepper
 
 HIDE_DELAY_MS = 2600
 # Accumulated mouse travel (px) required to bring the hidden overlay back:
@@ -81,7 +82,7 @@ class Viewer(QWidget):
         self._bars_visible = True
         self._move_accum = 0.0                    # travel since the bars hid
         self._last_move_pos = None                # None after leaving the window
-        self._wheel_accum = 0
+        self._wheel = WheelStepper()              # 一次滚动先切一部，持续滚才继续
         self._pending_click: QTimer | None = None
         self._shutdown = False
         # ---- GIF recording state
@@ -1243,10 +1244,8 @@ class Viewer(QWidget):
             e.accept()
             return
         # plain wheel = previous / next media
-        self._wheel_accum += dy
-        while abs(self._wheel_accum) >= 120:
-            direction = -1 if self._wheel_accum > 0 else 1
-            self._wheel_accum -= 120 if self._wheel_accum > 0 else -120
+        direction = self._wheel.feed(dy)
+        if direction:
             self.step(direction)
         self._show_bars()
         e.accept()
