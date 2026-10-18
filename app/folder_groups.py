@@ -22,6 +22,9 @@ class Group:
     end: int              # 末项之后（不含）
     label: str
     collapsed: bool = False
+    depth: int = 0        # 相对打开那层的嵌套深度（根目录与一级子文件夹 = 0）
+    hidden: bool = False  # 某个上级文件夹被折叠了：标题栏和内容都不显示
+    total: int = 0        # 含所有下级文件夹的文件数
     # 布局结果（内容坐标，视图填写）
     top: int = 0          # 标题栏顶
     body_top: int = 0     # 第一行文件顶
@@ -30,6 +33,11 @@ class Group:
     @property
     def count(self) -> int:
         return self.end - self.start
+
+    @property
+    def folded(self) -> bool:
+        """这一组的文件不显示（自己折叠了，或上级文件夹折叠了）。"""
+        return self.collapsed or self.hidden
 
 
 def folder_key(folder: Path) -> str:
@@ -48,22 +56,81 @@ def folder_label(folder: Path, root: Path | None) -> str:
     return str(folder)
 
 
+def _rel_parts(folder: Path, root: Path | None) -> tuple[str, ...] | None:
+    if root is None:
+        return None
+    try:
+        return folder.relative_to(root).parts
+    except ValueError:
+        return None
+
+
+def _ancestors(folder: Path, root: Path | None) -> list[Path]:
+    """folder 在打开那层之下的所有上级文件夹（由浅到深，不含 root 和自己）。"""
+    parts = _rel_parts(folder, root)
+    if not parts:
+        return []
+    out: list[Path] = []
+    anc = root
+    for part in parts[:-1]:
+        anc = anc / part
+        out.append(anc)
+    return out
+
+
 def build_groups(items, root: Path | None, collapsed: set[str] | None = None) -> list[Group]:
-    groups: list[Group] = []
+    """按"直接所在文件夹变了"切段。
+
+    子文件夹 / 子子文件夹：某个上级文件夹自己没有文件时，也在它第一个下级
+    文件夹前补一条空的标题栏（count=0），这样总有地方能点，一次收起整棵子树。
+    """
+    raw: list[tuple[Path, int, int]] = []
     prev: Path | None = None
     for i, it in enumerate(items):
         parent = it.path.parent
         if prev is None or parent != prev:
-            if groups:
-                groups[-1].end = i
-            groups.append(Group(parent, i, i + 1, folder_label(parent, root)))
+            if raw:
+                raw[-1] = (raw[-1][0], raw[-1][1], i)
+            raw.append((parent, i, i + 1))
             prev = parent
-    if groups:
-        groups[-1].end = len(items)
-    if collapsed:
-        for g in groups:
-            g.collapsed = folder_key(g.folder) in collapsed
+    if raw:
+        raw[-1] = (raw[-1][0], raw[-1][1], len(items))
+
+    real = {f for f, _s, _e in raw}
+    groups: list[Group] = []
+    virtual: set[Path] = set()
+    for folder, s, e in raw:
+        for anc in _ancestors(folder, root):
+            if anc not in real and anc not in virtual:
+                virtual.add(anc)
+                groups.append(Group(anc, s, s, folder_label(anc, root),
+                                    depth=len(_rel_parts(anc, root) or ()) - 1))
+        parts = _rel_parts(folder, root)
+        groups.append(Group(folder, s, e, folder_label(folder, root),
+                            depth=max(0, len(parts) - 1) if parts else 0))
+
+    by_folder = {g.folder: g for g in groups}
+    for g in groups:
+        g.total += g.count
+        if g.count:
+            for anc in _ancestors(g.folder, root):
+                a = by_folder.get(anc)
+                if a is not None:
+                    a.total += g.count
+    apply_fold(groups, collapsed, root)
     return groups
+
+
+def apply_fold(groups: list[Group], collapsed: set[str] | None, root: Path | None) -> None:
+    """按折叠集合刷新每组的 collapsed / hidden（上级折叠 → 整棵子树隐藏）。"""
+    keys = collapsed or set()
+    for g in groups:
+        g.collapsed = folder_key(g.folder) in keys
+        g.hidden = bool(keys) and any(folder_key(a) in keys for a in _ancestors(g.folder, root))
+
+
+def ancestor_keys(folder: Path, root: Path | None) -> list[str]:
+    return [folder_key(a) for a in _ancestors(folder, root)]
 
 
 def group_index_of_row(starts: list[int], row: int) -> int:

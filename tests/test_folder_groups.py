@@ -102,3 +102,75 @@ class TileViewGroupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def nested():
+    # 根 1 个；A 1 个、A/B 1 个、A/B/C 1 个；X 自己没文件、X/Y 2 个；Z 1 个
+    return [mk(r) for r in ["r.jpg", "A/1.jpg", "A/B/2.jpg", "A/B/C/3.jpg",
+                            "X/Y/4.jpg", "X/Y/5.jpg", "Z/6.jpg"]]
+
+
+class NestedCollapseTests(unittest.TestCase):
+    """点子文件夹的标题栏 = 收起它下面所有子子文件夹。"""
+
+    def test_virtual_parent_and_totals(self):
+        gs = build_groups(nested(), ROOT)
+        self.assertEqual([g.label for g in gs][1:], ["A", "A/B", "A/B/C", "X", "X/Y", "Z"])
+        self.assertEqual(sum(g.count for g in gs), 7)
+        by = {g.label: g for g in gs}
+        self.assertEqual(by["X"].count, 0)          # 补出来的空标题栏
+        self.assertEqual(by["X"].total, 2)
+        self.assertEqual(by["A"].total, 3)
+        self.assertEqual(by["A/B/C"].depth, 2)
+
+    def test_collapse_parent_hides_subtree(self):
+        model = MediaModel()
+        model.set_grouping(True, ROOT)
+        model.set_items(nested())
+        gi = [g.label for g in model.groups].index("A")
+        model.toggle_group(gi)
+        by = {g.label: g for g in model.groups}
+        self.assertTrue(by["A"].collapsed and not by["A"].hidden)
+        self.assertTrue(by["A/B"].hidden and by["A/B/C"].hidden)
+        self.assertFalse(by["X/Y"].folded)
+        for row in (1, 2, 3):
+            self.assertTrue(model.row_collapsed(row))
+        # 定位到被收起的子子文件夹里的项：整条链展开
+        model.expand_row(3)
+        self.assertFalse(any(model.row_collapsed(r) for r in range(7)))
+
+    def test_tile_layout_skips_hidden_subtree(self):
+        model = MediaModel()
+        model.set_grouping(True, ROOT)
+        view = TileView(model, ThumbnailCache())
+        view.resize(800, 2000)
+        view.set_columns(4)
+        model.set_items(nested())
+        view.relayout()
+        by = {g.label: g for g in model.groups}
+        model.toggle_group(model.groups.index(by["A"]))
+        self.assertTrue(view.rect_for(2).isNull())
+        # 被收起的 A/B 不占位置：原来它的位置现在是 X 的标题栏
+        self.assertEqual(view._header_at(QPoint(60, by["A/B"].top + 5)), model.groups.index(by["X"]))
+        # X 紧跟在 A 的标题栏下面
+        self.assertLessEqual(by["X"].top, by["A"].top + HEADER_H + 20)
+
+    def test_scrollbar_marks_locate_folders(self):
+        model = MediaModel()
+        model.set_grouping(True, ROOT)
+        view = TileView(model, ThumbnailCache())
+        view.resize(400, 300)
+        view.set_columns(2)
+        model.set_items(nested())
+        view.relayout()
+        bar = view.verticalScrollBar()
+        bar.resize(11, 300)
+        marks = bar.bar_marks()
+        self.assertEqual(len(marks), len(model.groups))
+        ys = [y for y, _g, _i in marks]
+        self.assertEqual(ys, sorted(ys))
+        # 鼠标在某道刻度上 → 认出这个文件夹；点它 → 滚到那个文件夹
+        y, g, gi = marks[-1]
+        self.assertEqual(bar.mark_at(y), gi)
+        view.jump_to_group(gi)
+        self.assertEqual(bar.value(), min(bar.maximum(), max(0, g.top - 4)))
