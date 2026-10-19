@@ -41,10 +41,10 @@ class WheelTests(unittest.TestCase):
         self.assertEqual(self.w.feed(120), -1)
 
     def test_keeps_stepping_while_scrolling(self):
-        # 持续滚 1 秒（每 50ms 一格）：首格 + 之后约每 REPEAT_S 一部
-        steps = self.flick(20, dt=0.05)
+        # 持续滚 2 秒（每 50ms 一格）：首格 + 之后约每 REPEAT_S 一部
+        steps = self.flick(40, dt=0.05)
         self.assertGreaterEqual(len(steps), 3)
-        self.assertLessEqual(len(steps), int(1.0 / REPEAT_S) + 1)
+        self.assertLessEqual(len(steps), int(2.0 / REPEAT_S) + 1)
 
     def test_pause_starts_new_gesture(self):
         self.assertEqual(self.flick(3), [1])

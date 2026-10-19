@@ -82,6 +82,8 @@ class GroupScrollBar(QScrollBar):
         self._marks_fn = marks_fn
         self._jump_fn = jump_fn
         self._hover_gi = -1
+        self._press_y = None
+        self._press_gi = -1
         self.setMouseTracking(True)
 
     def _groove(self) -> QRect:
@@ -154,13 +156,31 @@ class GroupScrollBar(QScrollBar):
         super().mouseMoveEvent(e)
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            gi = self.mark_at(int(e.position().y()), snap=4)
-            if gi >= 0 and not self.isSliderDown() and not self._on_handle(e.position().toPoint()):
+        """点哪儿就跳到提示里的那个文件夹（与悬停提示一致）。
+
+        点在滑块上：先按普通拖动处理；松开时没怎么移动 = 点击，跳到点中的文件夹
+        （滑块盖住好几个文件夹时，也能点里面的任意一个）。
+        """
+        self._press_y = None
+        if e.button() == Qt.LeftButton and self.bar_marks():
+            pos = e.position().toPoint()
+            gi = self.mark_at(pos.y())
+            if self._on_handle(pos):
+                self._press_y = pos.y()
+                self._press_gi = gi
+            elif gi >= 0:
                 self._jump_fn(gi)
                 e.accept()
                 return
         super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        press_y = getattr(self, "_press_y", None)
+        self._press_y = None
+        super().mouseReleaseEvent(e)
+        if (e.button() == Qt.LeftButton and press_y is not None
+                and abs(int(e.position().y()) - press_y) <= 3 and self._press_gi >= 0):
+            self._jump_fn(self._press_gi)
 
     def leaveEvent(self, e):
         QToolTip.hideText()

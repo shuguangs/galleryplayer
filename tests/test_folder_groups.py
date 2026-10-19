@@ -6,7 +6,7 @@
 import unittest
 from pathlib import Path
 
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, Qt
 
 from app.browser import HEADER_H, MediaModel, TileView
 from app.folder_groups import build_groups, group_index_of_row, is_group_head
@@ -174,3 +174,37 @@ class NestedCollapseTests(unittest.TestCase):
         self.assertEqual(bar.mark_at(y), gi)
         view.jump_to_group(gi)
         self.assertEqual(bar.value(), min(bar.maximum(), max(0, g.top - 4)))
+
+
+class ScrollBarClickTests(unittest.TestCase):
+    """滑块盖住好几个文件夹时，点滑块里的任意文件夹也要跳过去。"""
+
+    def test_click_any_mark_jumps_even_under_handle(self):
+        from PySide6.QtCore import QPointF, QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QApplication
+        model = MediaModel()
+        model.set_grouping(True, ROOT)
+        view = TileView(model, ThumbnailCache())
+        view.resize(400, 300)
+        view.set_columns(2)
+        model.set_items(nested())
+        view.relayout()
+        view.show()
+        QApplication.processEvents()
+        bar = view.verticalScrollBar()
+        jumped = []
+        bar._jump_fn = jumped.append
+
+        def click(y):
+            pt = QPointF(bar.width() / 2, y)
+            for t_ in (QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
+                ev = QMouseEvent(t_, pt, bar.mapToGlobal(pt), Qt.LeftButton,
+                                 Qt.LeftButton if t_ == QEvent.MouseButtonPress else Qt.NoButton,
+                                 Qt.NoModifier)
+                QApplication.sendEvent(bar, ev)
+
+        for y, _g, gi in bar.bar_marks():
+            jumped.clear()
+            click(y + 1)
+            self.assertEqual(jumped, [gi])

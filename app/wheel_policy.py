@@ -14,8 +14,8 @@ from __future__ import annotations
 import time
 
 NOTCH = 120        # 一格滚轮的 angleDelta
-GAP_S = 0.25       # 停顿超过这么久算一次新的滚动
-REPEAT_S = 0.35    # 持续滚动时最多每隔这么久切一部
+GAP_S = 0.4        # 停顿超过这么久算一次新的滚动
+REPEAT_S = 0.6     # 持续滚动时最多每隔这么久切一部
 
 
 class WheelStepper:
