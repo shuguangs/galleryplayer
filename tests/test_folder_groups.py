@@ -115,7 +115,9 @@ class NestedCollapseTests(unittest.TestCase):
 
     def test_virtual_parent_and_totals(self):
         gs = build_groups(nested(), ROOT)
-        self.assertEqual([g.label for g in gs][1:], ["A", "A/B", "A/B/C", "X", "X/Y", "Z"])
+        own = "本文件夹的文件"
+        self.assertEqual([g.label for g in gs][1:],
+                         ["A", own, "A/B", own, "A/B/C", "X", "X/Y", "Z"])
         self.assertEqual(sum(g.count for g in gs), 7)
         by = {g.label: g for g in gs}
         self.assertEqual(by["X"].count, 0)          # 补出来的空标题栏
@@ -208,3 +210,42 @@ class ScrollBarClickTests(unittest.TestCase):
             jumped.clear()
             click(y + 1)
             self.assertEqual(jumped, [gi])
+
+
+class OwnFilesFoldTests(unittest.TestCase):
+    """有子文件夹的文件夹：本层文件单独一条标题栏，可以只折叠本层、子文件夹照常显示。"""
+
+    def setUp(self):
+        self.model = MediaModel()
+        self.model.set_grouping(True, ROOT)
+        self.model.set_items(nested())
+
+    def idx(self, folder, own):
+        for i, g in enumerate(self.model.groups):
+            if g.folder == ROOT / folder and g.own == own:
+                return i
+        raise AssertionError(folder)
+
+    def test_fold_own_files_keeps_subfolders(self):
+        m = self.model
+        m.toggle_group(self.idx("A", True))
+        self.assertTrue(m.row_collapsed(1))                       # A/1.jpg 收起
+        self.assertFalse(m.row_collapsed(2) or m.row_collapsed(3))  # A/B、A/B/C 照常
+        self.assertFalse(m.groups[self.idx("A", False)].folded)
+
+    def test_fold_folder_still_hides_everything(self):
+        m = self.model
+        m.toggle_group(self.idx("A", False))
+        for r in (1, 2, 3):
+            self.assertTrue(m.row_collapsed(r))
+        self.assertEqual(m.groups[self.idx("A", False)].total, 3)
+        self.assertEqual(m.groups[self.idx("A", True)].count, 1)
+        m.expand_row(1)
+        self.assertFalse(m.row_collapsed(1))
+
+    def test_root_files_fold_alone(self):
+        m = self.model
+        m.toggle_group(0)                    # 当前文件夹（打开那层）的文件
+        self.assertTrue(m.row_collapsed(0))
+        self.assertFalse(any(m.row_collapsed(r) for r in range(1, 7)))
+        self.assertEqual(sum(g.count for g in m.groups), 7)

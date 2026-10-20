@@ -25,6 +25,7 @@ class Group:
     depth: int = 0        # 相对打开那层的嵌套深度（根目录与一级子文件夹 = 0）
     hidden: bool = False  # 某个上级文件夹被折叠了：标题栏和内容都不显示
     total: int = 0        # 含所有下级文件夹的文件数
+    own: bool = False     # 有子文件夹的文件夹：它自己（本层）的文件单独成一组，可单独折叠
     # 布局结果（内容坐标，视图填写）
     top: int = 0          # 标题栏顶
     body_top: int = 0     # 第一行文件顶
@@ -97,6 +98,9 @@ def build_groups(items, root: Path | None, collapsed: set[str] | None = None) ->
         raw[-1] = (raw[-1][0], raw[-1][1], len(items))
 
     real = {f for f, _s, _e in raw}
+    has_sub: set[Path] = set()
+    for f in real:
+        has_sub.update(_ancestors(f, root))
     groups: list[Group] = []
     virtual: set[Path] = set()
     for folder, s, e in raw:
@@ -106,16 +110,25 @@ def build_groups(items, root: Path | None, collapsed: set[str] | None = None) ->
                 groups.append(Group(anc, s, s, folder_label(anc, root),
                                     depth=len(_rel_parts(anc, root) or ()) - 1))
         parts = _rel_parts(folder, root)
-        groups.append(Group(folder, s, e, folder_label(folder, root),
-                            depth=max(0, len(parts) - 1) if parts else 0))
+        depth = max(0, len(parts) - 1) if parts else 0
+        if folder in has_sub:
+            # 既有自己的文件又有子文件夹：文件夹标题栏（收起整棵子树）下面，
+            # 本层文件再单独一条标题栏，和子文件夹一样能单独折叠
+            groups.append(Group(folder, s, s, folder_label(folder, root), depth=depth))
+            groups.append(Group(folder, s, e, t("browser.group_own_files"),
+                                depth=depth + 1, own=True))
+        else:
+            groups.append(Group(folder, s, e, folder_label(folder, root), depth=depth))
 
-    by_folder = {g.folder: g for g in groups}
+    by_folder: dict[Path, Group] = {}
+    for g in groups:
+        by_folder.setdefault(g.folder, g)      # 文件夹本身的标题栏（不是本层文件那条）
     for g in groups:
         g.total += g.count
         if g.count:
-            for anc in _ancestors(g.folder, root):
+            for anc in fold_ancestors(g, root):
                 a = by_folder.get(anc)
-                if a is not None:
+                if a is not None and a is not g:
                     a.total += g.count
     apply_fold(groups, collapsed, root)
     return groups
@@ -125,8 +138,19 @@ def apply_fold(groups: list[Group], collapsed: set[str] | None, root: Path | Non
     """按折叠集合刷新每组的 collapsed / hidden（上级折叠 → 整棵子树隐藏）。"""
     keys = collapsed or set()
     for g in groups:
-        g.collapsed = folder_key(g.folder) in keys
-        g.hidden = bool(keys) and any(folder_key(a) in keys for a in _ancestors(g.folder, root))
+        g.collapsed = group_key(g) in keys
+        g.hidden = bool(keys) and any(folder_key(a) in keys for a in fold_ancestors(g, root))
+
+
+def group_key(g: Group) -> str:
+    """折叠状态的键：文件夹完整路径（小写）；本层文件那条加 "|files"。"""
+    return folder_key(g.folder) + ("|files" if g.own else "")
+
+
+def fold_ancestors(g: Group, root: Path | None) -> list[Path]:
+    """折叠了会连带收起 g 的文件夹：所有上级；本层文件那条还包括它自己的文件夹。"""
+    anc = _ancestors(g.folder, root)
+    return anc + [g.folder] if g.own else anc
 
 
 def ancestor_keys(folder: Path, root: Path | None) -> list[str]:

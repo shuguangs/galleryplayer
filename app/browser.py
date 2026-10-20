@@ -41,8 +41,8 @@ from PySide6.QtWidgets import (
 )
 
 from . import theme
-from .folder_groups import (Group, ancestor_keys, apply_fold, build_groups, folder_key,
-                            group_index_of_row)
+from .folder_groups import (Group, apply_fold, build_groups, fold_ancestors, folder_key,
+                            group_index_of_row, group_key)
 from .i18n import t
 from .media import MediaItem, format_duration
 from .thumbs import ThumbnailCache
@@ -316,9 +316,9 @@ class MediaModel(QAbstractTableModel):
         if gi < 0 or not self.groups[gi].folded:
             return
         g = self.groups[gi]
-        self.collapsed.discard(folder_key(g.folder))
-        for k in ancestor_keys(g.folder, self.group_root):
-            self.collapsed.discard(k)
+        self.collapsed.discard(group_key(g))
+        for a in fold_ancestors(g, self.group_root):
+            self.collapsed.discard(folder_key(a))
         apply_fold(self.groups, self.collapsed, self.group_root)
         self.groups_changed.emit(gi)
 
@@ -329,7 +329,7 @@ class MediaModel(QAbstractTableModel):
         new = (not g.collapsed) if collapsed is None else bool(collapsed)
         if new == g.collapsed:
             return
-        key = folder_key(g.folder)
+        key = group_key(g)
         if new:
             self.collapsed.add(key)
         else:
@@ -344,7 +344,7 @@ class MediaModel(QAbstractTableModel):
             if g.collapsed != collapsed:
                 g.collapsed = collapsed
                 changed = True
-            key = folder_key(g.folder)
+            key = group_key(g)
             if collapsed:
                 self.collapsed.add(key)
             else:
